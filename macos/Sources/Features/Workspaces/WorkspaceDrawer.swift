@@ -196,13 +196,6 @@ struct WorkspaceDrawerView: View {
     private var slab: some View {
         ZStack {
             glassBase
-            // Above the glass (it must not touch the material's live render
-            // path), this wash does double duty: it keeps white text legible
-            // on the very transparent `.clear` glass, and it guarantees the
-            // window surface has enough alpha to be *clickable* — the window
-            // server routes clicks through pixels it considers transparent,
-            // so bare clear glass would let clicks fall to the window below.
-            GaiDrawerSlabShape().fill(Color.black.opacity(0.08))
             cardContent
         }
         .frame(width: M.slabWidth, height: ui.cardHeight)
@@ -219,40 +212,27 @@ struct WorkspaceDrawerView: View {
         return workspace.accentColor
     }
 
-    @ViewBuilder
+    /// Flat panel gray instead of Liquid Glass — the glass re-rendered every
+    /// frame while the card height animated, which is what made the expansion
+    /// stutter. A solid fill animates for free.
     private var glassBase: some View {
-        let shape = GaiDrawerSlabShape()
-        if #available(macOS 26.0, *) {
-            shape.fill(Color.clear)
-                .glassEffect(
-                    tintGlass ? .regular.tint(selectedAccent.opacity(0.15)) : .regular,
-                    in: shape)
-                .animation(.easeInOut(duration: 0.3), value: ui.selectedWorkspaceID)
-                .animation(.easeInOut(duration: 0.3), value: tintGlass)
-                // Clip to the silhouette so the glass's own drop shadow (which
-                // spills outside the shape) is trimmed — no dark halo around
-                // the tab. Same fix as the stage tab.
-                .clipShape(shape)
-        } else {
-            shape.fill(.ultraThinMaterial)
-                .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 1))
-        }
+        GaiDrawerSlabShape().fill(Color.gaiPanelGray)
     }
 
     @ViewBuilder
     private var cardContent: some View {
+        // DIAGNOSTIC: editor/explorer content is removed — both expand EMPTY (no
+        // heavy view mounted) so we can watch the bare expansion at two sizes.
+        // Only a back button remains so the expand/retract can be repeated.
         ZStack(alignment: .top) {
-            if ui.editingWorkspaceID == nil {
-                workspaceList
+            if ui.explorerOpen {
+                backButton { ui.explorerOpen = false }
                     .transition(.opacity)
-            } else if ui.editorContentVisible,
-                      let workspace = store.workspace(for: ui.editingWorkspaceID) {
-                // Mounted only *after* the card has finished opening: the heavy
-                // picker (GeometryReader, LazyVGrid, fields) would otherwise be
-                // re-laid-out at every height during the growth, which is what
-                // made expansion stutter while retraction (a light list) stayed
-                // smooth. The card grows empty, then the editor fades in.
-                GaiWorkspaceEditor(workspace: workspace, store: store, ui: ui)
+            } else if ui.editingWorkspaceID != nil {
+                backButton { ui.editingWorkspaceID = nil }
+                    .transition(.opacity)
+            } else {
+                workspaceList
                     .transition(.opacity)
             }
         }
@@ -261,6 +241,23 @@ struct WorkspaceDrawerView: View {
         .padding(.trailing, M.tabWidth + 12)
         .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
         .animation(.easeInOut(duration: 0.28), value: ui.editorContentVisible)
+        .animation(.easeInOut(duration: 0.28), value: ui.explorerOpen)
+    }
+
+    private func backButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .heavy))
+                Text("Done")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: M.headerHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var workspaceList: some View {
@@ -299,6 +296,19 @@ struct WorkspaceDrawerView: View {
                 .foregroundStyle(.white.opacity(0.6))
                 .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
             Spacer(minLength: 0)
+            // Folder: opens the (future) file-explorer panel — a much taller
+            // expansion, for testing the larger window size.
+            Button {
+                ui.explorerOpen = true
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 19, height: 19)
+                    .background(Circle().fill(.white.opacity(0.13)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
             Button {
                 // Create and drop straight into the editor with the name
                 // focused, so a new workspace is named, colored and ready.
@@ -482,6 +492,13 @@ struct GaiDrawerSlabShape: Shape {
 // MARK: - Color
 
 extension Color {
+    /// Flat panel gray, used in place of Liquid Glass for the drawer and stage
+    /// (the live glass re-rendered every frame as a card resized, which made the
+    /// expansion stutter). #1C1C1E — the exact gray of the dadido control panel
+    /// (its `backgroundDark`), and the same as the terminal interior, so the
+    /// whole UI reads as one consistent gray.
+    static let gaiPanelGray = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255)
+
     /// Deterministic accent color derived from a workspace name.
     static func gaiAccent(for name: String) -> Color {
         var hash: UInt64 = 5381

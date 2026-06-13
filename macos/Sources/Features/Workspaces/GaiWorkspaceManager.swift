@@ -29,6 +29,10 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// already-open card instead of fighting the growth animation.
     @Published var editorContentVisible: Bool = false
 
+    /// Whether the (future) file-explorer panel is open. Drives a much taller
+    /// card expansion than the editor — for testing the larger window size.
+    @Published var explorerOpen: Bool = false
+
     /// Whether the terminal stage is slid out (true) or tucked to its
     /// right-edge pull tab (false). Mirrors `isExpanded` for the drawer.
     @Published var isStageExpanded: Bool = false
@@ -753,31 +757,43 @@ final class GaiWorkspaceManager {
         panel.setFrame(open ? openFrame(on: screen) : closedFrame(on: screen), display: true)
     }
 
-    private func cardHeightTarget(editing: Bool) -> CGFloat {
-        let natural = editing
-            ? GaiDrawerMetrics.editorHeight
-            : GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
+    /// Target slab height for the current mode (explorer > editor > list).
+    private func cardHeightTarget() -> CGFloat {
         let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
+        let natural: CGFloat
+        if ui.explorerOpen {
+            natural = explorerNaturalHeight()
+        } else if ui.editingWorkspaceID != nil {
+            natural = GaiDrawerMetrics.editorHeight
+        } else {
+            natural = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
+        }
         return min(natural, cap)
     }
 
+    /// The file-explorer card height: much taller than the editor, but never the
+    /// full screen height like the terminal stage.
+    private func explorerNaturalHeight() -> CGFloat {
+        (targetScreen()?.visibleFrame.height ?? 800) * 0.78
+    }
+
     private func recomputeCardHeight() {
-        // The window stays tall enough for the editor at all times, so opening
-        // the editor never resizes the window (that resize was what made the
-        // expansion janky) — only the SwiftUI slab springs. The slab tracks the
-        // list height unless the editor is currently driving it.
+        // The window stays tall enough for the tallest mode at all times, so
+        // opening the editor/explorer never resizes the window (that resize was
+        // what made the expansion janky) — only the SwiftUI slab springs. The
+        // slab tracks the list height unless a mode is currently driving it.
         panelContentHeight = panelHeightTarget()
-        if ui.editingWorkspaceID == nil {
-            ui.cardHeight = cardHeightTarget(editing: false)
+        if ui.editingWorkspaceID == nil, !ui.explorerOpen {
+            ui.cardHeight = cardHeightTarget()
         }
     }
 
-    /// The window's content height: always the larger of the list and the
-    /// editor, so the editor can grow into it without a window resize.
+    /// The window's content height: the largest of the list, the editor and the
+    /// explorer, so any of them can grow into it without a window resize.
     private func panelHeightTarget() -> CGFloat {
         let list = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
         let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
-        return min(max(list, GaiDrawerMetrics.editorHeight), cap)
+        return min(max(max(list, GaiDrawerMetrics.editorHeight), explorerNaturalHeight()), cap)
     }
 
     /// Enter/leave the workspace editor — the heart of the organic expansion.
@@ -802,7 +818,7 @@ final class GaiWorkspaceManager {
         // only once the card has finished opening.
         ui.editorContentVisible = false
         withAnimation(.gaiCardResize) {
-            ui.cardHeight = cardHeightTarget(editing: editing)
+            ui.cardHeight = cardHeightTarget()
         }
         if editing {
             afterCardResize { self.ui.editorContentVisible = true }
@@ -817,6 +833,15 @@ final class GaiWorkspaceManager {
             panel.makeKeyAndOrderFront(nil)
         } else if let stagePanel, stagePanel.isVisible {
             stagePanel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Open/close the (future) file-explorer panel — a much taller expansion of
+    /// the same drawer card. Same pure SwiftUI slab-height spring as the editor;
+    /// the window is already sized for it (`panelHeightTarget`).
+    private func updateExplorer(open: Bool) {
+        withAnimation(.gaiCardResize) {
+            ui.cardHeight = cardHeightTarget()
         }
     }
 
@@ -926,6 +951,13 @@ final class GaiWorkspaceManager {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] id in self?.updateWorkspaceEditor(editing: id != nil) }
+            .store(in: &cancellables)
+
+        // Grow/shrink the drawer for the (taller) file-explorer panel.
+        ui.$explorerOpen
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] open in self?.updateExplorer(open: open) }
             .store(in: &cancellables)
 
         // Pause the on-stage terminals' rendering for the duration of a slide.

@@ -84,13 +84,9 @@ struct WorkspaceStageView: View {
     private func slab(_ workspace: GaiWorkspace) -> some View {
         ZStack(alignment: .leading) {
             glassBase
-            // Wash over the glass — legibility, and it keeps the tab clickable
-            // (the window server drops clicks through near-transparent pixels).
-            GaiStageSlabShape().fill(Color.black.opacity(0.08))
             // Terminal content covers the card region only (trailing bleed).
-            // The off-screen bleed stays bare glass + wash — the very same
-            // Liquid Glass as the tab — so the open spring's overshoot reveals
-            // a strip of that glass, not a flat-color seam.
+            // The off-screen bleed stays the flat panel gray — so the open
+            // spring's overshoot reveals a strip of that same gray, no seam.
             StageCard(workspace: workspace, ui: ui, splits: splits, onClose: onClose)
                 .clipShape(UnevenRoundedRectangle(
                     topLeadingRadius: D.cardCornerRadius,
@@ -106,20 +102,11 @@ struct WorkspaceStageView: View {
         .overlay(alignment: .leading) { tabHitArea }
     }
 
-    @ViewBuilder
+    /// Flat panel gray instead of Liquid Glass — the glass re-rendered every
+    /// frame while the slab moved/resized, which made the animations stutter. A
+    /// solid fill (matching the drawer and the pane headers) composites for free.
     private var glassBase: some View {
-        let shape = GaiStageSlabShape()
-        if #available(macOS 26.0, *) {
-            // Clip to the silhouette so the glass's own drop shadow (which
-            // spills outside the shape) is trimmed away — no dark halo around
-            // the tab.
-            shape.fill(Color.clear)
-                .glassEffect(.regular, in: shape)
-                .clipShape(shape)
-        } else {
-            shape.fill(.ultraThinMaterial)
-                .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 1))
-        }
+        GaiStageSlabShape().fill(Color.gaiPanelGray)
     }
 
     // MARK: Tab
@@ -419,6 +406,11 @@ private struct GaiPaneView: View {
                     Rectangle().strokeBorder(
                         isFocused && isSplit ? accent.opacity(0.6) : Color.clear,
                         lineWidth: 1.5))
+                // Ghostty's scroll view sets `contentView.clipsToBounds = false`,
+                // so on an elastic overscroll the surface can draw past its top
+                // edge — up over the fixed header. Clip the terminal to its own
+                // frame so the header always stays put.
+                .clipped()
         }
         .onAppear(perform: refreshBranch)
         .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
@@ -464,7 +456,7 @@ private struct GaiPaneView: View {
         }
         .padding(.horizontal, 9)
         .frame(height: GaiStageMetrics.paneHeaderHeight)
-        .background(Color.white.opacity(0.05))
+        .background(Color.gaiPanelGray)
         // Deliberately no tap handling on the header itself: it is app
         // chrome, outside the terminal focus system. Focus moves by
         // clicking inside a terminal.
