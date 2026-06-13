@@ -27,30 +27,35 @@ private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 }
 
-/// Stage hosting view: takes over hit-testing at the root. AppKit's default
-/// hit-test through SwiftUI's nested platform containers misroutes clicks
-/// between panes (clicks in one pane landing in another, erratically across
-/// re-renders). The pane controls and the surfaces have trustworthy window
-/// frames — they match what's rendered — so we resolve clicks against those
-/// directly:
+/// Stage hosting view: takes over hit-testing at the root so header controls
+/// and terminal surfaces are routed deterministically:
 ///
-/// 1. header controls (smallest match wins),
-/// 2. terminal surfaces (frames inset so split dividers keep their grab zone),
+/// 1. header controls (a `GaiClickCatcher.CatcherView`, smallest match wins),
+/// 2. terminal surfaces, resolved via AppKit's native hit-testing
+///    (`super.hitTest`) walked up to the enclosing `SurfaceView` — the same
+///    pipeline Ghostty's own terminal windows use, reliable now that each
+///    split leaf carries a stable `.id()`,
 /// 3. everything else falls back to the normal pipeline.
 ///
-/// One synchronous path, no event monitors, no re-posting: drag/up routing
-/// then follows AppKit's standard tracking of the view chosen at mouse-down.
+/// One synchronous path, no event monitors, no re-posting.
 private final class StageHostingView<Content: View>: FirstMouseHostingView<Content> {
     var surfacesProvider: () -> [Ghostty.SurfaceView] = { [] }
 
-    /// Where a view is actually RENDERED, in this hosting view's coordinate
-    /// space. Measured through the *layer* tree: SwiftUI positions split
-    /// panes with layer transforms (`.offset()`), which `NSView.convert`
-    /// and AppKit hit-testing silently ignore — view frames can be a whole
-    /// pane away from the pixels. Layers always tell the rendered truth.
+    /// Rendered rect of a header control in this hosting view's coordinate
+    /// space, measured through the *layer* tree so it reflects what's drawn.
     private func renderedRect(of view: NSView) -> CGRect? {
         guard let viewLayer = view.layer, let hostLayer = self.layer else { return nil }
         return viewLayer.convert(viewLayer.bounds, to: hostLayer)
+    }
+
+    /// Walk up from an AppKit hit to the terminal surface that contains it.
+    private func enclosingSurface(of view: NSView?) -> Ghostty.SurfaceView? {
+        var cur = view
+        while let c = cur {
+            if let surface = c as? Ghostty.SurfaceView { return surface }
+            cur = c.superview
+        }
+        return nil
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -79,17 +84,17 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
             return bestCatcher.view
         }
 
-        // 2. Terminal surfaces, by rendered position (inset so the split
-        // dividers keep their grab zone).
-        for surface in surfacesProvider() {
-            guard surface.window === window else { continue }
-            if let rect = renderedRect(of: surface),
-               rect.insetBy(dx: 4, dy: 4).contains(local) {
-                return surface
-            }
-        }
-
-        return super.hitTest(point)
+        // 2. Terminal surfaces: defer to AppKit's native hit-testing and
+        // resolve the enclosing surface. Now that each split leaf carries a
+        // stable `.id()`, SwiftUI no longer recycles one pane's platform
+        // container for a different surface, so AppKit routes the click to
+        // the pane actually under the cursor — the same pipeline Ghostty's
+        // own terminal windows rely on. The previous hand-rolled layer-rect
+        // math measured rendered frames itself and misrouted clicks across
+        // re-renders ("casino" selection).
+        let native = super.hitTest(point)
+        if let surface = enclosingSurface(of: native) { return surface }
+        return native
     }
 }
 
@@ -515,7 +520,22 @@ final class GaiWorkspaceManager {
             return workspace.sessions.map(\.surfaceView)
         }
         host.autoresizingMask = [.width, .height]
-        panel.contentView = host
+        // Non-flipped container as the panel's contentView. Ghostty's
+        // per-surface mouse-down monitor focuses a pane via
+        // `window.contentView?.hitTest(location)` where `location` is in the
+        // contentView's OWN coordinates — but `NSView.hitTest` expects
+        // *superview* coordinates. When the contentView is a flipped
+        // `NSHostingView`, the Y axis is inverted, so the monitor focuses the
+        // vertically-opposite pane: clicks in top/bottom splits route to the
+        // wrong pane (left/right are fine, X isn't flipped). A plain,
+        // non-flipped wrapper restores the coordinate match; the flipped
+        // SwiftUI host lives inside it and AppKit still recurses into it
+        // correctly.
+        let wrapper = NSView()
+        wrapper.autoresizesSubviews = true
+        panel.contentView = wrapper
+        host.frame = wrapper.bounds
+        wrapper.addSubview(host)
         self.stagePanel = panel
     }
 
