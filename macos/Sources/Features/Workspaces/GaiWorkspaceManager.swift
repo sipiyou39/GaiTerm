@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import Combine
+import GhosttyKit
 import SwiftUI
 
 /// Transient UI state for the floating workspaces system.
@@ -438,6 +439,18 @@ final class GaiWorkspaceManager {
         }
     }
 
+    /// Toggle rendering for the open workspace's panes via Ghostty's occlusion
+    /// hook (`visible == false` pauses the renderer). Used to freeze the panes
+    /// for the duration of a slide so the rasterized slab can glide without any
+    /// pane re-baking the bitmap underneath it.
+    private func setStageSurfacesVisible(_ visible: Bool) {
+        guard let workspace = store.workspace(for: store.openWorkspaceID) else { return }
+        for session in workspace.sessions {
+            guard let surface = session.surfaceView.surface else { continue }
+            ghostty_surface_set_occlusion(surface, visible)
+        }
+    }
+
     // MARK: Panel
 
     /// The material behind SwiftUI's `glassEffect` is *notification-driven*:
@@ -821,6 +834,18 @@ final class GaiWorkspaceManager {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
+            .store(in: &cancellables)
+
+        // Pause the on-stage terminals' rendering for the duration of a slide.
+        // The slab moves as a rasterized bitmap; if a pane keeps repainting it
+        // re-bakes that bitmap mid-slide, which is what still made the motion
+        // hitch with several busy Claude Code sessions running. Ghostty keeps
+        // reading their PTYs while paused, so they catch up instantly when the
+        // slide settles and rendering resumes.
+        ui.$isSliding
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] sliding in self?.setStageSurfacesVisible(!sliding) }
             .store(in: &cancellables)
 
         // Resize if the workspace count changes, and give any freshly created
