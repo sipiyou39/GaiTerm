@@ -79,6 +79,11 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// Display name (e.g. "Mapbox", "proj-api").
     @Published var name: String
 
+    /// User-chosen accent, stored as an "RRGGBB" hex string. `nil` falls back
+    /// to a stable color derived from the name, so existing workspaces keep
+    /// their look until the user picks one.
+    @Published var colorHex: String?
+
     /// Where new sessions in this workspace start. `nil` means the user's home.
     @Published var defaultDirectory: URL?
 
@@ -94,10 +99,23 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// dividers resize it — exactly like a Ghostty window.
     @Published var surfaceTree: SplitTree<Ghostty.SurfaceView> = .init()
 
-    init(name: String, defaultDirectory: URL? = nil, defaultCommand: String? = nil) {
+    init(
+        name: String,
+        colorHex: String? = nil,
+        defaultDirectory: URL? = nil,
+        defaultCommand: String? = nil
+    ) {
         self.name = name
+        self.colorHex = colorHex
         self.defaultDirectory = defaultDirectory
         self.defaultCommand = defaultCommand
+    }
+
+    /// The resolved accent: the user's chosen color, or a stable color derived
+    /// from the name when none is set.
+    var accentColor: Color {
+        if let colorHex, let color = Color(gaiHex: colorHex) { return color }
+        return .gaiAccent(for: name)
     }
 
     /// The session wrapping the given pane's surface, if any.
@@ -159,11 +177,13 @@ final class GaiWorkspaceStore: ObservableObject {
     @discardableResult
     func createWorkspace(
         name: String,
+        colorHex: String? = nil,
         defaultDirectory: URL? = nil,
         defaultCommand: String? = nil
     ) -> GaiWorkspace {
         let workspace = GaiWorkspace(
             name: name,
+            colorHex: colorHex,
             defaultDirectory: defaultDirectory,
             defaultCommand: defaultCommand)
         workspaces.append(workspace)

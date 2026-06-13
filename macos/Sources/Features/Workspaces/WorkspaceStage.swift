@@ -223,7 +223,7 @@ private struct StageCard: View {
     @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
     @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
 
-    private var accent: Color { .gaiAccent(for: workspace.name) }
+    private var accent: Color { workspace.accentColor }
 
     /// Flat, BridgeMind-style: the terminals ARE the stage. No surrounding
     /// frame, no per-pane cards — panes meet edge to edge on a 1px divider.

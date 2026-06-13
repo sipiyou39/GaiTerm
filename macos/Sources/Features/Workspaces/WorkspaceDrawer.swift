@@ -53,6 +53,11 @@ enum GaiDrawerMetrics {
         return verticalPadding * 2 + headerHeight + headerGap
             + n * rowHeight + (n - 1) * rowSpacing
     }
+
+    /// Fixed card height while the in-drawer workspace editor is open — tall
+    /// enough for the name field, the color picker, the swatch palette and the
+    /// delete action, without ever spilling outside the panel.
+    static let editorHeight: CGFloat = 452
 }
 
 // MARK: - Animations
@@ -63,6 +68,9 @@ extension Animation {
     static let gaiDrawerOpen = Animation.spring(response: 0.5, dampingFraction: 0.78)
     /// Drawer tuck-in: slightly quicker, settles without bounce.
     static let gaiDrawerClose = Animation.spring(response: 0.4, dampingFraction: 0.9)
+    /// The card breathing taller/shorter for the workspace editor — organic,
+    /// a hair of overshoot so it feels alive without jiggling.
+    static let gaiCardResize = Animation.spring(response: 0.46, dampingFraction: 0.84)
 }
 
 // MARK: - Drawer view
@@ -106,7 +114,11 @@ struct WorkspaceDrawerView: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            Color.clear
+            // The window is kept tall enough for the editor at all times so
+            // entering it never resizes the window. This clear filler must not
+            // swallow clicks in that extra transparent area — only the glass
+            // slab is interactive.
+            Color.clear.allowsHitTesting(false)
             slab.offset(x: slide)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -204,7 +216,7 @@ struct WorkspaceDrawerView: View {
         guard let workspace = store.workspace(for: ui.selectedWorkspaceID) else {
             return .white
         }
-        return .gaiAccent(for: workspace.name)
+        return workspace.accentColor
     }
 
     @ViewBuilder
@@ -227,7 +239,31 @@ struct WorkspaceDrawerView: View {
         }
     }
 
+    @ViewBuilder
     private var cardContent: some View {
+        ZStack(alignment: .top) {
+            if ui.editingWorkspaceID == nil {
+                workspaceList
+                    .transition(.opacity)
+            } else if ui.editorContentVisible,
+                      let workspace = store.workspace(for: ui.editingWorkspaceID) {
+                // Mounted only *after* the card has finished opening: the heavy
+                // picker (GeometryReader, LazyVGrid, fields) would otherwise be
+                // re-laid-out at every height during the growth, which is what
+                // made expansion stutter while retraction (a light list) stayed
+                // smooth. The card grows empty, then the editor fades in.
+                GaiWorkspaceEditor(workspace: workspace, store: store, ui: ui)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.vertical, M.verticalPadding)
+        .padding(.leading, M.bleed + 14)
+        .padding(.trailing, M.tabWidth + 12)
+        .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
+        .animation(.easeInOut(duration: 0.28), value: ui.editorContentVisible)
+    }
+
+    private var workspaceList: some View {
         VStack(alignment: .leading, spacing: M.headerGap) {
             header
             VStack(alignment: .leading, spacing: M.rowSpacing) {
@@ -246,15 +282,13 @@ struct WorkspaceDrawerView: View {
                             } else {
                                 store.openWorkspaceID = workspace.id
                             }
-                        })
+                        },
+                        onEdit: { ui.editingWorkspaceID = workspace.id })
                     .frame(height: M.rowHeight)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, M.verticalPadding)
-        .padding(.leading, M.bleed + 14)
-        .padding(.trailing, M.tabWidth + 12)
     }
 
     private var header: some View {
@@ -266,10 +300,14 @@ struct WorkspaceDrawerView: View {
                 .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
             Spacer(minLength: 0)
             Button {
+                // Create and drop straight into the editor with the name
+                // focused, so a new workspace is named, colored and ready.
                 let workspace = store.createWorkspace(
-                    name: "Workspace \(store.workspaces.count + 1)",
+                    name: "",
+                    colorHex: GaiWorkspacePalette.next(after: store.workspaces.count),
                     defaultDirectory: FileManager.default.homeDirectoryForCurrentUser)
                 ui.selectedWorkspaceID = workspace.id
+                ui.editingWorkspaceID = workspace.id
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 9.5, weight: .bold))
@@ -324,10 +362,11 @@ private struct GaiWorkspaceRow: View {
     @ObservedObject var workspace: GaiWorkspace
     let isSelected: Bool
     let onSelect: () -> Void
+    let onEdit: () -> Void
 
     @State private var hovering = false
 
-    private var accent: Color { .gaiAccent(for: workspace.name) }
+    private var accent: Color { workspace.accentColor }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -335,19 +374,29 @@ private struct GaiWorkspaceRow: View {
                 .fill(accent)
                 .frame(width: 7, height: 7)
                 .shadow(color: accent.opacity(isSelected ? 0.8 : 0), radius: 3)
-            Text(workspace.name)
+            Text(workspace.name.isEmpty ? "Untitled" : workspace.name)
                 .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? .white : .white.opacity(0.78))
+                .foregroundStyle(workspace.name.isEmpty
+                    ? .white.opacity(0.4)
+                    : (isSelected ? .white : .white.opacity(0.78)))
                 .shadow(color: .black.opacity(0.3), radius: 1, y: 0.5)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            if let paneCount = workspace.surfaceTree.root?.gaiPaneCount, paneCount > 0 {
-                Text("\(paneCount)")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .padding(.horizontal, 5.5)
-                    .padding(.vertical, 1.5)
-                    .background(Capsule().fill(Color.white.opacity(0.14)))
+            // Edit affordance: appears on hover, opens the in-drawer editor
+            // (rename · color · delete). Its own button so it never triggers
+            // the row's select.
+            if hovering {
+                Button(action: onEdit) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(.white.opacity(0.1)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit workspace")
+                .transition(.opacity)
             }
         }
         .padding(.horizontal, 10)

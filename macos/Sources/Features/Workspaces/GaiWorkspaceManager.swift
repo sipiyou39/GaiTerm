@@ -18,6 +18,17 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// state mid-flight.
     @Published var renamingSession: GaiTerminalSession?
 
+    /// The workspace currently open in the in-drawer editor (rename / color /
+    /// delete), or `nil` when the drawer shows the workspace list. Driving it
+    /// from the model lets the manager grow the card and make the panel
+    /// keyboard-eligible for the editor's text fields.
+    @Published var editingWorkspaceID: GaiWorkspace.ID?
+
+    /// Whether the editor's *content* is shown. The manager flips this on only
+    /// after the card has finished expanding, so the palette settles into an
+    /// already-open card instead of fighting the growth animation.
+    @Published var editorContentVisible: Bool = false
+
     /// Whether the terminal stage is slid out (true) or tucked to its
     /// right-edge pull tab (false). Mirrors `isExpanded` for the drawer.
     @Published var isStageExpanded: Bool = false
@@ -154,6 +165,11 @@ final class GaiWorkspaceManager {
     }()
     private var panel: NSPanel?
     private var stagePanel: NSPanel?
+    /// Height the drawer *window* is sized for. Kept separate from
+    /// `ui.cardHeight` (the SwiftUI slab's animated height) so the editor can
+    /// resize the transparent window invisibly while the visible glass slab
+    /// springs to its new height — see `updateWorkspaceEditor`.
+    private var panelContentHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
     private var cancellables: Set<AnyCancellable> = []
     private var clickOutsideLocal: Any?
     private var clickOutsideGlobal: Any?
@@ -464,11 +480,13 @@ final class GaiWorkspaceManager {
     /// after ordering it front, then swallow every demotion so the material
     /// never falls back to the frozen snapshot.
     private final class FloatingPanel: NSPanel {
-        /// Never key: clicking the drawer must not steal keyboard focus
-        /// from the user's terminals. Mouse events are still delivered
-        /// (see `FirstMouseHostingView`), and the glass material follows
-        /// *main* status, not key status.
-        override var canBecomeKey: Bool { false }
+        /// Normally never key: clicking the drawer must not steal keyboard
+        /// focus from the user's terminals. The one exception is the workspace
+        /// editor, whose name/hex text fields need the keyboard — the manager
+        /// flips this on for the editor's lifetime only. The glass material
+        /// follows *main* status, not key, so this never affects it.
+        var allowsKeyForEditing = false
+        override var canBecomeKey: Bool { allowsKeyForEditing }
         override var canBecomeMain: Bool { true }
 
         /// The material queries this directly on some paths; lie forever.
@@ -701,7 +719,7 @@ final class GaiWorkspaceManager {
         let visible = screen.visibleFrame
         let size = NSSize(
             width: GaiDrawerMetrics.slabWidth + openRightMargin,
-            height: ui.cardHeight + 2 * openVerticalMargin)
+            height: panelContentHeight + 2 * openVerticalMargin)
         return NSRect(
             x: visible.minX - GaiDrawerMetrics.bleed,
             y: visible.midY - size.height / 2,
@@ -735,10 +753,76 @@ final class GaiWorkspaceManager {
         panel.setFrame(open ? openFrame(on: screen) : closedFrame(on: screen), display: true)
     }
 
-    private func recomputeCardHeight() {
-        let natural = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
+    private func cardHeightTarget(editing: Bool) -> CGFloat {
+        let natural = editing
+            ? GaiDrawerMetrics.editorHeight
+            : GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
         let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
-        ui.cardHeight = min(natural, cap)
+        return min(natural, cap)
+    }
+
+    private func recomputeCardHeight() {
+        // The window stays tall enough for the editor at all times, so opening
+        // the editor never resizes the window (that resize was what made the
+        // expansion janky) — only the SwiftUI slab springs. The slab tracks the
+        // list height unless the editor is currently driving it.
+        panelContentHeight = panelHeightTarget()
+        if ui.editingWorkspaceID == nil {
+            ui.cardHeight = cardHeightTarget(editing: false)
+        }
+    }
+
+    /// The window's content height: always the larger of the list and the
+    /// editor, so the editor can grow into it without a window resize.
+    private func panelHeightTarget() -> CGFloat {
+        let list = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
+        let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
+        return min(max(list, GaiDrawerMetrics.editorHeight), cap)
+    }
+
+    /// Enter/leave the workspace editor — the heart of the organic expansion.
+    ///
+    /// The drawer panel is a *transparent* window; only the glass slab inside is
+    /// visible. So resizing the window is invisible — what the eye follows is the
+    /// slab's SwiftUI height. We animate `ui.cardHeight` (the slab height) with a
+    /// spring, and because the slab is centered around the fixed pull tab it
+    /// grows/shrinks from its middle, toward the top *and* the bottom, like one
+    /// panel breathing — never a second panel snapping in.
+    ///
+    /// The window must always be at least as tall as the slab, so:
+    /// - growing: enlarge the window first (invisible), then spring the slab up;
+    /// - shrinking: spring the slab down first, then shrink the window once it
+    ///   settles (mirrors the slide's pixel-identical snap).
+    private func updateWorkspaceEditor(editing: Bool) {
+        // The window is already tall enough for the editor, so this is a *pure*
+        // SwiftUI slab-height spring — no window resize to fight it. Expansion
+        // is therefore the exact mirror of the (lovely) retraction: the centered
+        // slab springs taller/shorter around the fixed pull tab, toward top and
+        // bottom. The editor's content is hidden during the motion and fades in
+        // only once the card has finished opening.
+        ui.editorContentVisible = false
+        withAnimation(.gaiCardResize) {
+            ui.cardHeight = cardHeightTarget(editing: editing)
+        }
+        if editing {
+            afterCardResize { self.ui.editorContentVisible = true }
+        }
+
+        // The editor's text fields need the keyboard; the drawer is otherwise
+        // never key (so it can't steal focus from terminals).
+        guard let panel = panel as? FloatingPanel else { return }
+        panel.allowsKeyForEditing = editing
+        if editing {
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            panel.makeKeyAndOrderFront(nil)
+        } else if let stagePanel, stagePanel.isVisible {
+            stagePanel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Run `work` once the card-resize spring has visually settled.
+    private func afterCardResize(_ work: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     // MARK: Click-outside
@@ -834,6 +918,14 @@ final class GaiWorkspaceManager {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
+            .store(in: &cancellables)
+
+        // Grow the drawer for the editor and make the panel keyboard-eligible
+        // (its text fields need key focus), then shrink back when it closes.
+        ui.$editingWorkspaceID
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] id in self?.updateWorkspaceEditor(editing: id != nil) }
             .store(in: &cancellables)
 
         // Pause the on-stage terminals' rendering for the duration of a slide.
