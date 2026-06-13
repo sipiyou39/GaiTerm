@@ -593,12 +593,15 @@ final class GaiWorkspaceManager {
         let visible = screen.visibleFrame
         let left = visible.minX + GaiDrawerMetrics.cardWidth + GaiDrawerMetrics.tabWidth
             + GaiStageMetrics.drawerGap
-        let height = min(visible.height * 0.9, visible.height - 24)
+        // Fill the whole available height — menu bar to dock (`visibleFrame`
+        // already excludes both). The card's transparent shadow margin lives
+        // inside this frame, so the glass keeps its float without leaving a
+        // dead band above the dock.
         return NSRect(
             x: left,
-            y: visible.midY - height / 2,
+            y: visible.minY,
             width: visible.maxX - 8 - left,
-            height: height)
+            height: visible.height)
     }
 
     // MARK: Geometry

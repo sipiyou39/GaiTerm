@@ -66,7 +66,10 @@ private struct StageCard: View {
         terminalArea
             .background(interiorGray)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .padding(GaiStageMetrics.shadowMargin)
+            // Full available height: the card touches the menu bar and the
+            // dock (the panel frame is the screen's visibleFrame). Only the
+            // sides keep the floating margin.
+            .padding(.horizontal, GaiStageMetrics.shadowMargin)
             .onAppear { splits.ensureFirstSurface(in: workspace) }
             .onChange(of: focusedSurface) { newValue in
                 if newValue != nil { lastFocusedSurface = .init(newValue) }
