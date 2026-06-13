@@ -162,6 +162,7 @@ final class GaiWorkspaceManager {
         }
 
         seedDemoWorkspacesIfNeeded()
+        warmFirstSurfaces()
         recomputeCardHeight()
         ensurePanel()
         snapPanel(open: false)
@@ -411,6 +412,15 @@ final class GaiWorkspaceManager {
         ui.selectedWorkspaceID = store.workspaces.first?.id
     }
 
+    /// Every workspace shows at least one terminal *before* it is ever opened.
+    /// Creating the pane on click instead makes the stage jump as the terminal
+    /// pops in; warming it up (no focus steal) keeps switching instant.
+    private func warmFirstSurfaces() {
+        for workspace in store.workspaces {
+            splits.ensureFirstSurface(in: workspace, focus: false)
+        }
+    }
+
     // MARK: Panel
 
     /// The material behind SwiftUI's `glassEffect` is *notification-driven*:
@@ -577,16 +587,17 @@ final class GaiWorkspaceManager {
 
         if ui.isStageExpanded {
             // Switching workspaces while already out: keep it out, just make
-            // sure the panel matches the (possibly new) open frame.
+            // sure the panel matches the (possibly new) open frame. No slide,
+            // no animation — the content swaps straight to the new workspace.
             snapStagePanel(open: true)
         } else {
             // Slide the stage out from the right edge.
             ui.isStageExpanded = true
         }
 
-        // The drawer's job is done once a workspace is on stage: tuck it
-        // away to free the edge. Its tab stays for switching workspaces.
-        ui.isExpanded = false
+        // The drawer stays open: selecting a workspace only ever *shows* it.
+        // The only ways to fold the panels are the pull tab or a click
+        // outside both panels.
     }
 
     private func hideStage() {
@@ -795,11 +806,15 @@ final class GaiWorkspaceManager {
             .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
             .store(in: &cancellables)
 
-        // Resize if the workspace count changes.
+        // Resize if the workspace count changes, and give any freshly created
+        // workspace its terminal right away (so opening it never jumps).
         store.$workspaces
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.refreshGeometry() }
+            .sink { [weak self] _ in
+                self?.refreshGeometry()
+                self?.warmFirstSurfaces()
+            }
             .store(in: &cancellables)
 
         // Show/hide the stage when a workspace is opened/closed.

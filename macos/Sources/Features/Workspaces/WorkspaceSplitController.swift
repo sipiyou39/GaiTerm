@@ -121,11 +121,16 @@ final class GaiSplitController {
 
     /// Make sure the workspace shows a terminal: called when the Scène
     /// opens a workspace. Creates the first pane if the tree is empty.
-    func ensureFirstSurface(in workspace: GaiWorkspace) {
+    ///
+    /// Warm-up (`focus: false`) pre-creates the pane the moment a workspace
+    /// exists, so opening or switching to it never has to spawn one on the
+    /// fly — that lazy spawn made the stage visibly jump as the pane popped
+    /// in. Warm-up must not steal focus from the user's current terminal.
+    func ensureFirstSurface(in workspace: GaiWorkspace, focus shouldFocus: Bool = true) {
         guard workspace.surfaceTree.isEmpty else { return }
         guard let view = makeSurface(for: workspace, baseConfig: nil) else { return }
         workspace.surfaceTree = SplitTree(view: view)
-        focus(view)
+        if shouldFocus { focus(view) }
     }
 
     /// Split the given surface (or the workspace's first pane when nil —
