@@ -231,30 +231,18 @@ final class GaiSplitController {
         newSplit(in: workspace, at: oldView, direction: splitDirection, baseConfig: config)
     }
 
-    /// Close a pane (header ✗ button), confirming when the surface says its
-    /// process needs it.
+    /// Close a pane (header ✗ button). No confirmation, ever: this is a
+    /// floating, always-on-top stage, so a modal `NSAlert` would open *behind*
+    /// the status-bar-level panel and silently block the close — the pane would
+    /// just refuse to die with an invisible dialog waiting offscreen. Clicking
+    /// our ✗ closes the terminal, full stop. Ghostty's own confirm-close
+    /// machinery is deliberately bypassed.
     func closePane(in workspace: GaiWorkspace, surface: Ghostty.SurfaceView) {
-        removePane(in: workspace, surface: surface, needsConfirm: surface.needsConfirmQuit)
+        removePane(in: workspace, surface: surface)
     }
 
-    private func removePane(
-        in workspace: GaiWorkspace,
-        surface: Ghostty.SurfaceView,
-        needsConfirm: Bool
-    ) {
+    private func removePane(in workspace: GaiWorkspace, surface: Ghostty.SurfaceView) {
         guard let node = workspace.surfaceTree.root?.node(view: surface) else { return }
-
-        if needsConfirm {
-            let alert = NSAlert()
-            alert.messageText = "Close terminal?"
-            alert.informativeText =
-                "The terminal still has a running process. " +
-                "If you close it, the process will be killed."
-            alert.addButton(withTitle: "Close")
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .warning
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
 
         let newTree = workspace.surfaceTree.removing(node)
         workspace.surfaceTree = newTree
@@ -270,10 +258,7 @@ final class GaiSplitController {
     @objc private func didRequestCloseSurface(_ notification: Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard let workspace = workspace(containing: target) else { return }
-        removePane(
-            in: workspace,
-            surface: target,
-            needsConfirm: (notification.userInfo?["process_alive"] as? Bool) ?? false)
+        removePane(in: workspace, surface: target)
     }
 
     @objc private func didRequestToggleZoom(_ notification: Notification) {
