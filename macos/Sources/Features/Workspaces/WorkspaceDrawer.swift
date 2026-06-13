@@ -217,6 +217,10 @@ struct WorkspaceDrawerView: View {
                     in: shape)
                 .animation(.easeInOut(duration: 0.3), value: ui.selectedWorkspaceID)
                 .animation(.easeInOut(duration: 0.3), value: tintGlass)
+                // Clip to the silhouette so the glass's own drop shadow (which
+                // spills outside the shape) is trimmed — no dark halo around
+                // the tab. Same fix as the stage tab.
+                .clipShape(shape)
         } else {
             shape.fill(.ultraThinMaterial)
                 .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 1))
@@ -232,12 +236,14 @@ struct WorkspaceDrawerView: View {
                         workspace: workspace,
                         isSelected: workspace.id == ui.selectedWorkspaceID,
                         onSelect: {
-                            // Clicking the workspace already on stage tucks
-                            // it away; any other brings it on stage.
+                            // Selecting a workspace always shows it — it never
+                            // tucks it away (the right-edge tab does that).
+                            // Re-selecting the one already on stage just
+                            // re-expands it if it was tucked behind its tab.
+                            ui.selectedWorkspaceID = workspace.id
                             if store.openWorkspaceID == workspace.id {
-                                store.openWorkspaceID = nil
+                                ui.isStageExpanded = true
                             } else {
-                                ui.selectedWorkspaceID = workspace.id
                                 store.openWorkspaceID = workspace.id
                             }
                         })

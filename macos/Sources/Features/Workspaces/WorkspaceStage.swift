@@ -109,7 +109,12 @@ struct WorkspaceStageView: View {
     private var glassBase: some View {
         let shape = GaiStageSlabShape()
         if #available(macOS 26.0, *) {
-            shape.fill(Color.clear).glassEffect(.regular, in: shape)
+            // Clip to the silhouette so the glass's own drop shadow (which
+            // spills outside the shape) is trimmed away — no dark halo around
+            // the tab.
+            shape.fill(Color.clear)
+                .glassEffect(.regular, in: shape)
+                .clipShape(shape)
         } else {
             shape.fill(.ultraThinMaterial)
                 .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 1))
