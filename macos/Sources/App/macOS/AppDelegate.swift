@@ -98,6 +98,10 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
+    /// GaiTerm's floating workspaces system: the always-on-top panel hosting
+    /// the workspace handles (Repos), Aperçu, and Scène.
+    private lazy var gaiWorkspaceManager = GaiWorkspaceManager(ghostty: ghostty)
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -211,6 +215,11 @@ class AppDelegate: NSObject,
 
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
+
+        // Bring up the floating workspaces overlay. We do this here (not gated on
+        // activation) because an always-on-top overlay should appear on launch
+        // regardless of whether we're the frontmost app.
+        gaiWorkspaceManager.start()
 
         // Start our update checker.
         updateController.startUpdater()
@@ -351,10 +360,32 @@ class AppDelegate: NSObject,
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
-                undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
-                undoManager.enableUndoRegistration()
+                gaiWorkspaceManager.start()
             }
+        }
+    }
+
+    private func presentInitialTerminalStackLauncher() {
+        TerminalStackLaunchPanel.present(defaultCount: 3) { [weak self] count in
+            guard let self else { return }
+            self.createInitialTerminalStack(count: count)
+        }
+    }
+
+    private func createInitialTerminalStack(count rawCount: Int) {
+        let count = min(max(rawCount, 1), 8)
+
+        undoManager.disableUndoRegistration()
+        let controllers = (0..<count).map { _ in
+            TerminalController.newWindow(self.ghostty)
+        }
+        undoManager.enableUndoRegistration()
+
+        if count == 1 {
+            controllers.first?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            TerminalStackManager.shared.collapseWhenReady(controllers)
         }
     }
 
@@ -379,13 +410,13 @@ class AppDelegate: NSObject,
         // NOTE(mitchellh): I don't think we need this check at all anymore. I'm keeping it
         // here because I don't want to remove it in a patch release cycle but we should
         // target removing it soon.
-        if (windows.allSatisfy { !$0.isVisible }) {
+        if (windows.allSatisfy { !$0.isVisible }) && !TerminalStackManager.shared.hasCollapsedTerminals {
             return .terminateNow
         }
 
         // If the user is shutting down, restarting, or logging out, we don't confirm quit.
         why: if let event = NSAppleEventManager.shared().currentAppleEvent {
-            // If all Ghostty windows are in the background (i.e. you Cmd-Q from the Cmd-Tab
+            // If all GaiTerm windows are in the background (i.e. you Cmd-Q from the Cmd-Tab
             // view), then this is null. I don't know why (pun intended) but we have to
             // guard against it.
             guard let keyword = AEKeyword("why?") else { break why }
@@ -486,7 +517,7 @@ class AppDelegate: NSObject,
             // may want to show this as a sheet on the focused window (especially if we're
             // opening a tab). I'm not sure.
             let alert = NSAlert()
-            alert.messageText = "Allow Ghostty to execute \"\(filename)\"?"
+            alert.messageText = "Allow GaiTerm to execute \"\(filename)\"?"
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Cancel")
             alert.alertStyle = .warning
@@ -925,6 +956,10 @@ class AppDelegate: NSObject,
 
     // MARK: - IB Actions
 
+    @IBAction func openGaiSettings(_ sender: Any?) {
+        GaiSettingsWindowController.shared.show()
+    }
+
     @IBAction func openConfig(_ sender: Any?) {
         ghostty.openConfig()
     }
@@ -971,7 +1006,7 @@ class AppDelegate: NSObject,
         quickController.toggle()
     }
 
-    /// Toggles visibility of all Ghosty Terminal windows. When hidden, activates Ghostty as the frontmost application
+    /// Toggles visibility of all GaiTerm Terminal windows. When hidden, activates GaiTerm as the frontmost application
     @IBAction func toggleVisibility(_ sender: Any) {
         // If we have focus, then we hide all windows.
         if NSApp.isActive {
@@ -1245,7 +1280,7 @@ extension AppDelegate {
                 let alert = NSAlert()
                 alert.messageText = "Failed to Set Default Terminal"
                 alert.informativeText = """
-                Ghostty could not be set as the default terminal application.
+                GaiTerm could not be set as the default terminal application.
 
                 Error: \(error.localizedDescription)
                 """
@@ -1307,7 +1342,7 @@ extension AppDelegate {
         if controllersNeedConfirmation.count == 1 {
             Task {
                 let response = await controllersNeedConfirmation[0].confirmCloseAsync(
-                    messageText: "Quit Ghostty?",
+                    messageText: "Quit GaiTerm?",
                     informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
                     confirmButtonTitle: "Terminate",
                 )
@@ -1345,7 +1380,7 @@ extension AppDelegate {
         Task {
             for controller in controllers {
                 let response = await controller.confirmCloseAsync(
-                    messageText: "Quit Ghostty?",
+                    messageText: "Quit GaiTerm?",
                     informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
                     confirmButtonTitle: "Terminate",
                 )

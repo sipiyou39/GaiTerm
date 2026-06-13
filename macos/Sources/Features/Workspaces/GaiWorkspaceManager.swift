@@ -1,0 +1,719 @@
+#if os(macOS)
+import AppKit
+import Combine
+import SwiftUI
+
+/// Transient UI state for the floating workspaces system.
+final class GaiWorkspaceUIModel: ObservableObject {
+    /// Whether the drawer is open. Toggled by the pull tab.
+    @Published var isExpanded: Bool = false
+    /// The workspace selected in the drawer.
+    @Published var selectedWorkspaceID: GaiWorkspace.ID?
+    /// Current card height (rows + chrome, capped to the screen). Owned by
+    /// the manager so the panel frames and the SwiftUI slab always agree.
+    @Published var cardHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
+    /// The pane session whose name is being edited inline. Lives in the
+    /// model — not in any pane view — so no re-render can drop the editing
+    /// state mid-flight.
+    @Published var renamingSession: GaiTerminalSession?
+}
+
+/// `NSHostingView` that accepts the first mouse click, so a single click on
+/// the (non-key) floating panel registers immediately.
+private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    required init(rootView: Content) { super.init(rootView: rootView) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+}
+
+/// Stage hosting view: takes over hit-testing at the root. AppKit's default
+/// hit-test through SwiftUI's nested platform containers misroutes clicks
+/// between panes (clicks in one pane landing in another, erratically across
+/// re-renders). The pane controls and the surfaces have trustworthy window
+/// frames — they match what's rendered — so we resolve clicks against those
+/// directly:
+///
+/// 1. header controls (smallest match wins),
+/// 2. terminal surfaces (frames inset so split dividers keep their grab zone),
+/// 3. everything else falls back to the normal pipeline.
+///
+/// One synchronous path, no event monitors, no re-posting: drag/up routing
+/// then follows AppKit's standard tracking of the view chosen at mouse-down.
+private final class StageHostingView<Content: View>: FirstMouseHostingView<Content> {
+    var surfacesProvider: () -> [Ghostty.SurfaceView] = { [] }
+
+    /// Where a view is actually RENDERED, in this hosting view's coordinate
+    /// space. Measured through the *layer* tree: SwiftUI positions split
+    /// panes with layer transforms (`.offset()`), which `NSView.convert`
+    /// and AppKit hit-testing silently ignore — view frames can be a whole
+    /// pane away from the pixels. Layers always tell the rendered truth.
+    private func renderedRect(of view: NSView) -> CGRect? {
+        guard let viewLayer = view.layer, let hostLayer = self.layer else { return nil }
+        return viewLayer.convert(viewLayer.bounds, to: hostLayer)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview else { return super.hitTest(point) }
+        // The hit point in our own (flipped) coordinate space — the same
+        // space `renderedRect` reports in.
+        let local = convert(point, from: superview)
+
+        // 1. Header controls: smallest rendered match wins.
+        var bestCatcher: (view: NSView, area: CGFloat)?
+        func walk(_ view: NSView) {
+            if let catcher = view as? GaiClickCatcher.CatcherView,
+               !catcher.isHidden,
+               catcher.bounds.width <= 320, catcher.bounds.height <= 48,
+               let rect = renderedRect(of: catcher),
+               rect.contains(local) {
+                let area = rect.width * rect.height
+                if bestCatcher == nil || area < bestCatcher!.area {
+                    bestCatcher = (catcher, area)
+                }
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(self)
+        if let bestCatcher {
+            return bestCatcher.view
+        }
+
+        // 2. Terminal surfaces, by rendered position (inset so the split
+        // dividers keep their grab zone).
+        for surface in surfacesProvider() {
+            guard surface.window === window else { continue }
+            if let rect = renderedRect(of: surface),
+               rect.insetBy(dx: 4, dy: 4).contains(local) {
+                return surface
+            }
+        }
+
+        return super.hitTest(point)
+    }
+}
+
+/// Owns the single always-visible floating panel hosting the workspaces
+/// drawer: a Liquid Glass slab (card + pull tab in one shape) welded to the
+/// left screen edge.
+///
+/// The panel itself is never animated — window-frame animation is choppy and
+/// forces the glass to re-sample its backdrop on every main-thread frame.
+/// Instead the slab slides inside the panel with a GPU-composited SwiftUI
+/// spring (see `WorkspaceDrawerView`), and the panel just *snaps* between two
+/// frames at pixel-identical moments:
+///
+/// - open frame: the full drawer, card flush with the screen edge;
+/// - resting closed frame: shrunk tight around the peeking tab, with the card
+///   region off-screen to the left, so the panel never sits as an invisible
+///   click-blocking layer over other apps.
+final class GaiWorkspaceManager {
+    let store: GaiWorkspaceStore
+    let ui = GaiWorkspaceUIModel()
+
+    private let ghostty: Ghostty.App
+    private(set) lazy var splits: GaiSplitController = {
+        let controller = GaiSplitController(store: store, ghostty: ghostty)
+        controller.onTreeDidEmpty = { [weak self] workspace in
+            if self?.store.openWorkspaceID == workspace.id {
+                self?.store.openWorkspaceID = nil
+            }
+        }
+        return controller
+    }()
+    private var panel: NSPanel?
+    private var stagePanel: NSPanel?
+    private var cancellables: Set<AnyCancellable> = []
+    private var clickOutsideLocal: Any?
+    private var clickOutsideGlobal: Any?
+
+    /// Transparent margins around the slab in the open frame so the glass can
+    /// cast its light and shadow without being clipped at the window edge.
+    private let openRightMargin: CGFloat = 40
+    private let openVerticalMargin: CGFloat = 32
+    /// Margin around the tab in the resting closed frame.
+    private let closedMargin: CGFloat = 14
+
+    init(ghostty: Ghostty.App) {
+        self.ghostty = ghostty
+        self.store = GaiWorkspaceStore(ghostty: ghostty)
+    }
+
+    // MARK: Lifecycle
+
+    func start() {
+        // Idempotent: launch can reach this from several paths.
+        if let panel {
+            panel.orderFrontRegardless()
+            return
+        }
+
+        seedDemoWorkspacesIfNeeded()
+        recomputeCardHeight()
+        ensurePanel()
+        snapPanel(open: false)
+        panel?.orderFrontRegardless()
+        (panel as? FloatingPanel)?.latchMaterialActive()
+        registerObservers()
+
+        if ProcessInfo.processInfo.environment["GAI_AUTOEXPAND"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.ui.isExpanded = true
+            }
+        }
+        // Reproduces the exact reported scenario end to end: focus pane B,
+        // synthesize a real mouse click (through NSApp's event queue, local
+        // monitors and all) on pane A's rename zone, so the inline editor
+        // must appear while B keeps focus.
+        if ProcessInfo.processInfo.environment["GAI_CLICKTEST"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                self?.runRenameClickTest()
+            }
+        }
+
+        if let autostage = ProcessInfo.processInfo.environment["GAI_AUTOSTAGE"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, let first = self.store.workspaces.first else { return }
+                self.ui.selectedWorkspaceID = first.id
+                self.store.openWorkspaceID = first.id
+                // N panes for testing: the first comes from opening the
+                // stage, the rest from alternating splits.
+                let extra = max((Int(autostage) ?? 1) - 1, 0)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    for i in 0..<extra {
+                        self.splits.newSplit(
+                            in: first,
+                            at: nil,
+                            direction: i.isMultiple(of: 2) ? .right : .down)
+                    }
+                }
+            }
+        }
+    }
+
+    private func runRenameClickTest() {
+        guard let stagePanel,
+              let workspace = store.workspace(for: store.openWorkspaceID),
+              workspace.sessions.count >= 2,
+              let contentView = stagePanel.contentView
+        else {
+            NSLog("GAICLICKTEST preconditions failed")
+            return
+        }
+        let renameTarget = workspace.sessions[0]
+        let focusTarget = workspace.sessions[1]
+        NSLog("GAICLICKTEST focusing %@, will click title of %@",
+              focusTarget.name, renameTarget.name)
+        Ghostty.moveFocus(to: focusTarget.surfaceView)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            // Pane A is top-left: its title block sits a few points into the
+            // header band. (Top-left origin → AppKit bottom-left origin.)
+            let topLeftPoint = CGPoint(
+                x: GaiStageMetrics.shadowMargin + 35,
+                y: GaiStageMetrics.shadowMargin + GaiStageMetrics.paneHeaderHeight / 2)
+            let windowPoint = NSPoint(
+                x: topLeftPoint.x,
+                y: contentView.bounds.height - topLeftPoint.y)
+            NSLog("GAICLICKTEST clicking title of %@ at window=%@",
+                  renameTarget.name, NSStringFromPoint(windowPoint))
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(
+                    with: type,
+                    location: windowPoint,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: stagePanel.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1) {
+                    NSApp.postEvent(event, atStart: false)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                let editing = self.ui.renamingSession === renameTarget
+                NSLog("GAICLICKTEST test1 (title click opens rename): %@",
+                      editing ? "PASS" : "FAIL")
+                self.ui.renamingSession = nil
+                self.runTerminalClickTest(renameTarget: renameTarget)
+            }
+        }
+    }
+
+    /// Test 3: with 4 panes, a click in each quadrant must focus THAT pane,
+    /// deterministically. Also dumps the AppKit frames of every surface and
+    /// helper view to expose any overlap.
+    private func runQuadrantFocusTest() {
+        guard let stagePanel,
+              let contentView = stagePanel.contentView,
+              let workspace = store.workspace(for: store.openWorkspaceID)
+        else { return }
+
+        // Frame dump: who actually covers what, in window coordinates.
+        func dump(_ view: NSView) {
+            let cls = String(describing: type(of: view))
+            if cls.contains("SurfaceView") || cls.contains("AsserterView")
+                || cls.contains("CatcherView") {
+                NSLog("GAIDUMP %@ frame=%@", cls,
+                      NSStringFromRect(view.convert(view.bounds, to: nil)))
+            }
+            view.subviews.forEach(dump)
+        }
+        dump(contentView)
+
+        let bounds = contentView.bounds
+        let quadrants: [(String, NSPoint)] = [
+            ("top-left", NSPoint(x: bounds.width * 0.25, y: bounds.height * 0.70)),
+            ("top-right", NSPoint(x: bounds.width * 0.75, y: bounds.height * 0.70)),
+            ("bottom-left", NSPoint(x: bounds.width * 0.25, y: bounds.height * 0.30)),
+            ("bottom-right", NSPoint(x: bounds.width * 0.75, y: bounds.height * 0.30)),
+        ]
+
+        func sessionName(of responder: NSResponder?) -> String {
+            for session in workspace.sessions {
+                if responder === session.surfaceView { return session.name }
+                if let view = responder as? NSView,
+                   view.isDescendant(of: session.surfaceView) {
+                    return session.name
+                }
+            }
+            return String(describing: type(of: responder as Any))
+        }
+
+        func clickQuadrant(_ index: Int) {
+            guard index < quadrants.count else {
+                self.runTitleClickRetest()
+                return
+            }
+            let (label, point) = quadrants[index]
+            // Who would AppKit hit-testing give this click to?
+            if let frameView = contentView.superview {
+                let hit = frameView.hitTest(contentView.convert(point, to: frameView))
+                NSLog("GAICLICKTEST quadrant %@ hitTest -> %@ frame=%@",
+                      label,
+                      String(describing: type(of: hit as Any)),
+                      hit.map { NSStringFromRect($0.convert($0.bounds, to: nil)) } ?? "nil")
+            }
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: stagePanel.windowNumber, context: nil,
+                    eventNumber: 0, clickCount: 1, pressure: 1) {
+                    NSApp.postEvent(event, atStart: false)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                NSLog("GAICLICKTEST quadrant %@ (%@) -> focused %@",
+                      label, NSStringFromPoint(point),
+                      sessionName(of: stagePanel.firstResponder))
+                clickQuadrant(index + 1)
+            }
+        }
+        clickQuadrant(0)
+    }
+
+    /// Test 2: a click INSIDE terminal A must reach A and focus it.
+    private func runTerminalClickTest(renameTarget: GaiTerminalSession) {
+        guard let stagePanel else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard self != nil else { return }
+            // Aim at the actual center of A's surface, wherever the layout
+            // put it.
+            let frame = renameTarget.surfaceView.convert(
+                renameTarget.surfaceView.bounds, to: nil)
+            let windowPoint = NSPoint(x: frame.midX, y: frame.midY)
+            NSLog("GAICLICKTEST test2: clicking inside terminal A at %@",
+                  NSStringFromPoint(windowPoint))
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(
+                    with: type,
+                    location: windowPoint,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: stagePanel.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1) {
+                    NSApp.postEvent(event, atStart: false)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                let responder = stagePanel.firstResponder
+                let focusedA = (responder as? NSView)?
+                    .isDescendant(of: renameTarget.surfaceView) ?? false
+                    || responder === renameTarget.surfaceView
+                NSLog("GAICLICKTEST test2 (terminal click focuses A): %@",
+                      focusedA ? "PASS" : "FAIL")
+                self?.runQuadrantFocusTest()
+            }
+        }
+    }
+
+    /// Test 4: probe a matrix of points around the vanishing zone — the
+    /// title click at {55, H-32} never reaches the event monitor while
+    /// other points do. Map the dead zone.
+    private func runTitleClickRetest() {
+        guard let stagePanel,
+              let contentView = stagePanel.contentView
+        else { return }
+        let height = contentView.bounds.height
+        let probes: [(String, NSPoint)] = [
+            ("title-A", NSPoint(x: 55, y: height - 32.5)),
+            ("same-y-x100", NSPoint(x: 100, y: height - 32.5)),
+            ("same-y-x300", NSPoint(x: 300, y: height - 32.5)),
+            ("same-x-lower", NSPoint(x: 55, y: height - 60)),
+            ("title-D", NSPoint(x: 410, y: height - 32.5)),
+        ]
+        func probe(_ index: Int) {
+            guard index < probes.count else { return }
+            let (label, point) = probes[index]
+            NSLog("GAICLICKTEST probe %@ posting at %@", label, NSStringFromPoint(point))
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: stagePanel.windowNumber, context: nil,
+                    eventNumber: 0, clickCount: 1, pressure: 1) {
+                    NSApp.postEvent(event, atStart: false)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                self?.ui.renamingSession = nil
+                probe(index + 1)
+            }
+        }
+        probe(0)
+    }
+
+    private func seedDemoWorkspacesIfNeeded() {
+        guard store.workspaces.isEmpty else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        for name in ["Mapbox", "proj-api", "MCC", "BridgeBoard", "Mux", "Atlas", "Vela"] {
+            store.createWorkspace(name: name, defaultDirectory: home)
+        }
+        ui.selectedWorkspaceID = store.workspaces.first?.id
+    }
+
+    // MARK: Panel
+
+    /// The material behind SwiftUI's `glassEffect` is *notification-driven*:
+    /// it starts in its inactive state — a static behind-window snapshot
+    /// instead of live compositing — and is only promoted to the live state
+    /// when its window becomes key/main. A non-activating panel that can't
+    /// become key is never promoted, so the glass stays frozen forever.
+    ///
+    /// The fix (drawn from the dadido mascot panel, whose glass is live) is a
+    /// one-shot latch: allow promotion, make the panel key+main once right
+    /// after ordering it front, then swallow every demotion so the material
+    /// never falls back to the frozen snapshot.
+    private final class FloatingPanel: NSPanel {
+        /// Never key: clicking the drawer must not steal keyboard focus
+        /// from the user's terminals. Mouse events are still delivered
+        /// (see `FirstMouseHostingView`), and the glass material follows
+        /// *main* status, not key status.
+        override var canBecomeKey: Bool { false }
+        override var canBecomeMain: Bool { true }
+
+        /// The material queries this directly on some paths; lie forever.
+        override var isMainWindow: Bool { true }
+
+        /// Deliberately not calling super (which posts the resign-main
+        /// notification the material listens to — it would demote the glass
+        /// back to its frozen snapshot state when the user clicks another
+        /// window). `resignKey` is left untouched: the panel is never key,
+        /// and swallowing it corrupts AppKit's key-window bookkeeping.
+        override func resignMain() {}
+
+        /// Promote once so `didBecomeMain` fires and the glass material
+        /// switches to live behind-window compositing; the swallowed
+        /// `resignMain` then keeps it there forever.
+        func latchMaterialActive() {
+            makeMain()
+        }
+    }
+
+    private func ensurePanel() {
+        guard panel == nil else { return }
+        let panel = FloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 400),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+        panel.level = .statusBar
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
+        ]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+
+        let drawer = WorkspaceDrawerView(
+            store: store,
+            ui: ui,
+            onWillOpen: { [weak self] in self?.snapPanel(open: true) },
+            onDidClose: { [weak self] in self?.snapPanel(open: false) })
+        let host = FirstMouseHostingView(rootView: drawer)
+        host.autoresizingMask = [.width, .height]
+        panel.contentView = host
+        self.panel = panel
+    }
+
+    // MARK: Stage panel
+
+    /// Hosts the terminals of the open workspace. Unlike the drawer it can
+    /// become key — the user types into its terminals — so the glass material
+    /// promotes itself naturally on the first click; the swallowed
+    /// `resignMain` then keeps it live forever (same recipe as the drawer).
+    private final class StagePanel: NSPanel {
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { true }
+        override var isMainWindow: Bool { true }
+        override func resignMain() {}
+    }
+
+    private func ensureStagePanel() {
+        guard stagePanel == nil else { return }
+        let panel = StagePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        panel.level = .statusBar
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
+        ]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+        // Dark rendition always: the terminals' screen-blended text needs a
+        // dark frosted backdrop to stay readable over bright content.
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        let stage = WorkspaceStageView(
+            store: store,
+            ui: ui,
+            ghostty: ghostty,
+            splits: splits,
+            onClose: { [weak self] in self?.store.openWorkspaceID = nil })
+        let host = StageHostingView(rootView: stage)
+        host.surfacesProvider = { [weak self] in
+            guard let self,
+                  let workspace = self.store.workspace(for: self.store.openWorkspaceID)
+            else { return [] }
+            return workspace.sessions.map(\.surfaceView)
+        }
+        host.autoresizingMask = [.width, .height]
+        panel.contentView = host
+        self.stagePanel = panel
+    }
+
+    private func showStage() {
+        ensureStagePanel()
+        guard let stagePanel, let screen = targetScreen() else { return }
+        let wasVisible = stagePanel.isVisible
+        stagePanel.setFrame(stageFrame(on: screen), display: true)
+        stagePanel.orderFrontRegardless()
+        // Opening a workspace means "I want to type in a terminal now":
+        // bring keyboard focus to the stage so ⌘D & friends work right away.
+        stagePanel.makeKeyAndOrderFront(nil)
+        stagePanel.makeMain()
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if let workspace = store.workspace(for: store.openWorkspaceID) {
+            splits.ensureFirstSurface(in: workspace)
+            if let leaf = workspace.surfaceTree.root?.leftmostLeaf() {
+                DispatchQueue.main.async { Ghostty.moveFocus(to: leaf) }
+            }
+        }
+
+        // Fade in on first appearance only — switching workspaces while
+        // visible just swaps the content.
+        if !wasVisible {
+            stagePanel.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                stagePanel.animator().alphaValue = 1
+            }
+        }
+
+        // The drawer's job is done once a workspace is on stage: tuck it
+        // away to free the edge. Its tab stays for switching workspaces.
+        ui.isExpanded = false
+    }
+
+    private func hideStage() {
+        guard let stagePanel, stagePanel.isVisible else { return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            stagePanel.animator().alphaValue = 0
+        }, completionHandler: {
+            stagePanel.orderOut(nil)
+            stagePanel.alphaValue = 1
+        })
+    }
+
+    /// To the right of the open drawer, with a deliberate gap — the stage
+    /// floats as its own layer, never glued to the drawer.
+    private func stageFrame(on screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        let left = visible.minX + GaiDrawerMetrics.cardWidth + GaiDrawerMetrics.tabWidth
+            + GaiStageMetrics.drawerGap
+        let height = min(visible.height * 0.9, visible.height - 24)
+        return NSRect(
+            x: left,
+            y: visible.midY - height / 2,
+            width: visible.maxX - 8 - left,
+            height: height)
+    }
+
+    // MARK: Geometry
+
+    /// The drawer lives on the primary display (the one with the menu bar).
+    private func targetScreen() -> NSScreen? {
+        NSScreen.screens.first
+    }
+
+    /// Open: the slab's bleed hangs off-screen, card flush with the edge,
+    /// margins around it for glass shadow spill.
+    private func openFrame(on screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        let size = NSSize(
+            width: GaiDrawerMetrics.slabWidth + openRightMargin,
+            height: ui.cardHeight + 2 * openVerticalMargin)
+        return NSRect(
+            x: visible.minX - GaiDrawerMetrics.bleed,
+            y: visible.midY - size.height / 2,
+            width: size.width,
+            height: size.height)
+    }
+
+    /// Resting closed: slid left by `cardWidth` so only the tab peeks, and
+    /// trimmed to a thin margin past the tab so the panel doesn't hang as an
+    /// invisible layer over other apps. Same height and vertical center as
+    /// the open frame — the slab must not move by a single pixel when the
+    /// panel snaps between the two.
+    private func closedFrame(on screen: NSScreen) -> NSRect {
+        var frame = openFrame(on: screen).offsetBy(dx: -GaiDrawerMetrics.cardWidth, dy: 0)
+        frame.size.width = GaiDrawerMetrics.slabWidth + closedMargin
+        return frame
+    }
+
+    /// The on-screen part of the open drawer, used for click-outside tests.
+    private func visibleDrawerRect(on screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        return NSRect(
+            x: visible.minX,
+            y: visible.midY - ui.cardHeight / 2,
+            width: GaiDrawerMetrics.cardWidth + GaiDrawerMetrics.tabWidth,
+            height: ui.cardHeight)
+    }
+
+    private func snapPanel(open: Bool) {
+        guard let panel, let screen = targetScreen() else { return }
+        panel.setFrame(open ? openFrame(on: screen) : closedFrame(on: screen), display: true)
+    }
+
+    private func recomputeCardHeight() {
+        let natural = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
+        let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
+        ui.cardHeight = min(natural, cap)
+    }
+
+    // MARK: Click-outside
+
+    private func installClickOutsideMonitors() {
+        guard clickOutsideLocal == nil else { return }
+        clickOutsideLocal = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            self?.collapseIfClickOutside()
+            return event
+        }
+        clickOutsideGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            self?.collapseIfClickOutside()
+        }
+    }
+
+    private func removeClickOutsideMonitors() {
+        if let clickOutsideLocal { NSEvent.removeMonitor(clickOutsideLocal) }
+        if let clickOutsideGlobal { NSEvent.removeMonitor(clickOutsideGlobal) }
+        clickOutsideLocal = nil
+        clickOutsideGlobal = nil
+    }
+
+    private func collapseIfClickOutside() {
+        guard ui.isExpanded, let screen = targetScreen() else { return }
+        // While the stage is open the user is working in terminals — the
+        // drawer stays put; it only tucks away via its tab.
+        guard store.openWorkspaceID == nil else { return }
+        let rect = visibleDrawerRect(on: screen)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.ui.isExpanded else { return }
+            if !rect.contains(NSEvent.mouseLocation) {
+                self.ui.isExpanded = false
+            }
+        }
+    }
+
+    // MARK: Observers
+
+    private func registerObservers() {
+        guard cancellables.isEmpty else { return }
+
+        ui.$isExpanded
+            .removeDuplicates()
+            .sink { [weak self] expanded in
+                if expanded {
+                    self?.installClickOutsideMonitors()
+                } else {
+                    self?.removeClickOutsideMonitors()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Resize if the workspace count changes.
+        store.$workspaces
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshGeometry() }
+            .store(in: &cancellables)
+
+        // Show/hide the stage when a workspace is opened/closed.
+        store.$openWorkspaceID
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] id in
+                if id != nil {
+                    self?.showStage()
+                } else {
+                    self?.hideStage()
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default
+            .publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshGeometry() }
+            .store(in: &cancellables)
+    }
+
+    private func refreshGeometry() {
+        recomputeCardHeight()
+        snapPanel(open: ui.isExpanded)
+    }
+}
+#endif

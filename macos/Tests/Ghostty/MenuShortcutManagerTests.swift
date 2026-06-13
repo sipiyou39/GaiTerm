@@ -30,7 +30,7 @@ struct MenuShortcutManagerTests {
     func overrideDefault() async throws {
         let config = try TemporaryConfig("keybind=super+h=goto_split:left")
 
-        let hideItem = NSMenuItem(title: "Hide Ghostty", action: "hide:", keyEquivalent: "h")
+        let hideItem = NSMenuItem(title: "Hide GaiTerm", action: "hide:", keyEquivalent: "h")
         hideItem.keyEquivalentModifierMask = .command
 
         let goToLeftItem = NSMenuItem(title: "Select Split Left", action: "splitMoveFocusLeft:", keyEquivalent: "")
