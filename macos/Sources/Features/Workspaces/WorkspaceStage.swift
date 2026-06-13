@@ -14,6 +14,21 @@ enum GaiStageMetrics {
     static let drawerGap: CGFloat = 8
     /// Height of each pane's header band.
     static let paneHeaderHeight: CGFloat = 25
+    /// Clearance between the drawer's pull tab and the stage's pull tab when
+    /// both are out — wide enough that the open spring's overshoot can't make
+    /// the stage tab swing over the drawer tab.
+    static let tabClearance: CGFloat = 22
+}
+
+// MARK: - Animations
+
+extension Animation {
+    /// Stage slide-out. The stage travels far more than the drawer, so a
+    /// gentler spring keeps the *absolute* overshoot small — a big bounce here
+    /// swings the tab over the drawer's tab.
+    static let gaiStageOpen = Animation.spring(response: 0.5, dampingFraction: 0.84)
+    /// Stage tuck-in: settles without bounce.
+    static let gaiStageClose = Animation.spring(response: 0.4, dampingFraction: 0.9)
 }
 
 // MARK: - Stage view
@@ -29,16 +44,155 @@ struct WorkspaceStageView: View {
     let ghostty: Ghostty.App
     let splits: GaiSplitController
     let onClose: () -> Void
+    /// Snaps the panel to its open frame, right before the slide-out spring.
+    let onWillExpand: () -> Void
+    /// Snaps the panel to its resting tucked frame once the tuck-in settles.
+    let onDidCollapse: () -> Void
+
+    /// Slab offset: 0 = out; +stageCardWidth = tucked (panel still at its open
+    /// frame). The mirror of the drawer's negative slide.
+    @State private var slide: CGFloat = 0
+    @State private var panelIsOut = false
+    @State private var visualOpen = false
+    @State private var generation = 0
+    @State private var tabPressed = false
+
+    private typealias D = GaiDrawerMetrics
+
+    private var slabWidth: CGFloat { ui.stageCardWidth + D.tabWidth + D.bleed }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .trailing) {
+            Color.clear
             if let workspace = store.workspace(for: store.openWorkspaceID) {
-                StageCard(workspace: workspace, ui: ui, splits: splits, onClose: onClose)
-                    .id(workspace.id)
+                slab(workspace).offset(x: slide)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .environmentObject(ghostty)
+        .onReceive(ui.$isStageExpanded.removeDuplicates().dropFirst()) { expanded in
+            setExpanded(expanded)
+        }
+    }
+
+    // MARK: Slab
+
+    /// One piece: a glass pull tab welded to the opaque terminal card. Same
+    /// silhouette and tab as the drawer, mirrored to the right edge — the card
+    /// covers the card region so only the tab (and its welds) reads as glass.
+    private func slab(_ workspace: GaiWorkspace) -> some View {
+        ZStack(alignment: .leading) {
+            glassBase
+            // Wash over the glass — legibility, and it keeps the tab clickable
+            // (the window server drops clicks through near-transparent pixels).
+            GaiStageSlabShape().fill(Color.black.opacity(0.08))
+            // Terminal content covers the card region only (trailing bleed).
+            // The off-screen bleed stays bare glass + wash — the very same
+            // Liquid Glass as the tab — so the open spring's overshoot reveals
+            // a strip of that glass, not a flat-color seam.
+            StageCard(workspace: workspace, ui: ui, splits: splits, onClose: onClose)
+                .clipShape(UnevenRoundedRectangle(
+                    topLeadingRadius: D.cardCornerRadius,
+                    bottomLeadingRadius: D.cardCornerRadius,
+                    style: .continuous))
+                .padding(.leading, D.tabWidth)
+                .padding(.trailing, D.bleed)
+                .id(workspace.id)
+        }
+        .frame(width: slabWidth)
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: .leading) { chevron }
+        .overlay(alignment: .leading) { tabHitArea }
+    }
+
+    @ViewBuilder
+    private var glassBase: some View {
+        let shape = GaiStageSlabShape()
+        if #available(macOS 26.0, *) {
+            shape.fill(Color.clear).glassEffect(.regular, in: shape)
+        } else {
+            shape.fill(.ultraThinMaterial)
+                .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 1))
+        }
+    }
+
+    // MARK: Tab
+
+    private var chevron: some View {
+        Image(systemName: "chevron.left")
+            .font(.system(size: 11, weight: .heavy))
+            .foregroundStyle(.white.opacity(0.95))
+            .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
+            .rotationEffect(.degrees(visualOpen ? 180 : 0))
+            .scaleEffect(tabPressed ? 0.8 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.55), value: tabPressed)
+            .frame(width: D.tabWidth)
+    }
+
+    private var tabHitArea: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: D.tabWidth + D.filletRadius, height: D.tabExtent + 8)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in tabPressed = true }
+                    .onEnded { _ in
+                        tabPressed = false
+                        ui.isStageExpanded.toggle()
+                    })
+    }
+
+    // MARK: Slide choreography (mirror of WorkspaceDrawerView)
+
+    private func setExpanded(_ expanded: Bool) {
+        generation += 1
+        let gen = generation
+        if expanded {
+            if panelIsOut {
+                withAnimation(.gaiStageOpen) { slide = 0; visualOpen = true }
+            } else {
+                onWillExpand()
+                panelIsOut = true
+                var snap = Transaction()
+                snap.disablesAnimations = true
+                withTransaction(snap) { slide = ui.stageCardWidth }
+                DispatchQueue.main.async {
+                    guard gen == generation, ui.isStageExpanded else { return }
+                    withAnimation(.gaiStageOpen) { slide = 0; visualOpen = true }
+                }
+            }
+        } else {
+            guard panelIsOut else { return }
+            if #available(macOS 14.0, *) {
+                withAnimation(.gaiStageClose, completionCriteria: .logicallyComplete) {
+                    slide = ui.stageCardWidth
+                    visualOpen = false
+                } completion: {
+                    finishCollapse(gen)
+                }
+            } else {
+                withAnimation(.gaiStageClose) {
+                    slide = ui.stageCardWidth
+                    visualOpen = false
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                    finishCollapse(gen)
+                }
+            }
+        }
+    }
+
+    private func finishCollapse(_ gen: Int) {
+        guard gen == generation, !ui.isStageExpanded, panelIsOut else { return }
+        panelIsOut = false
+        var snap = Transaction()
+        snap.disablesAnimations = true
+        withTransaction(snap) { slide = 0 }
+        onDidCollapse()
     }
 }
 
@@ -62,14 +216,10 @@ private struct StageCard: View {
 
     /// Flat, BridgeMind-style: the terminals ARE the stage. No surrounding
     /// frame, no per-pane cards — panes meet edge to edge on a 1px divider.
+    /// Clipping and tab/bleed insets are handled by the enclosing slab.
     var body: some View {
         terminalArea
             .background(interiorGray)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            // Full available height: the card touches the menu bar and the
-            // dock (the panel frame is the screen's visibleFrame). Only the
-            // sides keep the floating margin.
-            .padding(.horizontal, GaiStageMetrics.shadowMargin)
             .onAppear { splits.ensureFirstSurface(in: workspace) }
             .onChange(of: focusedSurface) { newValue in
                 if newValue != nil { lastFocusedSurface = .init(newValue) }
@@ -587,6 +737,22 @@ private struct GaiGlassIsland<S: Shape>: View {
             }
             shape.fill(Color.black.opacity(0.08))
         }
+    }
+}
+
+// MARK: - Stage slab shape
+
+/// The stage silhouette: the drawer's card-and-pull-tab slab mirrored to the
+/// right edge — flat right edge (flush against, and bleeding past, the screen
+/// edge), rounded left corners, and a pull tab protruding from the middle of
+/// its left edge. Reuses the drawer's geometry so the tab texture and welds
+/// are pixel-identical, just flipped.
+struct GaiStageSlabShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let mirrored = GaiDrawerSlabShape().path(in: rect)
+        // Reflect horizontally about the rect's vertical center line.
+        let flip = CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: rect.minX + rect.maxX, ty: 0)
+        return mirrored.applying(flip)
     }
 }
 #endif

@@ -16,6 +16,14 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// model — not in any pane view — so no re-render can drop the editing
     /// state mid-flight.
     @Published var renamingSession: GaiTerminalSession?
+
+    /// Whether the terminal stage is slid out (true) or tucked to its
+    /// right-edge pull tab (false). Mirrors `isExpanded` for the drawer.
+    @Published var isStageExpanded: Bool = false
+    /// Visible width of the terminal card when the stage is out. Owned by the
+    /// manager (depends on the screen) so the panel frames and the SwiftUI
+    /// slab always agree — same contract as `cardHeight` for the drawer.
+    @Published var stageCardWidth: CGFloat = 600
 }
 
 /// `NSHostingView` that accepts the first mouse click, so a single click on
@@ -511,7 +519,9 @@ final class GaiWorkspaceManager {
             ui: ui,
             ghostty: ghostty,
             splits: splits,
-            onClose: { [weak self] in self?.store.openWorkspaceID = nil })
+            onClose: { [weak self] in self?.store.openWorkspaceID = nil },
+            onWillExpand: { [weak self] in self?.snapStagePanel(open: true) },
+            onDidCollapse: { [weak self] in self?.snapStagePanel(open: false) })
         let host = StageHostingView(rootView: stage)
         host.surfacesProvider = { [weak self] in
             guard let self,
@@ -541,9 +551,15 @@ final class GaiWorkspaceManager {
 
     private func showStage() {
         ensureStagePanel()
-        guard let stagePanel, let screen = targetScreen() else { return }
+        guard let stagePanel else { return }
+        recomputeStageCardWidth()
         let wasVisible = stagePanel.isVisible
-        stagePanel.setFrame(stageFrame(on: screen), display: true)
+        if !wasVisible {
+            // Start tucked, then let the slide-out choreography snap it open
+            // and spring the slab in from the edge.
+            snapStagePanel(open: false)
+            stagePanel.alphaValue = 1
+        }
         stagePanel.orderFrontRegardless()
         // Opening a workspace means "I want to type in a terminal now":
         // bring keyboard focus to the stage so ⌘D & friends work right away.
@@ -559,15 +575,13 @@ final class GaiWorkspaceManager {
             }
         }
 
-        // Fade in on first appearance only — switching workspaces while
-        // visible just swaps the content.
-        if !wasVisible {
-            stagePanel.alphaValue = 0
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                stagePanel.animator().alphaValue = 1
-            }
+        if ui.isStageExpanded {
+            // Switching workspaces while already out: keep it out, just make
+            // sure the panel matches the (possibly new) open frame.
+            snapStagePanel(open: true)
+        } else {
+            // Slide the stage out from the right edge.
+            ui.isStageExpanded = true
         }
 
         // The drawer's job is done once a workspace is on stage: tuck it
@@ -577,31 +591,60 @@ final class GaiWorkspaceManager {
 
     private func hideStage() {
         guard let stagePanel, stagePanel.isVisible else { return }
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.15
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            stagePanel.animator().alphaValue = 0
-        }, completionHandler: {
-            stagePanel.orderOut(nil)
-            stagePanel.alphaValue = 1
-        })
+        ui.isStageExpanded = false
+        stagePanel.orderOut(nil)
     }
 
-    /// To the right of the open drawer, with a deliberate gap — the stage
-    /// floats as its own layer, never glued to the drawer.
-    private func stageFrame(on screen: NSScreen) -> NSRect {
+    // MARK: Stage geometry (right-edge drawer, mirror of the left drawer)
+
+    private var stageSlabWidth: CGFloat {
+        ui.stageCardWidth + GaiDrawerMetrics.tabWidth + GaiDrawerMetrics.bleed
+    }
+
+    /// Card left edge = past the open drawer's footprint, a gap, then room for
+    /// the stage's OWN pull tab (which protrudes to the left of its card). That
+    /// last term keeps the stage tab clear of the drawer tab so both are
+    /// clickable when the drawer is expanded over the stage.
+    private func recomputeStageCardWidth() {
+        guard let visible = targetScreen()?.visibleFrame else { return }
+        let left = visible.minX
+            + GaiDrawerMetrics.cardWidth      // drawer card
+            + GaiDrawerMetrics.tabWidth        // drawer pull tab
+            + GaiStageMetrics.tabClearance     // gap that absorbs the overshoot
+            + GaiDrawerMetrics.tabWidth        // the stage's own pull tab
+        ui.stageCardWidth = max(visible.maxX - left, 320)
+    }
+
+    /// Out: card flush with the right edge, bleed hanging off-screen right,
+    /// tab on the card's left. Slab is trailing-aligned in the panel.
+    private func stageOpenFrame(on screen: NSScreen) -> NSRect {
         let visible = screen.visibleFrame
-        let left = visible.minX + GaiDrawerMetrics.cardWidth + GaiDrawerMetrics.tabWidth
-            + GaiStageMetrics.drawerGap
-        // Fill the whole available height — menu bar to dock (`visibleFrame`
-        // already excludes both). The card's transparent shadow margin lives
-        // inside this frame, so the glass keeps its float without leaving a
-        // dead band above the dock.
+        let width = stageSlabWidth + openRightMargin
         return NSRect(
-            x: left,
+            x: visible.maxX + GaiDrawerMetrics.bleed - width,
             y: visible.minY,
-            width: visible.maxX - 8 - left,
+            width: width,
             height: visible.height)
+    }
+
+    /// Resting tucked: slid right by the card width so only the tab peeks at
+    /// the right edge; trimmed to a thin strip so the panel doesn't hang as an
+    /// invisible layer over other apps. Same height/position contract as the
+    /// drawer's closed frame — the slab must not move when the panel snaps.
+    private func stageClosedFrame(on screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        return NSRect(
+            x: visible.maxX - GaiDrawerMetrics.tabWidth - closedMargin,
+            y: visible.minY,
+            width: stageSlabWidth + closedMargin,
+            height: visible.height)
+    }
+
+    private func snapStagePanel(open: Bool) {
+        guard let stagePanel, let screen = targetScreen() else { return }
+        stagePanel.setFrame(
+            open ? stageOpenFrame(on: screen) : stageClosedFrame(on: screen),
+            display: true)
     }
 
     // MARK: Geometry
@@ -677,17 +720,60 @@ final class GaiWorkspaceManager {
         clickOutsideGlobal = nil
     }
 
-    private func collapseIfClickOutside() {
-        guard ui.isExpanded, let screen = targetScreen() else { return }
-        // While the stage is open the user is working in terminals — the
-        // drawer stays put; it only tucks away via its tab.
-        guard store.openWorkspaceID == nil else { return }
-        let rect = visibleDrawerRect(on: screen)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.ui.isExpanded else { return }
-            if !rect.contains(NSEvent.mouseLocation) {
-                self.ui.isExpanded = false
+    private func updateClickOutsideMonitors() {
+        if ui.isExpanded || ui.isStageExpanded {
+            installClickOutsideMonitors()
+        } else {
+            removeClickOutsideMonitors()
+        }
+    }
+
+    /// Screen-space regions our panels occupy right now — each panel's card
+    /// when out, or just its pull tab when tucked. A click landing in none of
+    /// them is "outside the panels".
+    private func panelRegions(on screen: NSScreen) -> [NSRect] {
+        let visible = screen.visibleFrame
+        let tabExtent = GaiDrawerMetrics.tabExtent
+        var rects: [NSRect] = []
+
+        // Drawer (left edge): card+tab when out, tab only when tucked.
+        if ui.isExpanded {
+            rects.append(visibleDrawerRect(on: screen))
+        } else {
+            rects.append(NSRect(
+                x: visible.minX, y: visible.midY - tabExtent / 2,
+                width: GaiDrawerMetrics.tabWidth, height: tabExtent))
+        }
+
+        // Stage (right edge): only while a workspace is on stage.
+        if store.openWorkspaceID != nil {
+            if ui.isStageExpanded {
+                let stageLeft = visible.maxX - ui.stageCardWidth
+                rects.append(NSRect(
+                    x: stageLeft - GaiDrawerMetrics.tabWidth, y: visible.minY,
+                    width: ui.stageCardWidth + GaiDrawerMetrics.tabWidth,
+                    height: visible.height))
+            } else {
+                rects.append(NSRect(
+                    x: visible.maxX - GaiDrawerMetrics.tabWidth,
+                    y: visible.midY - tabExtent / 2,
+                    width: GaiDrawerMetrics.tabWidth, height: tabExtent))
             }
+        }
+        return rects
+    }
+
+    /// A click outside every panel region folds whatever is expanded — both
+    /// the drawer and the stage.
+    private func collapseIfClickOutside() {
+        guard ui.isExpanded || ui.isStageExpanded, let screen = targetScreen() else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.ui.isExpanded || self.ui.isStageExpanded else { return }
+            let point = NSEvent.mouseLocation
+            let regions = self.panelRegions(on: screen)
+            guard !regions.contains(where: { $0.contains(point) }) else { return }
+            if self.ui.isExpanded { self.ui.isExpanded = false }
+            if self.ui.isStageExpanded { self.ui.isStageExpanded = false }
         }
     }
 
@@ -696,15 +782,17 @@ final class GaiWorkspaceManager {
     private func registerObservers() {
         guard cancellables.isEmpty else { return }
 
+        // Watch the click-outside monitors whenever either panel is out.
         ui.$isExpanded
             .removeDuplicates()
-            .sink { [weak self] expanded in
-                if expanded {
-                    self?.installClickOutsideMonitors()
-                } else {
-                    self?.removeClickOutsideMonitors()
-                }
-            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
+            .store(in: &cancellables)
+
+        ui.$isStageExpanded
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
             .store(in: &cancellables)
 
         // Resize if the workspace count changes.
@@ -737,6 +825,10 @@ final class GaiWorkspaceManager {
     private func refreshGeometry() {
         recomputeCardHeight()
         snapPanel(open: ui.isExpanded)
+        recomputeStageCardWidth()
+        if stagePanel?.isVisible == true {
+            snapStagePanel(open: ui.isStageExpanded)
+        }
     }
 }
 #endif
