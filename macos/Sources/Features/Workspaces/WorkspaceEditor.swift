@@ -65,11 +65,25 @@ struct GaiWorkspaceEditor: View {
     @ObservedObject var store: GaiWorkspaceStore
     @ObservedObject var ui: GaiWorkspaceUIModel
 
-    @State private var hue: Double = 0
-    @State private var saturation: Double = 1
-    @State private var brightness: Double = 1
-    @State private var hexText: String = ""
+    @State private var hue: Double
+    @State private var saturation: Double
+    @State private var brightness: Double
+    @State private var hexText: String
     @FocusState private var nameFocused: Bool
+
+    init(workspace: GaiWorkspace, store: GaiWorkspaceStore, ui: GaiWorkspaceUIModel) {
+        _workspace = ObservedObject(initialValue: workspace)
+        _store = ObservedObject(initialValue: store)
+        _ui = ObservedObject(initialValue: ui)
+        // Seed the picker from the workspace color at construction — doing it in
+        // onAppear instead renders one frame at the default (red) and then snaps,
+        // a visible blink.
+        let hsb = workspace.accentColor.gaiHSB
+        _hue = State(initialValue: hsb.h)
+        _saturation = State(initialValue: hsb.s)
+        _brightness = State(initialValue: hsb.b)
+        _hexText = State(initialValue: workspace.accentColor.gaiHexString)
+    }
 
     private var color: Color { Color(hue: hue, saturation: saturation, brightness: brightness) }
 
@@ -89,13 +103,10 @@ struct GaiWorkspaceEditor: View {
             Spacer(minLength: 0)
             deleteButton
         }
-        // This view is only mounted once the card has finished opening (see
-        // `WorkspaceDrawerView.cardContent`), so onAppear is the right moment to
-        // seed the picker and focus the name field.
+        // Mounted only once the card has finished opening (see
+        // `WorkspaceDrawerView.cardContent`); the picker is seeded in init, so
+        // onAppear just claims the keyboard for the name field.
         .onAppear {
-            let hsb = workspace.accentColor.gaiHSB
-            hue = hsb.h; saturation = hsb.s; brightness = hsb.b
-            hexText = color.gaiHexString
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { nameFocused = true }
         }
     }
@@ -164,11 +175,14 @@ struct GaiWorkspaceEditor: View {
     }
 
     private var swatches: some View {
+        // Resolve the current hex once, not once per swatch (each is an NSColor
+        // conversion) — 18× per render and per drag frame was needless churn.
+        let currentHex = color.gaiHexString
         let columns = Array(repeating: GridItem(.flexible(), spacing: 7), count: 6)
         return LazyVGrid(columns: columns, spacing: 7) {
             ForEach(GaiWorkspacePalette.swatches, id: \.self) { hex in
                 let swatch = Color(gaiHex: hex) ?? .white
-                let isCurrent = hex == color.gaiHexString
+                let isCurrent = hex == currentHex
                 Circle()
                     .fill(swatch)
                     .frame(height: 20)
@@ -182,7 +196,7 @@ struct GaiWorkspaceEditor: View {
                     .onTapGesture { select(swatch) }
             }
         }
-        .animation(.easeOut(duration: 0.12), value: color.gaiHexString)
+        .animation(.easeOut(duration: 0.12), value: currentHex)
     }
 
     private var deleteButton: some View {

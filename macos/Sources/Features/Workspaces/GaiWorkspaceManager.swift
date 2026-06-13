@@ -817,11 +817,25 @@ final class GaiWorkspaceManager {
         // bottom. The editor's content is hidden during the motion and fades in
         // only once the card has finished opening.
         ui.editorContentVisible = false
-        withAnimation(.gaiCardResize) {
-            ui.cardHeight = cardHeightTarget()
-        }
         if editing {
-            afterCardResize { self.ui.editorContentVisible = true }
+            // Grow the empty card, then — precisely once the spring is logically
+            // done — mount + fade the editor in. Its one heavy layout pass thus
+            // lands on a settled, still card (invisible), and the palette appears
+            // *after* the open, never fighting the motion.
+            let reveal = { self.ui.editorContentVisible = true }
+            if #available(macOS 14.0, *) {
+                // `.removed` (not `.logicallyComplete`) so the palette is mounted
+                // only once the spring is FULLY at rest — its one heavy layout
+                // pass then lands on a stationary card and is invisible.
+                withAnimation(.gaiCardResize, completionCriteria: .removed) {
+                    ui.cardHeight = cardHeightTarget()
+                } completion: { reveal() }
+            } else {
+                withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: reveal)
+            }
+        } else {
+            withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
         }
 
         // The editor's text fields need the keyboard; the drawer is otherwise
@@ -845,10 +859,6 @@ final class GaiWorkspaceManager {
         }
     }
 
-    /// Run `work` once the card-resize spring has visually settled.
-    private func afterCardResize(_ work: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-    }
 
     // MARK: Click-outside
 

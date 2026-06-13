@@ -57,7 +57,12 @@ enum GaiDrawerMetrics {
     /// Fixed card height while the in-drawer workspace editor is open — tall
     /// enough for the name field, the color picker, the swatch palette and the
     /// delete action, without ever spilling outside the panel.
-    static let editorHeight: CGFloat = 452
+    static let editorHeight: CGFloat = 476
+
+    /// The editor's content area (inside the card's vertical padding). The editor
+    /// is laid out *once* at this fixed height and the growing card clips it into
+    /// view, so its GeometryReaders/grid never re-measure mid-animation.
+    static var editorContentHeight: CGFloat { editorHeight - 2 * verticalPadding }
 }
 
 // MARK: - Animations
@@ -221,21 +226,30 @@ struct WorkspaceDrawerView: View {
 
     @ViewBuilder
     private var cardContent: some View {
-        // DIAGNOSTIC: editor/explorer content is removed — both expand EMPTY (no
-        // heavy view mounted) so we can watch the bare expansion at two sizes.
-        // Only a back button remains so the expand/retract can be repeated.
-        ZStack(alignment: .top) {
+        ZStack(alignment: .center) {
             if ui.explorerOpen {
+                // Placeholder for the future file explorer; a way back for now.
                 backButton { ui.explorerOpen = false }
                     .transition(.opacity)
             } else if ui.editingWorkspaceID != nil {
-                backButton { ui.editingWorkspaceID = nil }
-                    .transition(.opacity)
+                // The card grows EMPTY (perfectly smooth — verified). The palette
+                // is NOT in the view tree during the growth at all (opacity 0
+                // still composites every frame — that was the stutter), so the
+                // grow carries nothing heavy. It is mounted only once the card is
+                // FULLY stopped (editorContentVisible, flipped on `.removed`), so
+                // it appears inside the already-full card — never anchored to a
+                // top edge that is still moving.
+                if ui.editorContentVisible,
+                   let workspace = store.workspace(for: ui.editingWorkspaceID) {
+                    GaiWorkspaceEditor(workspace: workspace, store: store, ui: ui)
+                        .transition(.opacity)
+                }
             } else {
                 workspaceList
                     .transition(.opacity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.vertical, M.verticalPadding)
         .padding(.leading, M.bleed + 14)
         .padding(.trailing, M.tabWidth + 12)
