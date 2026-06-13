@@ -24,9 +24,14 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// keyboard-eligible for the editor's text fields.
     @Published var editingWorkspaceID: GaiWorkspace.ID?
 
-    /// Whether the editor's *content* is shown. The manager flips this on only
-    /// after the card has finished expanding, so the palette settles into an
-    /// already-open card instead of fighting the growth animation.
+    /// Whether the editor is in the view tree. Flipped on once the card reaches
+    /// its open size — its one heavy layout pass is paid here (on a ~still card,
+    /// invisible). Kept separate from `editorContentVisible` so the fade can run
+    /// on an already-laid-out view (a progressive crossfade, not a snap).
+    @Published var editorMounted: Bool = false
+
+    /// The editor's opacity gate, flipped one tick *after* `editorMounted` so the
+    /// fade is a pure opacity animation on the already-mounted palette.
     @Published var editorContentVisible: Bool = false
 
     /// Whether the (future) file-explorer panel is open. Drives a much taller
@@ -816,23 +821,26 @@ final class GaiWorkspaceManager {
         // slab springs taller/shorter around the fixed pull tab, toward top and
         // bottom. The editor's content is hidden during the motion and fades in
         // only once the card has finished opening.
+        ui.editorMounted = false
         ui.editorContentVisible = false
         if editing {
-            // Grow the empty card, then — precisely once the spring is logically
-            // done — mount + fade the editor in. Its one heavy layout pass thus
-            // lands on a settled, still card (invisible), and the palette appears
-            // *after* the open, never fighting the motion.
-            let reveal = { self.ui.editorContentVisible = true }
+            // Grow the empty card. The moment it reaches its open size
+            // (`.logicallyComplete` — earlier than `.removed`, so the palette
+            // doesn't appear late), MOUNT the palette at opacity 0: its one heavy
+            // layout pass lands on a now-settled card, invisible. Then, on the
+            // NEXT runloop tick, fade it in — a pure opacity crossfade on an
+            // already-laid-out view, so it appears progressively, not in one snap.
+            let mountThenFade = {
+                self.ui.editorMounted = true
+                DispatchQueue.main.async { self.ui.editorContentVisible = true }
+            }
             if #available(macOS 14.0, *) {
-                // `.removed` (not `.logicallyComplete`) so the palette is mounted
-                // only once the spring is FULLY at rest — its one heavy layout
-                // pass then lands on a stationary card and is invisible.
-                withAnimation(.gaiCardResize, completionCriteria: .removed) {
+                withAnimation(.gaiCardResize, completionCriteria: .logicallyComplete) {
                     ui.cardHeight = cardHeightTarget()
-                } completion: { reveal() }
+                } completion: { mountThenFade() }
             } else {
                 withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: reveal)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.46, execute: mountThenFade)
             }
         } else {
             withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }

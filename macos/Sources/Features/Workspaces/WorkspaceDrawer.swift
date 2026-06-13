@@ -232,17 +232,18 @@ struct WorkspaceDrawerView: View {
                 backButton { ui.explorerOpen = false }
                     .transition(.opacity)
             } else if ui.editingWorkspaceID != nil {
-                // The card grows EMPTY (perfectly smooth — verified). The palette
+                // The card grows EMPTY (perfectly smooth — verified): the palette
                 // is NOT in the view tree during the growth at all (opacity 0
-                // still composites every frame — that was the stutter), so the
-                // grow carries nothing heavy. It is mounted only once the card is
-                // FULLY stopped (editorContentVisible, flipped on `.removed`), so
-                // it appears inside the already-full card — never anchored to a
-                // top edge that is still moving.
-                if ui.editorContentVisible,
+                // still composites every frame — that was the stutter). It is
+                // mounted (editorMounted) only once the card reaches its open
+                // size, on a still card, then faded in via editorContentVisible
+                // one tick later — a progressive crossfade on an already-laid-out
+                // view, never anchored to a still-moving edge.
+                if ui.editorMounted,
                    let workspace = store.workspace(for: ui.editingWorkspaceID) {
                     GaiWorkspaceEditor(workspace: workspace, store: store, ui: ui)
-                        .transition(.opacity)
+                        .opacity(ui.editorContentVisible ? 1 : 0)
+                        .transition(.identity)
                 }
             } else {
                 workspaceList
@@ -254,7 +255,7 @@ struct WorkspaceDrawerView: View {
         .padding(.leading, M.bleed + 14)
         .padding(.trailing, M.tabWidth + 12)
         .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
-        .animation(.easeInOut(duration: 0.28), value: ui.editorContentVisible)
+        .animation(.easeInOut(duration: 0.35), value: ui.editorContentVisible)
         .animation(.easeInOut(duration: 0.28), value: ui.explorerOpen)
     }
 
