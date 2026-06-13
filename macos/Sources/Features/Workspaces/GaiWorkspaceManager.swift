@@ -24,6 +24,23 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// manager (depends on the screen) so the panel frames and the SwiftUI
     /// slab always agree — same contract as `cardHeight` for the drawer.
     @Published var stageCardWidth: CGFloat = 600
+
+    /// True while the stage slab is mid-slide. Lets each terminal surface drop
+    /// its expensive screen-blend compositing while it's moving across the
+    /// screen (see `GaiBlendAsserter`) — the per-frame backdrop blend of many
+    /// busy panes is what makes the slide stutter. Reference-counted so
+    /// overlapping slides (e.g. click-outside folding both panels) don't clear
+    /// it early.
+    @Published private(set) var isSliding: Bool = false
+    private var slideDepth: Int = 0
+    func beginSlide() {
+        slideDepth += 1
+        if !isSliding { isSliding = true }
+    }
+    func endSlide() {
+        slideDepth = max(0, slideDepth - 1)
+        if slideDepth == 0, isSliding { isSliding = false }
+    }
 }
 
 /// `NSHostingView` that accepts the first mouse click, so a single click on

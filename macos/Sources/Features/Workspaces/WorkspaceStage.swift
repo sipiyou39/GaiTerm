@@ -1,4 +1,5 @@
 #if os(macOS)
+import Combine
 import SwiftUI
 
 // MARK: - Metrics
@@ -158,7 +159,7 @@ struct WorkspaceStageView: View {
         let gen = generation
         if expanded {
             if panelIsOut {
-                withAnimation(.gaiStageOpen) { slide = 0; visualOpen = true }
+                runSlide(.gaiStageOpen, { slide = 0; visualOpen = true })
             } else {
                 onWillExpand()
                 panelIsOut = true
@@ -167,27 +168,32 @@ struct WorkspaceStageView: View {
                 withTransaction(snap) { slide = ui.stageCardWidth }
                 DispatchQueue.main.async {
                     guard gen == generation, ui.isStageExpanded else { return }
-                    withAnimation(.gaiStageOpen) { slide = 0; visualOpen = true }
+                    runSlide(.gaiStageOpen, { slide = 0; visualOpen = true })
                 }
             }
         } else {
             guard panelIsOut else { return }
-            if #available(macOS 14.0, *) {
-                withAnimation(.gaiStageClose, completionCriteria: .logicallyComplete) {
-                    slide = ui.stageCardWidth
-                    visualOpen = false
-                } completion: {
-                    finishCollapse(gen)
-                }
-            } else {
-                withAnimation(.gaiStageClose) {
-                    slide = ui.stageCardWidth
-                    visualOpen = false
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-                    finishCollapse(gen)
-                }
+            runSlide(.gaiStageClose, { slide = ui.stageCardWidth; visualOpen = false }) {
+                finishCollapse(gen)
             }
+        }
+    }
+
+    /// Runs a slab slide, flagging `isSliding` for its whole duration so the
+    /// terminals can drop their screen-blend while moving. Bridges the macOS 14
+    /// completion API and the timer fallback so both clear the flag.
+    private func runSlide(
+        _ animation: Animation,
+        _ changes: @escaping () -> Void,
+        then completion: @escaping () -> Void = {}
+    ) {
+        ui.beginSlide()
+        let done = { completion(); ui.endSlide() }
+        if #available(macOS 14.0, *) {
+            withAnimation(animation, completionCriteria: .logicallyComplete, changes, completion: done)
+        } else {
+            withAnimation(animation, changes)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: done)
         }
     }
 
@@ -408,7 +414,7 @@ private struct GaiPaneView: View {
             // Flat pane, no card: the focus ring wraps the terminal zone
             // only (the header is app chrome, outside the focus system).
             Ghostty.SurfaceWrapper(surfaceView: surfaceView, isSplit: isSplit)
-                .background(GaiBlendAsserter(surfaceView: surfaceView))
+                .background(GaiBlendAsserter(surfaceView: surfaceView, ui: ui))
                 .overlay(
                     Rectangle().strokeBorder(
                         isFocused && isSplit ? accent.opacity(0.6) : Color.clear,
@@ -490,9 +496,14 @@ private struct GaiBlendAsserter: NSViewRepresentable {
     static let interiorGray = CGColor(red: 0.110, green: 0.110, blue: 0.118, alpha: 1)
 
     let surfaceView: Ghostty.SurfaceView
+    let ui: GaiWorkspaceUIModel
 
     final class AsserterView: NSView {
         weak var surfaceView: Ghostty.SurfaceView?
+        weak var ui: GaiWorkspaceUIModel?
+        /// Toggles the screen-blend the instant a slide starts/ends, without
+        /// going through a SwiftUI re-render of the terminal tree.
+        private var slideObserver: AnyCancellable?
 
         /// Invisible to clicks, always. As a plain NSView this would
         /// otherwise swallow mouse events meant for the terminal whenever
@@ -500,10 +511,32 @@ private struct GaiBlendAsserter: NSViewRepresentable {
         /// reshuffles on re-renders, making clicks land erratically.
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+        func bind(to ui: GaiWorkspaceUIModel) {
+            guard self.ui !== ui else { return }
+            self.ui = ui
+            slideObserver = ui.$isSliding
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.assertBlend() }
+        }
+
         func assertBlend() {
             guard let layer = surfaceView?.layer else { return }
+            // The screen-blend (terminal bg melted into the gray) stays on at
+            // all times — toggling it would visibly flash the panes' shade as
+            // a slide starts/ends.
             layer.compositingFilter = "screenBlendMode"
-            layer.superlayer?.backgroundColor = GaiBlendAsserter.interiorGray
+            guard let superlayer = layer.superlayer else { return }
+            superlayer.backgroundColor = GaiBlendAsserter.interiorGray
+            // While the slab slides, the surface moves across the screen and
+            // screen-blend forces a per-frame backdrop read+blend on the moving
+            // layer — the dominant stutter when many busy panes are on stage.
+            // Rasterizing the pane's layer for the slide bakes its *already
+            // blended* look into a bitmap, so the move is a cheap bitmap
+            // translate (re-baked only when the terminal actually repaints, not
+            // every frame of motion) and the appearance never changes.
+            let sliding = ui?.isSliding ?? false
+            superlayer.rasterizationScale = surfaceView?.window?.backingScaleFactor ?? 2
+            superlayer.shouldRasterize = sliding
         }
 
         override func layout() {
@@ -520,11 +553,13 @@ private struct GaiBlendAsserter: NSViewRepresentable {
     func makeNSView(context: Context) -> AsserterView {
         let view = AsserterView()
         view.surfaceView = surfaceView
+        view.bind(to: ui)
         return view
     }
 
     func updateNSView(_ view: AsserterView, context: Context) {
         view.surfaceView = surfaceView
+        view.bind(to: ui)
         view.assertBlend()
         // The superlayer can be swapped after this update completes (the
         // representable attaches before the surface settles into its new
