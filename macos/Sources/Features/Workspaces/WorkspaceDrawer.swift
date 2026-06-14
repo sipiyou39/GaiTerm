@@ -295,7 +295,10 @@ struct WorkspaceDrawerView: View {
                                 store.openWorkspaceID = workspace.id
                             }
                         },
-                        onEdit: { ui.editingWorkspaceID = workspace.id })
+                        onEdit: {
+                            ui.editingIsNew = false
+                            ui.editingWorkspaceID = workspace.id
+                        })
                     .frame(height: M.rowHeight)
                 }
             }
@@ -329,9 +332,9 @@ struct WorkspaceDrawerView: View {
                 // focused, so a new workspace is named, colored and ready.
                 let workspace = store.createWorkspace(
                     name: "",
-                    colorHex: GaiWorkspacePalette.next(after: store.workspaces.count),
                     defaultDirectory: FileManager.default.homeDirectoryForCurrentUser)
                 ui.selectedWorkspaceID = workspace.id
+                ui.editingIsNew = true
                 ui.editingWorkspaceID = workspace.id
             } label: {
                 Image(systemName: "plus")

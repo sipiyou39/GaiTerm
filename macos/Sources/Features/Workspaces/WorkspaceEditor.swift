@@ -35,25 +35,6 @@ extension Color {
     }
 }
 
-// MARK: - Palette
-
-/// A curated, generous spread of accent colors — vivid but tasteful, in the
-/// product's art direction. Used for the swatch grid and to seed new
-/// workspaces with a varied default.
-enum GaiWorkspacePalette {
-    static let swatches: [String] = [
-        "FF6B6B", "FF922B", "FFD43B", "51CF66", "20C997", "22B8CF",
-        "4DABF7", "339AF0", "4C6EF5", "7950F2", "9775FA", "BE4BDB",
-        "F06595", "E64980", "FA5252", "94D82D", "38D9A9", "ADB5BD",
-    ]
-
-    /// A default color for the Nth created workspace, cycling the palette so
-    /// fresh workspaces don't all look alike.
-    static func next(after count: Int) -> String {
-        swatches[count % swatches.count]
-    }
-}
-
 // MARK: - Editor
 
 /// In-drawer workspace editor: rename, recolor (a real picker, not a row of
@@ -88,20 +69,22 @@ struct GaiWorkspaceEditor: View {
     private var color: Color { Color(hue: hue, saturation: saturation, brightness: brightness) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             header
             nameField
-            GaiSVSquare(hue: hue, saturation: $saturation, brightness: $brightness)
-                .frame(height: 150)
-                .onChange(of: saturation) { _ in applyColor() }
-                .onChange(of: brightness) { _ in applyColor() }
-            GaiHueSlider(hue: $hue)
-                .frame(height: 16)
-                .onChange(of: hue) { _ in applyColor() }
-            hexRow
-            swatches
-            Spacer(minLength: 0)
-            deleteButton
+            // The settings scroll inside the (large) card; the header stays put.
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 16) {
+                    folderSection
+                    cliSection
+                    startupSection
+                    toggleSection
+                    colorSection
+                    bottomBar
+                        .padding(.top, 2)
+                }
+                .padding(.bottom, 4)
+            }
         }
         // Mounted only once the card has finished opening (see
         // `WorkspaceDrawerView.cardContent`); the picker is seeded in init, so
@@ -111,17 +94,222 @@ struct GaiWorkspaceEditor: View {
         }
     }
 
+    // MARK: Setting sections
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 9.5, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(.white.opacity(0.45))
+    }
+
+    private var fieldBackground: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.07))
+    }
+
+    /// One row per CLI — check it on the left, set how many panes on the right.
+    /// Several CLIs can be mixed; the grand total is capped at 16.
+    private var cliSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionLabel("CLI on open")
+                Spacer(minLength: 0)
+                if totalPanes > 0 {
+                    Text("\(totalPanes)/16")
+                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(Self.cliTools.enumerated()), id: \.element) { index, cli in
+                    if index > 0 {
+                        Divider().overlay(Color.white.opacity(0.06))
+                    }
+                    cliRow(cli)
+                }
+            }
+            .background(fieldBackground)
+        }
+    }
+
+    private func cliRow(_ cli: String) -> some View {
+        let count = workspace.cliCounts[cli] ?? 0
+        let on = count > 0
+        return HStack(spacing: 9) {
+            Button { setCLICount(cli, on ? 0 : 1) } label: {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(on ? color : .white.opacity(0.3))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            Text(cli)
+                .font(.system(size: 12.5, weight: on ? .semibold : .regular, design: .monospaced))
+                .foregroundStyle(on ? .white : .white.opacity(0.6))
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 9) {
+                stepButton("minus") { setCLICount(cli, count - 1) }
+                    .opacity(count == 0 ? 0.25 : 1)
+                Text("\(count)")
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(on ? .white : .white.opacity(0.35))
+                    .frame(minWidth: 12)
+                stepButton("plus") { setCLICount(cli, count + 1) }
+                    .opacity(totalPanes >= 16 ? 0.25 : 1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+    }
+
+    private func stepButton(_ symbol: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white.opacity(0.8))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Folder the workspace opens in.
+    private var folderSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionLabel("Folder")
+            Button(action: chooseFolder) {
+                HStack(spacing: 7) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text(folderName)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(fieldBackground)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// One-off command run when the workspace opens.
+    private var startupSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionLabel("Startup command")
+            TextField("e.g. npm run dev", text: startupBinding)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.9))
+                .autocorrectionDisabled()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(fieldBackground)
+        }
+    }
+
+    private var toggleSection: some View {
+        VStack(spacing: 0) {
+            toggleRow("Notifications", $workspace.notifyOnInput)
+            Divider().overlay(Color.white.opacity(0.06))
+            toggleRow("Open at launch", $workspace.openAtLaunch)
+        }
+        .background(fieldBackground)
+    }
+
+    /// Uniform row: label left, switch pinned right — so every switch lines up.
+    private func toggleRow(_ label: String, _ isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            Spacer(minLength: 8)
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(color)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+    }
+
+    /// The color picker, moved below the other settings — compact.
+    private var colorSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            sectionLabel("Color")
+            GaiSVSquare(hue: hue, saturation: $saturation, brightness: $brightness)
+                .frame(height: 104)
+                .onChange(of: saturation) { _ in applyColor() }
+                .onChange(of: brightness) { _ in applyColor() }
+            GaiHueSlider(hue: $hue)
+                .frame(height: 16)
+                .onChange(of: hue) { _ in applyColor() }
+            hexRow
+            swatches
+        }
+    }
+
+    // MARK: Helpers
+
+    static let cliTools = ["claude", "codex", "agy", "opencode"]
+
+    private var totalPanes: Int { workspace.cliCounts.values.reduce(0, +) }
+
+    /// Set a CLI's pane count, clamped to ≥ 0 and to a grand total of 16.
+    private func setCLICount(_ cli: String, _ value: Int) {
+        let others = totalPanes - (workspace.cliCounts[cli] ?? 0)
+        let allowed = min(max(0, value), 16 - others)
+        if allowed <= 0 {
+            workspace.cliCounts[cli] = nil
+        } else {
+            workspace.cliCounts[cli] = allowed
+        }
+    }
+
+    private var folderName: String {
+        workspace.defaultDirectory?.lastPathComponent ?? "Home"
+    }
+
+    private var startupBinding: Binding<String> {
+        Binding(
+            get: { workspace.startupCommand ?? "" },
+            set: { workspace.startupCommand = $0.isEmpty ? nil : $0 })
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.directoryURL = workspace.defaultDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            workspace.defaultDirectory = url
+        }
+    }
+
     // MARK: Pieces
 
     private var header: some View {
         HStack(spacing: 8) {
-            Button {
-                ui.editingWorkspaceID = nil
-            } label: {
+            Button(action: cancel) {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 11, weight: .heavy))
-                    Text("Done")
+                    Text("Back")
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundStyle(.white.opacity(0.85))
@@ -174,55 +362,116 @@ struct GaiWorkspaceEditor: View {
                 .fill(Color.white.opacity(0.07)))
     }
 
+    /// The personal palette: no presets. The dashed "+" saves the color you
+    /// dialed in the picker; tapping a saved swatch applies it to the workspace;
+    /// right-click removes it.
     private var swatches: some View {
-        // Resolve the current hex once, not once per swatch (each is an NSColor
-        // conversion) — 18× per render and per drag frame was needless churn.
         let currentHex = color.gaiHexString
+        let alreadySaved = ui.savedColors.contains(currentHex)
         let columns = Array(repeating: GridItem(.flexible(), spacing: 7), count: 6)
         return LazyVGrid(columns: columns, spacing: 7) {
-            ForEach(GaiWorkspacePalette.swatches, id: \.self) { hex in
+            Button { ui.saveColor(currentHex) } label: {
+                ZStack {
+                    Circle().strokeBorder(
+                        .white.opacity(0.3),
+                        style: StrokeStyle(lineWidth: 1, dash: [2.5]))
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(alreadySaved ? 0.22 : 0.85))
+                }
+                .frame(width: 20, height: 20)
+                .frame(maxWidth: .infinity)
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(alreadySaved)
+            .help("Add this color to your palette")
+
+            ForEach(ui.savedColors, id: \.self) { hex in
                 let swatch = Color(gaiHex: hex) ?? .white
                 let isCurrent = hex == currentHex
                 Circle()
                     .fill(swatch)
-                    .frame(height: 20)
+                    .frame(width: 20, height: 20)
+                    .frame(maxWidth: .infinity)
                     .overlay(
                         Circle().strokeBorder(
                             .white.opacity(isCurrent ? 0.95 : 0.0),
-                            lineWidth: 2))
-                    .overlay(Circle().strokeBorder(.black.opacity(0.15), lineWidth: 0.5))
-                    .scaleEffect(isCurrent ? 1.08 : 1)
+                            lineWidth: 2)
+                            .frame(width: 20, height: 20))
+                    .scaleEffect(isCurrent ? 1.1 : 1)
                     .contentShape(Circle())
                     .onTapGesture { select(swatch) }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            ui.removeSavedColor(hex)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
             }
         }
+        .animation(.easeOut(duration: 0.16), value: ui.savedColors)
         .animation(.easeOut(duration: 0.12), value: currentHex)
     }
 
-    private var deleteButton: some View {
-        Button {
-            let id = workspace.id
-            ui.editingWorkspaceID = nil
-            store.removeWorkspace(id)
-        } label: {
-            HStack(spacing: 6) {
+    /// Split footer: trash (delete) on the left, checkmark (validate) on the right.
+    private var bottomBar: some View {
+        HStack(spacing: 10) {
+            Button(action: delete) {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("Delete workspace")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color(red: 1, green: 0.45, blue: 0.45))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.13)))
+                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
-            .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.42))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.12)))
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .buttonStyle(.plain)
+            .help("Delete workspace")
+
+            Button(action: validate) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(color.opacity(0.9)))
+                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Done")
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: Actions
+
+    /// Back: cancel. Discards a just-created workspace; otherwise just closes.
+    private func cancel() {
+        let id = workspace.id
+        let wasNew = ui.editingIsNew
+        ui.editingIsNew = false
+        ui.editingWorkspaceID = nil
+        if wasNew { store.removeWorkspace(id) }
+    }
+
+    /// Checkmark: keep the workspace, committing the picked color.
+    private func validate() {
+        applyColor()
+        ui.editingIsNew = false
+        ui.editingWorkspaceID = nil
+    }
+
+    private func delete() {
+        let id = workspace.id
+        ui.editingIsNew = false
+        ui.editingWorkspaceID = nil
+        store.removeWorkspace(id)
+    }
 
     /// Push the current HSB to the workspace (live) and keep the hex field synced.
     private func applyColor() {
@@ -283,7 +532,9 @@ private struct GaiSVSquare: View {
                         y: (1 - brightness) * h)
             }
             .contentShape(Rectangle())
-            .gesture(
+            // High priority so dragging the picker dials the color instead of
+            // scrolling the settings list it now lives in.
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         saturation = min(max(value.location.x / w, 0), 1)
@@ -332,7 +583,7 @@ private struct GaiHueSlider: View {
                     .offset(x: hue * w - 7)
             }
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         hue = min(max(value.location.x / w, 0), 1)

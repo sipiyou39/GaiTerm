@@ -24,6 +24,10 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// keyboard-eligible for the editor's text fields.
     @Published var editingWorkspaceID: GaiWorkspace.ID?
 
+    /// True when the editor was opened for a *just-created* workspace (via +),
+    /// so "Back" discards it (cancel); editing an existing one only closes.
+    @Published var editingIsNew: Bool = false
+
     /// Whether the editor is in the view tree. Flipped on once the card reaches
     /// its open size — its one heavy layout pass is paid here (on a ~still card,
     /// invisible). Kept separate from `editorContentVisible` so the fade can run
@@ -37,6 +41,25 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// Whether the (future) file-explorer panel is open. Drives a much taller
     /// card expansion than the editor — for testing the larger window size.
     @Published var explorerOpen: Bool = false
+
+    /// The user's saved accent colors ("RRGGBB" hex), built by hand from the
+    /// picker — there are no presets. Persisted across launches; shared by every
+    /// workspace editor (one personal palette). Clicking a saved color applies
+    /// it to the edited workspace.
+    @Published private(set) var savedColors: [String] =
+        (UserDefaults.standard.array(forKey: GaiWorkspaceUIModel.savedColorsKey) as? [String]) ?? []
+    private static let savedColorsKey = "gai.workspace.savedColors"
+
+    func saveColor(_ hex: String) {
+        guard !savedColors.contains(hex) else { return }
+        savedColors.append(hex)
+        UserDefaults.standard.set(savedColors, forKey: Self.savedColorsKey)
+    }
+
+    func removeSavedColor(_ hex: String) {
+        savedColors.removeAll { $0 == hex }
+        UserDefaults.standard.set(savedColors, forKey: Self.savedColorsKey)
+    }
 
     /// Whether the terminal stage is slid out (true) or tucked to its
     /// right-edge pull tab (false). Mirrors `isExpanded` for the drawer.
@@ -762,24 +785,27 @@ final class GaiWorkspaceManager {
         panel.setFrame(open ? openFrame(on: screen) : closedFrame(on: screen), display: true)
     }
 
-    /// Target slab height for the current mode (explorer > editor > list).
+    /// Target slab height: the list, or the single large expansion (used for the
+    /// editor, new-workspace creation and the future file explorer alike).
     private func cardHeightTarget() -> CGFloat {
         let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
-        let natural: CGFloat
-        if ui.explorerOpen {
-            natural = explorerNaturalHeight()
-        } else if ui.editingWorkspaceID != nil {
-            natural = GaiDrawerMetrics.editorHeight
-        } else {
-            natural = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
-        }
+        let natural = (ui.explorerOpen || ui.editingWorkspaceID != nil)
+            ? largeExpansionHeight()
+            : listHeight()
         return min(natural, cap)
     }
 
-    /// The file-explorer card height: much taller than the editor, but never the
-    /// full screen height like the terminal stage.
-    private func explorerNaturalHeight() -> CGFloat {
+    /// The one large card height: much taller than the list, but never the full
+    /// screen like the terminal stage.
+    private func largeExpansionHeight() -> CGFloat {
         (targetScreen()?.visibleFrame.height ?? 800) * 0.78
+    }
+
+    /// List card height — adapts to the workspace count, but never shorter than
+    /// the 2-row height (below that the pull tab is taller than the card and its
+    /// welds break).
+    private func listHeight() -> CGFloat {
+        GaiDrawerMetrics.cardHeight(forRows: max(store.workspaces.count, 2))
     }
 
     private func recomputeCardHeight() {
@@ -796,9 +822,8 @@ final class GaiWorkspaceManager {
     /// The window's content height: the largest of the list, the editor and the
     /// explorer, so any of them can grow into it without a window resize.
     private func panelHeightTarget() -> CGFloat {
-        let list = GaiDrawerMetrics.cardHeight(forRows: store.workspaces.count)
         let cap = (targetScreen()?.visibleFrame.height ?? 800) * 0.82
-        return min(max(max(list, GaiDrawerMetrics.editorHeight), explorerNaturalHeight()), cap)
+        return min(max(listHeight(), largeExpansionHeight()), cap)
     }
 
     /// Enter/leave the workspace editor — the heart of the organic expansion.

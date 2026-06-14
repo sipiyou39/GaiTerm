@@ -87,9 +87,23 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// Where new sessions in this workspace start. `nil` means the user's home.
     @Published var defaultDirectory: URL?
 
-    /// Optional command auto-launched in new sessions (e.g. `claude`, `codex`),
-    /// supporting the AI-CLI workflow. `nil` = a plain shell.
+    /// CLI auto-launched in the first plain pane (legacy single-command path).
+    /// `nil` = a plain shell. The multi-CLI config below supersedes it on open.
     @Published var defaultCommand: String?
+
+    /// How many panes of each CLI to open automatically (e.g. `["claude": 2,
+    /// "codex": 1]`). Several CLIs can be mixed; the total is capped at 16.
+    @Published var cliCounts: [String: Int] = [:]
+
+    /// A one-off command run once when the workspace opens (e.g. `npm run dev`).
+    @Published var startupCommand: String?
+
+    /// Notify (macOS notification) only when a CLI in this workspace is waiting
+    /// for the user's response (the bell). Off by default.
+    @Published var notifyOnInput: Bool = false
+
+    /// Open this workspace automatically when GaiTerm launches.
+    @Published var openAtLaunch: Bool = false
 
     /// Ordered sessions in this workspace.
     @Published var sessions: [GaiTerminalSession] = []
