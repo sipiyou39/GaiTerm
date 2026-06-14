@@ -263,7 +263,12 @@ struct WorkspaceDrawerView: View {
         .padding(.trailing, M.tabWidth + 12)
         .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
         .animation(.easeInOut(duration: 0.35), value: ui.editorContentVisible)
-        .animation(.easeInOut(duration: 0.28), value: ui.explorerOpen)
+        // NOTE: no `.animation(value: explorerOpen)` here on purpose. The slab
+        // frame height is already animated (with `.gaiCardResize`) by the
+        // manager; adding a second, differently-timed animation here made the
+        // tab header race ahead of the slab background and "float" to its final
+        // spot before the card caught up. Letting the content ride the slab's
+        // own height animation keeps header and background perfectly in sync.
     }
 
     // MARK: Tabs header
@@ -278,7 +283,11 @@ struct WorkspaceDrawerView: View {
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Color.white.opacity(0.06)))
             Spacer(minLength: 0)
-            plusButton
+            // Only in the Space tab, and only when there's already a workspace —
+            // the empty state has its own create button, and File has no use for +.
+            if !ui.explorerOpen && !store.workspaces.isEmpty {
+                plusButton
+            }
         }
         .frame(height: 32)
     }
@@ -300,7 +309,10 @@ struct WorkspaceDrawerView: View {
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.15), value: active)
+        // No `.animation(value: active)`: tab switching coincides with the card
+        // resize, so a tab-local animation would capture the tab's resize-driven
+        // position change and run it on its own timeline — making the label race
+        // ahead of (or lag behind) the slab background. The highlight just snaps.
     }
 
     /// Create a workspace and drop straight into the editor (named, colored, ready).
