@@ -490,6 +490,10 @@ final class GaiWorkspaceManager {
     /// pops in; warming it up (no focus steal) keeps switching instant.
     private func warmFirstSurfaces() {
         for workspace in store.workspaces {
+            // Never warm the workspace being created/edited: its CLI config
+            // isn't set yet, so a warm plain shell would occupy the tree and
+            // block the CLI panes from being built when it opens.
+            if workspace.id == ui.editingWorkspaceID { continue }
             splits.ensureFirstSurface(in: workspace, focus: false)
         }
     }

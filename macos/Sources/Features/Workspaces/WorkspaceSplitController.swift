@@ -128,9 +128,77 @@ final class GaiSplitController {
     /// in. Warm-up must not steal focus from the user's current terminal.
     func ensureFirstSurface(in workspace: GaiWorkspace, focus shouldFocus: Bool = true) {
         guard workspace.surfaceTree.isEmpty else { return }
+
+        let commands = workspace.cliCommandList()
+        guard commands.isEmpty else {
+            // CLI workspace: open one pane per configured CLI and type the
+            // command into each. Only on a real open (`shouldFocus`), never on
+            // warm-up — warming would spawn every workspace's CLIs at launch.
+            guard shouldFocus else { return }
+            openCLISurfaces(in: workspace, commands: commands)
+            return
+        }
+
         guard let view = makeSurface(for: workspace, baseConfig: nil) else { return }
         workspace.surfaceTree = SplitTree(view: view)
         if shouldFocus { focus(view) }
+    }
+
+    /// Open an even grid of panes — one per configured CLI — and run the CLI in
+    /// each, the way the user would (open a terminal, type `claude`, ⏎).
+    ///
+    /// The grid is built column-first: `cols = ⌈√n⌉` equal columns, each filled
+    /// with as-even-as-possible rows. `equalized()` then weights every split by
+    /// its leaf count, so all panes end up the same size (best effort for odd
+    /// counts — the short column just gets fewer rows).
+    private func openCLISurfaces(in workspace: GaiWorkspace, commands: [String]) {
+        let n = commands.count
+        guard let first = makeSurface(for: workspace, baseConfig: nil) else { return }
+        workspace.surfaceTree = SplitTree(view: first)
+
+        let cols = max(1, Int(Double(n).squareRoot().rounded(.up)))
+        var rowsPerColumn = [Int](repeating: n / cols, count: cols)
+        for i in 0..<(n % cols) { rowsPerColumn[i] += 1 }
+
+        // The top pane of each column (created by splitting the previous top
+        // rightward).
+        var columnTops = [first]
+        for c in 1..<cols {
+            guard let top = newSplit(
+                in: workspace, at: columnTops[c - 1], direction: .right) else { break }
+            columnTops.append(top)
+        }
+
+        // Fill each column downward, gathering panes in order.
+        var views: [Ghostty.SurfaceView] = []
+        for (c, top) in columnTops.enumerated() {
+            views.append(top)
+            var last = top
+            for _ in 1..<rowsPerColumn[c] {
+                guard let view = newSplit(in: workspace, at: last, direction: .down) else { break }
+                views.append(view)
+                last = view
+            }
+        }
+
+        workspace.surfaceTree = workspace.surfaceTree.equalized()
+
+        for (index, view) in views.enumerated() where index < commands.count {
+            runCommand(commands[index], in: view)
+        }
+        focus(first)
+    }
+
+    /// Run a command in a freshly-opened pane once its shell is up: type the
+    /// text, then press a real Return key (not a `\r` in the text, which the
+    /// shell's bracketed-paste mode would leave pasted-but-unexecuted).
+    private func runCommand(_ command: String, in view: Ghostty.SurfaceView) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard let surface = view.surfaceModel else { return }
+            surface.sendText(command)
+            surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .press))
+            surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .release))
+        }
     }
 
     /// Split the given surface (or the workspace's first pane when nil —

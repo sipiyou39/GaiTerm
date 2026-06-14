@@ -132,6 +132,21 @@ final class GaiWorkspace: ObservableObject, Identifiable {
         return .gaiAccent(for: name)
     }
 
+    /// The CLI tools offered in the editor, in their canonical display order.
+    static let cliOrder = ["claude", "codex", "agy", "opencode"]
+
+    /// `cliCounts` expanded into a flat, stably-ordered list of commands to
+    /// auto-run on open — e.g. `["claude", "claude", "codex"]` for 2 claude +
+    /// 1 codex. Empty means a single plain shell.
+    func cliCommandList() -> [String] {
+        var list: [String] = []
+        for cli in GaiWorkspace.cliOrder {
+            let n = max(0, cliCounts[cli] ?? 0)
+            list.append(contentsOf: Array(repeating: cli, count: n))
+        }
+        return list
+    }
+
     /// The session wrapping the given pane's surface, if any.
     func session(for view: Ghostty.SurfaceView) -> GaiTerminalSession? {
         sessions.first { $0.surfaceView === view }

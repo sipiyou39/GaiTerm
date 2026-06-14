@@ -262,7 +262,7 @@ struct GaiWorkspaceEditor: View {
 
     // MARK: Helpers
 
-    static let cliTools = ["claude", "codex", "agy", "opencode"]
+    static let cliTools = GaiWorkspace.cliOrder
 
     private var totalPanes: Int { workspace.cliCounts.values.reduce(0, +) }
 
@@ -459,11 +459,18 @@ struct GaiWorkspaceEditor: View {
         if wasNew { store.removeWorkspace(id) }
     }
 
-    /// Checkmark: keep the workspace, committing the picked color.
+    /// Checkmark: keep the workspace, committing the picked color. For a
+    /// just-created workspace, open it right away so its CLI panes are built and
+    /// launched without a second click.
     private func validate() {
         applyColor()
+        let wasNew = ui.editingIsNew
         ui.editingIsNew = false
         ui.editingWorkspaceID = nil
+        if wasNew {
+            ui.selectedWorkspaceID = workspace.id
+            store.openWorkspaceID = workspace.id
+        }
     }
 
     private func delete() {
