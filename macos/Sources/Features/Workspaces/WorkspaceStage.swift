@@ -196,9 +196,12 @@ struct WorkspaceStageView: View {
 
 private struct StageCard: View {
     @ObservedObject var workspace: GaiWorkspace
-    let ui: GaiWorkspaceUIModel
+    @ObservedObject var ui: GaiWorkspaceUIModel
     let splits: GaiSplitController
     let onClose: () -> Void
+
+    /// One editor model per open file, so unsaved edits survive tab switches.
+    @State private var models: [String: GaiEditorModel] = [:]
 
     /// Apple's elevated dark surface gray. The surfaces' Metal layers are
     /// screen-blended so their theme background melts into this fill while
@@ -215,13 +218,28 @@ private struct StageCard: View {
     /// Flat, BridgeMind-style: the terminals ARE the stage. No surrounding
     /// frame, no per-pane cards — panes meet edge to edge on a 1px divider.
     /// Clipping and tab/bleed insets are handled by the enclosing slab.
+    private var showsEditor: Bool { ui.stageShowsEditor && !ui.openFiles.isEmpty }
+
     var body: some View {
-        terminalArea
-            .background(interiorGray)
-            .onAppear { splits.ensureFirstSurface(in: workspace) }
-            .onChange(of: focusedSurface) { newValue in
-                if newValue != nil { lastFocusedSurface = .init(newValue) }
+        Group {
+            if showsEditor {
+                editorView
+            } else {
+                terminalArea
             }
+        }
+        .background(interiorGray)
+        .onAppear {
+            syncModels()
+            if !ui.stageShowsEditor { splits.ensureFirstSurface(in: workspace) }
+        }
+        .onChange(of: ui.openFiles) { _ in syncModels() }
+        .onChange(of: ui.stageShowsEditor) { showsEditor in
+            if !showsEditor { splits.ensureFirstSurface(in: workspace) }
+        }
+        .onChange(of: focusedSurface) { newValue in
+            if newValue != nil { lastFocusedSurface = .init(newValue) }
+        }
     }
 
     private var terminalArea: some View {
@@ -232,6 +250,151 @@ private struct StageCard: View {
             focusedSurface: focusedSurface,
             splits: splits)
         .ghosttyLastFocusedSurface(lastFocusedSurface)
+    }
+
+    /// Keep `models` in lockstep with `ui.openFiles`; pick a valid active tab.
+    private func syncModels() {
+        for path in ui.openFiles where models[path] == nil {
+            models[path] = GaiEditorModel(path: path)
+        }
+        for path in Array(models.keys) where !ui.openFiles.contains(path) {
+            models[path] = nil
+        }
+        if ui.activeFilePath == nil || !ui.openFiles.contains(ui.activeFilePath!) {
+            ui.activeFilePath = ui.openFiles.last
+        }
+    }
+
+    // MARK: Editor — file tabs over the code view (terminals hidden here)
+
+    private var editorView: some View {
+        VStack(spacing: 0) {
+            editorTabStrip
+            Divider().overlay(Color.white.opacity(0.07))
+            Group {
+                if let path = ui.activeFilePath, let model = models[path] {
+                    GaiEditorPaneContent(model: model, accent: accent).id(path)
+                } else {
+                    Color.clear
+                }
+            }
+            // Clip the editor (text view + ruler) to its own area so the ruler's
+            // edge separator can never bleed up into the tab bar / header.
+            .clipped()
+        }
+    }
+
+    private var editorTabStrip: some View {
+        HStack(spacing: 4) {
+            ForEach(ui.openFiles, id: \.self) { path in
+                if let model = models[path] {
+                    EditorFileTab(
+                        model: model, accent: accent,
+                        isActive: ui.activeFilePath == path,
+                        onSelect: { ui.activeFilePath = path },
+                        onClose: { closeFile(path) })
+                }
+            }
+            Spacer(minLength: 0)
+            if let path = ui.activeFilePath, let model = models[path] {
+                EditorSaveButton(model: model)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 34)
+        .background(Color.gaiPanelGray)
+    }
+
+    private func closeFile(_ path: String) {
+        guard let idx = ui.openFiles.firstIndex(of: path) else { return }
+        ui.openFiles.remove(at: idx)
+        models[path] = nil
+        if ui.activeFilePath == path {
+            ui.activeFilePath = ui.openFiles.indices.contains(idx)
+                ? ui.openFiles[idx] : ui.openFiles.last
+        }
+        if ui.openFiles.isEmpty {
+            ui.activeFilePath = nil
+            ui.stageShowsEditor = false
+        }
+    }
+}
+
+// MARK: - Editor file tab
+
+/// One file tab in the editor's tab strip — observes its own model so the
+/// modified dot updates live; ✕ on hover (or when active) closes it.
+private struct EditorFileTab: View {
+    @ObservedObject var model: GaiEditorModel
+    let accent: Color
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    @State private var hovering = false
+
+    private var node: GaiFileNode {
+        GaiFileNode(id: model.path ?? "", name: model.name,
+                    path: model.path ?? "", isDirectory: false, depth: 0)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: GaiFileIcon.symbol(for: node))
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(GaiFileIcon.color(for: node))
+            Text(model.name.isEmpty ? "Untitled" : model.name)
+                .font(.system(size: 11.5, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? .white : .white.opacity(0.6))
+                .lineLimit(1)
+
+            // Modified dot, or a close ✕ on hover/active (✕ takes priority).
+            ZStack {
+                if model.isModified && !(hovering || isActive) {
+                    Circle().fill(accent).frame(width: 5, height: 5)
+                }
+                if hovering || isActive {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .frame(width: 14, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(width: 14, height: 14)
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 6)
+        .frame(height: 24)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(isActive ? Color.white.opacity(0.12)
+                : hovering ? Color.white.opacity(0.05) : .clear))
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// The active file's Save button — observes the model so it shows only when
+/// there are unsaved changes.
+private struct EditorSaveButton: View {
+    @ObservedObject var model: GaiEditorModel
+
+    var body: some View {
+        if model.isModified {
+            Button { model.save() } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Save (⌘S)")
+        }
     }
 }
 

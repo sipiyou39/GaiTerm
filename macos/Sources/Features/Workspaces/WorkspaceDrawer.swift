@@ -247,7 +247,7 @@ struct WorkspaceDrawerView: View {
                 VStack(alignment: .leading, spacing: M.headerGap) {
                     tabsHeader
                     if ui.explorerOpen {
-                        explorerPlaceholder
+                        fileTab
                     } else {
                         rowsList
                     }
@@ -277,19 +277,34 @@ struct WorkspaceDrawerView: View {
         HStack(spacing: 8) {
             HStack(spacing: 3) {
                 tabButton("square.grid.2x2", "Space", active: !ui.explorerOpen) { ui.explorerOpen = false }
+                    .contextMenu { Button("New workspace", action: createNewWorkspace) }
                 tabButton("folder", "File", active: ui.explorerOpen) { ui.explorerOpen = true }
             }
             .padding(3)
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Color.white.opacity(0.06)))
             Spacer(minLength: 0)
-            // Only in the Space tab, and only when there's already a workspace —
-            // the empty state has its own create button, and File has no use for +.
-            if !ui.explorerOpen && !store.workspaces.isEmpty {
-                plusButton
-            }
+            // Stage mode toggle: terminal (default) ⇄ editor. Greyed until a
+            // file is open (nothing to switch to otherwise).
+            stageModeToggle
         }
         .frame(height: 32)
+    }
+
+    private var stageModeToggle: some View {
+        let hasFile = !ui.openFiles.isEmpty
+        return Button {
+            if hasFile { ui.stageShowsEditor.toggle() }
+        } label: {
+            Image(systemName: ui.stageShowsEditor ? "doc.text" : "terminal")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white.opacity(hasFile ? 0.85 : 0.25))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasFile)
+        .help(ui.stageShowsEditor ? "Show terminal" : "Show editor")
     }
 
     private func tabButton(_ icon: String, _ label: String, active: Bool, _ action: @escaping () -> Void) -> some View {
@@ -323,19 +338,6 @@ struct WorkspaceDrawerView: View {
         ui.selectedWorkspaceID = workspace.id
         ui.editingIsNew = true
         ui.editingWorkspaceID = workspace.id
-    }
-
-    private var plusButton: some View {
-        Button(action: createNewWorkspace) {
-            Image(systemName: "plus")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 28, height: 28)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(0.13)))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -380,6 +382,7 @@ struct WorkspaceDrawerView: View {
                     isSelected: workspace.id == ui.selectedWorkspaceID,
                     onSelect: {
                         ui.selectedWorkspaceID = workspace.id
+                        ui.stageShowsEditor = false
                         if store.openWorkspaceID == workspace.id {
                             ui.isStageExpanded = true
                         } else {
@@ -397,18 +400,24 @@ struct WorkspaceDrawerView: View {
         }
     }
 
-    private var explorerPlaceholder: some View {
-        VStack(spacing: 10) {
-            Spacer(minLength: 0)
-            Image(systemName: "folder")
-                .font(.system(size: 30, weight: .light))
-                .foregroundStyle(.white.opacity(0.18))
-            Text("File explorer — coming soon")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.35))
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    /// The File tab: the selected workspace's folder, browsed as a tree.
+    private var fileTab: some View {
+        let workspace = store.workspace(for: ui.selectedWorkspaceID)
+        return GaiFileExplorerView(
+            rootPath: workspace?.defaultDirectory?.path,
+            accent: workspace?.accentColor ?? .white,
+            onOpenFile: { node in
+                // Accumulate the file as a tab and make it active; open the stage
+                // for the selected workspace if it isn't already showing.
+                if !ui.openFiles.contains(node.path) { ui.openFiles.append(node.path) }
+                ui.activeFilePath = node.path
+                ui.stageShowsEditor = true
+                if store.openWorkspaceID == nil {
+                    store.openWorkspaceID = ui.selectedWorkspaceID
+                } else {
+                    ui.isStageExpanded = true
+                }
+            })
     }
 
     // MARK: Tab

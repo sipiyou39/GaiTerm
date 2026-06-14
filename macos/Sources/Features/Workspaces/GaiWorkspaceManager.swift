@@ -38,9 +38,19 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// fade is a pure opacity animation on the already-mounted palette.
     @Published var editorContentVisible: Bool = false
 
-    /// Whether the (future) file-explorer panel is open. Drives a much taller
-    /// card expansion than the editor — for testing the larger window size.
+    /// Whether the file-explorer ("File") tab is open. Drives the large card
+    /// expansion (same height as the workspace editor).
     @Published var explorerOpen: Bool = false
+
+    /// Files open in the stage editor, in tab order. Empty = no editor.
+    @Published var openFiles: [String] = []
+
+    /// The active editor tab's path.
+    @Published var activeFilePath: String?
+
+    /// Whether the stage currently shows the editor (true) or the terminals
+    /// (false). The drawer's mode toggle flips this.
+    @Published var stageShowsEditor: Bool = false
 
     /// The user's saved accent colors ("RRGGBB" hex), built by hand from the
     /// picker — there are no presets. Persisted across launches; shared by every
@@ -669,7 +679,10 @@ final class GaiWorkspaceManager {
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
         }
-        if let workspace = store.workspace(for: store.openWorkspaceID) {
+        // Don't spin up terminals (or auto-launch CLIs) when the stage opens
+        // straight into the editor from a file click — only when the terminals
+        // are what's being shown.
+        if !ui.stageShowsEditor, let workspace = store.workspace(for: store.openWorkspaceID) {
             splits.ensureFirstSurface(in: workspace)
             if let leaf = workspace.surfaceTree.root?.leftmostLeaf() {
                 DispatchQueue.main.async { Ghostty.moveFocus(to: leaf) }
@@ -1015,6 +1028,7 @@ final class GaiWorkspaceManager {
             .receive(on: RunLoop.main)
             .sink { [weak self] open in self?.updateExplorer(open: open) }
             .store(in: &cancellables)
+
 
         // Pause the on-stage terminals' rendering for the duration of a slide.
         // The slab moves as a rasterized bitmap; if a pane keeps repainting it
