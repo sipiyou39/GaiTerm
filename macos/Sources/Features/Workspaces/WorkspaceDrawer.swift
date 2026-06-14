@@ -43,9 +43,9 @@ enum GaiDrawerMetrics {
     // layout changes, keep `cardHeight(forRows:)` in sync.
     static let rowHeight: CGFloat = 30
     static let rowSpacing: CGFloat = 2
-    static let headerHeight: CGFloat = 24
-    static let headerGap: CGFloat = 10
-    static let verticalPadding: CGFloat = 14
+    static let headerHeight: CGFloat = 32      // the tabs row
+    static let headerGap: CGFloat = 16         // breathing room: tabs → rows
+    static let verticalPadding: CGFloat = 14   // equal top & bottom padding
 
     /// Natural card height for a given number of workspace rows.
     static func cardHeight(forRows rows: Int) -> CGFloat {
@@ -226,13 +226,9 @@ struct WorkspaceDrawerView: View {
 
     @ViewBuilder
     private var cardContent: some View {
-        ZStack(alignment: .center) {
-            if ui.explorerOpen {
-                // Placeholder for the future file explorer; a way back for now.
-                backButton { ui.explorerOpen = false }
-                    .transition(.opacity)
-            } else if ui.editingWorkspaceID != nil {
-                // The card grows EMPTY (perfectly smooth — verified): the palette
+        ZStack(alignment: .top) {
+            if ui.editingWorkspaceID != nil {
+                // The card grows EMPTY (perfectly smooth — verified): the editor
                 // is NOT in the view tree during the growth at all (opacity 0
                 // still composites every frame — that was the stutter). It is
                 // mounted (editorMounted) only once the card reaches its open
@@ -246,8 +242,19 @@ struct WorkspaceDrawerView: View {
                         .transition(.identity)
                 }
             } else {
-                workspaceList
-                    .transition(.opacity)
+                // Tabs header (Workspaces · Folders) on top, then either the
+                // workspace rows or the (placeholder) file explorer.
+                VStack(alignment: .leading, spacing: M.headerGap) {
+                    tabsHeader
+                    if ui.explorerOpen {
+                        explorerPlaceholder
+                    } else {
+                        rowsList
+                    }
+                }
+                // Fade out fast on the way to the editor, so the card grows
+                // empty instead of dragging residual rows through the expansion.
+                .transition(.opacity.animation(.easeOut(duration: 0.12)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -259,94 +266,137 @@ struct WorkspaceDrawerView: View {
         .animation(.easeInOut(duration: 0.28), value: ui.explorerOpen)
     }
 
-    private func backButton(_ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .heavy))
-                Text("Done")
-                    .font(.system(size: 12, weight: .semibold))
+    // MARK: Tabs header
+
+    private var tabsHeader: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 3) {
+                tabButton("square.grid.2x2", "Space", active: !ui.explorerOpen) { ui.explorerOpen = false }
+                tabButton("folder", "File", active: ui.explorerOpen) { ui.explorerOpen = true }
             }
-            .foregroundStyle(.white.opacity(0.85))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: M.headerHeight)
-            .contentShape(Rectangle())
+            .padding(3)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.06)))
+            Spacer(minLength: 0)
+            plusButton
+        }
+        .frame(height: 32)
+    }
+
+    private func tabButton(_ icon: String, _ label: String, active: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(active ? .white : .white.opacity(0.5))
+            // Equal width for every tab (sized for the longest label) so they
+            // line up no matter how short the word is.
+            .frame(width: 62, height: 26)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(active ? Color.white.opacity(0.16) : .clear))
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.15), value: active)
+    }
+
+    /// Create a workspace and drop straight into the editor (named, colored, ready).
+    private func createNewWorkspace() {
+        let workspace = store.createWorkspace(
+            name: "",
+            defaultDirectory: FileManager.default.homeDirectoryForCurrentUser)
+        ui.selectedWorkspaceID = workspace.id
+        ui.editingIsNew = true
+        ui.editingWorkspaceID = workspace.id
+    }
+
+    private var plusButton: some View {
+        Button(action: createNewWorkspace) {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 28, height: 28)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.13)))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 
-    private var workspaceList: some View {
-        VStack(alignment: .leading, spacing: M.headerGap) {
-            header
-            VStack(alignment: .leading, spacing: M.rowSpacing) {
-                ForEach(store.workspaces) { workspace in
-                    GaiWorkspaceRow(
-                        workspace: workspace,
-                        isSelected: workspace.id == ui.selectedWorkspaceID,
-                        onSelect: {
-                            // Selecting a workspace always shows it — it never
-                            // tucks it away (the right-edge tab does that).
-                            // Re-selecting the one already on stage just
-                            // re-expands it if it was tucked behind its tab.
-                            ui.selectedWorkspaceID = workspace.id
-                            if store.openWorkspaceID == workspace.id {
-                                ui.isStageExpanded = true
-                            } else {
-                                store.openWorkspaceID = workspace.id
-                            }
-                        },
-                        onEdit: {
-                            ui.editingIsNew = false
-                            ui.editingWorkspaceID = workspace.id
-                        })
-                    .frame(height: M.rowHeight)
-                }
-            }
-            Spacer(minLength: 0)
+    @ViewBuilder
+    private var rowsList: some View {
+        if store.workspaces.isEmpty {
+            emptyWorkspacesPlaceholder
+        } else {
+            workspaceRows
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Text("WORKSPACES")
-                .font(.system(size: 10.5, weight: .semibold))
-                .tracking(1.2)
-                .foregroundStyle(.white.opacity(0.6))
-                .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
+    private var emptyWorkspacesPlaceholder: some View {
+        VStack(spacing: 12) {
             Spacer(minLength: 0)
-            // Folder: opens the (future) file-explorer panel — a much taller
-            // expansion, for testing the larger window size.
-            Button {
-                ui.explorerOpen = true
-            } label: {
-                Image(systemName: "folder")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 19, height: 19)
-                    .background(Circle().fill(.white.opacity(0.13)))
-                    .contentShape(Circle())
+            Text("No workspaces")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.4))
+            Button(action: createNewWorkspace) {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("New workspace")
+                        .font(.system(size: 11.5, weight: .semibold))
+                }
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Color.white.opacity(0.12)))
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            Button {
-                // Create and drop straight into the editor with the name
-                // focused, so a new workspace is named, colored and ready.
-                let workspace = store.createWorkspace(
-                    name: "",
-                    defaultDirectory: FileManager.default.homeDirectoryForCurrentUser)
-                ui.selectedWorkspaceID = workspace.id
-                ui.editingIsNew = true
-                ui.editingWorkspaceID = workspace.id
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 19, height: 19)
-                    .background(Circle().fill(.white.opacity(0.13)))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
+            Spacer(minLength: 0)
         }
-        .frame(height: M.headerHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var workspaceRows: some View {
+        VStack(alignment: .leading, spacing: M.rowSpacing) {
+            ForEach(store.workspaces) { workspace in
+                GaiWorkspaceRow(
+                    workspace: workspace,
+                    isSelected: workspace.id == ui.selectedWorkspaceID,
+                    onSelect: {
+                        ui.selectedWorkspaceID = workspace.id
+                        if store.openWorkspaceID == workspace.id {
+                            ui.isStageExpanded = true
+                        } else {
+                            store.openWorkspaceID = workspace.id
+                        }
+                    },
+                    onEdit: {
+                        ui.editingIsNew = false
+                        ui.editingWorkspaceID = workspace.id
+                    },
+                    onDuplicate: { store.duplicateWorkspace(workspace.id) },
+                    onDelete: { store.removeWorkspace(workspace.id) })
+                .frame(height: M.rowHeight)
+            }
+        }
+    }
+
+    private var explorerPlaceholder: some View {
+        VStack(spacing: 10) {
+            Spacer(minLength: 0)
+            Image(systemName: "folder")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.white.opacity(0.18))
+            Text("File explorer — coming soon")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.35))
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Tab
@@ -391,17 +441,33 @@ private struct GaiWorkspaceRow: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onEdit: () -> Void
+    let onDuplicate: () -> Void
+    let onDelete: () -> Void
 
     @State private var hovering = false
 
     private var accent: Color { workspace.accentColor }
 
+    /// How many CLIs in this workspace are waiting for the user (the bell).
+    private var waitingCount: Int {
+        workspace.sessions.filter { $0.attention == .needsInput }.count
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(accent)
-                .frame(width: 7, height: 7)
-                .shadow(color: accent.opacity(isSelected ? 0.8 : 0), radius: 3)
+            // The color dot IS the settings entry — click it to edit (rename,
+            // color, CLIs…). Larger invisible hit area so it's easy to hit.
+            Button(action: onEdit) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: accent.opacity(isSelected ? 0.8 : 0), radius: 3)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Workspace settings")
+
             Text(workspace.name.isEmpty ? "Untitled" : workspace.name)
                 .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                 .foregroundStyle(workspace.name.isEmpty
@@ -410,24 +476,20 @@ private struct GaiWorkspaceRow: View {
                 .shadow(color: .black.opacity(0.3), radius: 1, y: 0.5)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            // Edit affordance: appears on hover, opens the in-drawer editor
-            // (rename · color · delete). Its own button so it never triggers
-            // the row's select.
-            if hovering {
-                Button(action: onEdit) {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(.white.opacity(0.1)))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Edit workspace")
-                .transition(.opacity)
+
+            // The ONLY thing allowed on a row besides its identity: a red badge
+            // counting CLIs waiting for input in this workspace.
+            if waitingCount > 0 {
+                Text("\(waitingCount)")
+                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(Capsule().fill(Color(red: 1, green: 0.27, blue: 0.27)))
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -437,6 +499,12 @@ private struct GaiWorkspaceRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onSelect)
+        .contextMenu {
+            Button(action: onEdit) { Label("Modifier", systemImage: "slider.horizontal.3") }
+            Button(action: onDuplicate) { Label("Dupliquer", systemImage: "plus.square.on.square") }
+            Divider()
+            Button(role: .destructive, action: onDelete) { Label("Supprimer", systemImage: "trash") }
+        }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }

@@ -227,7 +227,14 @@ final class GaiWorkspaceManager {
             return
         }
 
-        seedDemoWorkspacesIfNeeded()
+        // Restore saved workspaces; only seed demos on the very first run
+        // (an empty saved list means the user cleared them — don't re-seed).
+        if store.loadPersisted() {
+            ui.selectedWorkspaceID = store.workspaces.first?.id
+        } else {
+            seedDemoWorkspacesIfNeeded()
+            store.save()
+        }
         warmFirstSurfaces()
         recomputeCardHeight()
         ensurePanel()
@@ -869,6 +876,8 @@ final class GaiWorkspaceManager {
             }
         } else {
             withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
+            // Editor closed: persist whatever was renamed / recolored / configured.
+            store.save()
         }
 
         // The editor's text fields need the keyboard; the drawer is otherwise

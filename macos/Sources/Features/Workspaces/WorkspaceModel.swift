@@ -161,6 +161,44 @@ extension SplitTree.Node {
     }
 }
 
+// MARK: - Persistence DTO
+
+/// The persistable settings of a workspace (no live sessions/surfaces).
+struct GaiWorkspaceData: Codable {
+    var name: String
+    var colorHex: String?
+    var directoryPath: String?
+    var defaultCommand: String?
+    var cliCounts: [String: Int]
+    var startupCommand: String?
+    var notifyOnInput: Bool
+    var openAtLaunch: Bool
+
+    init(_ w: GaiWorkspace) {
+        name = w.name
+        colorHex = w.colorHex
+        directoryPath = w.defaultDirectory?.path
+        defaultCommand = w.defaultCommand
+        cliCounts = w.cliCounts
+        startupCommand = w.startupCommand
+        notifyOnInput = w.notifyOnInput
+        openAtLaunch = w.openAtLaunch
+    }
+
+    func makeWorkspace() -> GaiWorkspace {
+        let w = GaiWorkspace(
+            name: name,
+            colorHex: colorHex,
+            defaultDirectory: directoryPath.map { URL(fileURLWithPath: $0) },
+            defaultCommand: defaultCommand)
+        w.cliCounts = cliCounts
+        w.startupCommand = startupCommand
+        w.notifyOnInput = notifyOnInput
+        w.openAtLaunch = openAtLaunch
+        return w
+    }
+}
+
 // MARK: - Store
 
 /// Owns all workspaces and is the single source of truth for the floating
@@ -204,9 +242,54 @@ final class GaiWorkspaceStore: ObservableObject {
         return workspace
     }
 
+    /// Duplicate a workspace's *settings* (not its live sessions), inserted just
+    /// after the original.
+    @discardableResult
+    func duplicateWorkspace(_ id: GaiWorkspace.ID) -> GaiWorkspace? {
+        guard let index = workspaces.firstIndex(where: { $0.id == id }) else { return nil }
+        let src = workspaces[index]
+        let copy = GaiWorkspace(
+            name: src.name.isEmpty ? "Untitled copy" : src.name + " copy",
+            colorHex: src.colorHex,
+            defaultDirectory: src.defaultDirectory,
+            defaultCommand: src.defaultCommand)
+        copy.cliCounts = src.cliCounts
+        copy.startupCommand = src.startupCommand
+        copy.notifyOnInput = src.notifyOnInput
+        copy.openAtLaunch = src.openAtLaunch
+        workspaces.insert(copy, at: index + 1)
+        save()
+        return copy
+    }
+
+    // MARK: Persistence
+
+    private static let persistenceKey = "gai.workspaces.v1"
+
+    /// Load saved workspaces. Returns false if nothing was ever saved (first
+    /// run), so the caller can seed defaults; an empty saved list returns true
+    /// (the user deleted everything — don't re-seed).
+    @discardableResult
+    func loadPersisted() -> Bool {
+        guard let data = UserDefaults.standard.data(forKey: Self.persistenceKey),
+              let items = try? JSONDecoder().decode([GaiWorkspaceData].self, from: data)
+        else { return false }
+        workspaces = items.map { $0.makeWorkspace() }
+        return true
+    }
+
+    /// Persist the workspaces' *settings* (not their live sessions).
+    func save() {
+        let items = workspaces.map(GaiWorkspaceData.init)
+        if let data = try? JSONEncoder().encode(items) {
+            UserDefaults.standard.set(data, forKey: Self.persistenceKey)
+        }
+    }
+
     func removeWorkspace(_ id: GaiWorkspace.ID) {
         workspaces.removeAll { $0.id == id }
         if openWorkspaceID == id { openWorkspaceID = nil }
+        save()
     }
 
     func workspace(for id: GaiWorkspace.ID?) -> GaiWorkspace? {
