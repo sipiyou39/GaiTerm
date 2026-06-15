@@ -1075,6 +1075,12 @@ extension Ghostty {
                 return
             }
 
+            // GaiTerm: input ergonomics for AI CLIs (Claude Code, Codex, …).
+            // Handled before any normal encoding so we fully own these keys.
+            if let model = surfaceModel, handleGaiInputShortcuts(event, surface: model) {
+                return
+            }
+
             // On any keyDown event we unset our bell state
             bell = false
 
@@ -1614,6 +1620,41 @@ extension Ghostty {
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
             }
+        }
+
+        /// GaiTerm-specific input handling for AI CLI ergonomics (Claude Code,
+        /// Codex, opencode, …). Returns `true` when the event was fully handled
+        /// and should not undergo any further key processing.
+        private func handleGaiInputShortcuts(_ event: NSEvent, surface model: Ghostty.Surface) -> Bool {
+            // Only the four "real" modifiers matter here.
+            let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+
+            // Shift+Enter → send a literal newline (LF) instead of submitting, so
+            // CLI prompt boxes insert a new line. (Return = 36, numpad Enter = 76.)
+            if (event.keyCode == 36 || event.keyCode == 76), mods == .shift {
+                model.sendText("\n")
+                return true
+            }
+
+            // Cmd+V with an image (and no text) on the clipboard → forward a real
+            // Ctrl+V so the running CLI picks up the image via its own clipboard
+            // reader. Plain text paste keeps Ghostty's normal behavior.
+            if mods == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "v",
+               NSPasteboard.general.gaiHasImageWithoutText {
+                // Replicate a real Ctrl+V keystroke: the core's key encoder needs
+                // the unshifted codepoint ('v' = 0x76) and text to derive the
+                // control byte 0x16. Without them it encodes nothing.
+                let press = Ghostty.Input.KeyEvent(
+                    key: .v, action: .press, text: "v", mods: .ctrl, unshiftedCodepoint: 0x76)
+                let release = Ghostty.Input.KeyEvent(
+                    key: .v, action: .release, text: "v", mods: .ctrl, unshiftedCodepoint: 0x76)
+                model.sendKeyEvent(press)
+                model.sendKeyEvent(release)
+                return true
+            }
+
+            return false
         }
 
         @IBAction func paste(_ sender: Any?) {

@@ -48,6 +48,26 @@ extension NSPasteboard {
         return self.string(forType: .string)
     }
 
+    /// True when the pasteboard carries raw image data (e.g. a macOS
+    /// screenshot taken to the clipboard) and no usable plain text.
+    ///
+    /// GaiTerm uses this to decide whether a `Cmd+V` should be forwarded to the
+    /// running program as `Ctrl+V` instead of doing a normal text paste: CLI
+    /// tools like Claude Code and Codex read the system clipboard themselves
+    /// when they receive `Ctrl+V`, which is how they pick up pasted images.
+    var gaiHasImageWithoutText: Bool {
+        guard let types else { return false }
+        let hasImage = types.contains(.png) || types.contains(.tiff)
+        guard hasImage else { return false }
+
+        // If there is also real text on the pasteboard, prefer the normal text
+        // paste (e.g. an image copied from a browser that also carries a URL).
+        if let text = string(forType: .string), !text.isEmpty {
+            return false
+        }
+        return true
+    }
+
     /// The pasteboard for the Ghostty enum type.
     static func ghostty(_ clipboard: ghostty_clipboard_e) -> NSPasteboard? {
         switch clipboard {
