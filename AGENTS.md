@@ -1,11 +1,38 @@
-# Agent Development Guide
+# CLAUDE.md
 
-A file for [guiding coding agents](https://agents.md/).
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **GaiTerm (ce fork) :** avant de travailler sur l'app macOS, lis
-> [`GAITERM.md`](GAITERM.md) — architecture, carte des fichiers, pièges de build,
-> et procédure de publication des mises à jour. Ce fichier-ci reste le guide
-> Ghostty amont.
+## Le logiciel, c'est GaiTerm
+
+**Ce dépôt est GaiTerm, notre logiciel.** C'est un **fork du terminal open source
+[Ghostty](https://ghostty.org)** (le remote `upstream` pointe sur
+ghostty-org/ghostty) : on est parti de leur code pour ne pas réinventer la roue,
+et on en fait notre appli à nous — on la modifie, c'est la nôtre. De Ghostty on
+ne garde que le **moteur de terminal** (parsing VT, rendu GPU, PTY, gestion des
+surfaces), la fondation qu'on n'a pas envie de réécrire. On n'y touche pas (0
+commit sur `src/`) ; tout notre travail est dans la couche UI macOS.
+
+Notre logiciel vit dans **`macos/Sources/Features/Workspaces/`** (fichiers
+`Gai*` / `Workspace*`) + `Features/Settings`, `Features/Update`,
+`Features/Custom App Icon`. **Avant d'y toucher, lis [`GAITERM.md`](GAITERM.md)** —
+c'est LA référence GaiTerm (architecture, carte des fichiers, build, releases).
+
+Le reste de ce fichier = commandes de build/test partagées + doc du **moteur
+Ghostty** que GaiTerm embarque. Encore utile, parce que notre UI l'appelle
+(surfaces, `sendText`/`sendKeyEvent`, auto-update Sparkle, structure de la cible
+macOS) et que le remote `upstream` reste branché pour tirer leurs correctifs.
+Mais c'est de la doc *moteur* — pas la doc du logiciel.
+
+### Pièges qui te feront perdre du temps
+- **`Build Summary: 339/341 steps succeeded; 1 failed` est NORMAL** — l'étape qui
+  échoue est `cp Ghostty.app` (notre app s'appelle `GaiTerm.app`). Le bundle se
+  construit quand même.
+- **Les diagnostics SourceKit sont des faux positifs.** Pour une *vraie* erreur :
+  `zig build 2>&1 | grep -E '\.swift:[0-9]+:[0-9]+: error:'` (vide = OK).
+- Produit du build : **`macos/build/Debug/GaiTerm.app`**.
+- Relancer : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/Debug/GaiTerm.app`.
+
+---
 
 ## Commands
 

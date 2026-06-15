@@ -58,6 +58,7 @@ Tout le code GaiTerm vit sous `macos/Sources/Features/`. Les fichiers préfixés
 | `WorkspaceEditor.swift` | Le formulaire de réglages d'un workspace (la grande expansion : multi-CLI + compteurs, dossier, notifs, couleur, back/valider/supprimer). |
 | `GaiFileTree.swift` | `GaiFileNode` (lazy, un niveau, pas d'enfants stockés) + `GaiFileTreeScanner` (children/search) + `GaiFileIcon`. |
 | `GaiFileExplorerView.swift` | UI de l'explorateur : arbre lazy, barre d'outils (nouveau fichier/dossier, corbeille, replier, rescan), création/renommage/corbeille (`GaiFileOps`). |
+| `GaiDirectoryPicker.swift` | Sélecteur de dossier compact (bouton icône + nom du dossier) avec popover de navigation (recherche, dossier parent, sous-dossiers). Réutilisé dans l'éditeur de workspace (dossier par terminal) et dans le header de pane. |
 | `GaiCodeEditor.swift` | Éditeur réel : `GaiEditorModel` (open/save/isModified), `GaiCodeTextView` (NSTextView), numéros de ligne (`GaiLineNumberRuler`), `⌘S`. |
 | `GaiSyntaxHighlighter.swift` | Coloration syntaxique (palette One-Dark, regex par langage, max 200k chars). |
 
@@ -218,6 +219,49 @@ Ce qu'il fait, dans l'ordre :
 - Numéro de build (`CFBundleVersion`) **strictement croissant** = ce qui décide
   qu'une version est « plus récente ». Le script utilise un timestamp, donc OK
   tant qu'on ne publie pas deux fois dans la même minute.
+
+### Signature de code (identité stable) — important pour les permissions
+
+Les builds Zig sortent **non signés** ; macOS tue alors le binaire (erreur `-54`
+au lancement, exit 137/SIGKILL). Il faut donc **toujours signer** le bundle.
+
+On signe avec un **certificat auto-signé stable** nommé **`GaiTerm Self-Signed`**
+(dans le trousseau *login*). Pourquoi pas de l'ad-hoc (`--sign -`) : l'ad-hoc
+change d'empreinte (cdhash) à chaque build, donc macOS voit une *nouvelle* app et
+**réoublie les autorisations TCC** (Accès complet au disque, accès aux dossiers) à
+chaque mise à jour. Le certificat stable donne une *designated requirement* fixe
+(`identifier "…" and certificate leaf = H"…"`) → les permissions **tiennent** chez
+l'utilisateur et chez les amis, entre les mises à jour.
+
+- Signer en local : `codesign --force --deep --sign "GaiTerm Self-Signed" macos/build/Debug/GaiTerm.app`
+  (ne **pas** utiliser `--sign -` ad-hoc, sauf dépannage).
+- Le script de release signe automatiquement avec cette identité (sinon ad-hoc en
+  repli, avec un avertissement).
+- L'identité n'est **pas trustée** par Gatekeeper (auto-signée) : c'est normal, le
+  receveur passe quand même par le `xattr`/clic-droit ci-dessous. Ça n'empêche pas
+  la persistance des permissions (TCC se base sur la *designated requirement*, pas
+  sur la confiance Gatekeeper).
+
+**Recréer le certificat (nouveau Mac / perdu)** :
+```sh
+cat > /tmp/cert.cnf <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = GaiTerm Self-Signed
+[v3]
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+basicConstraints = critical, CA:false
+CNF
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem -out /tmp/cert.pem -days 3650 -nodes -config /tmp/cert.cnf
+openssl pkcs12 -export -inkey /tmp/key.pem -in /tmp/cert.pem -out /tmp/gaiterm.p12 -passout pass:gaiterm -name "GaiTerm Self-Signed"
+security import /tmp/gaiterm.p12 -k ~/Library/Keychains/login.keychain-db -P gaiterm -T /usr/bin/codesign -A
+```
+Note : un nouveau certificat = nouvelle empreinte → les utilisateurs devront
+re-accorder les permissions une fois. Garde donc **le même** certificat.
 
 ### Livrer à quelqu'un qui n'a rien installé
 
