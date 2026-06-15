@@ -243,14 +243,11 @@ final class GaiWorkspaceManager {
             return
         }
 
-        // Restore saved workspaces; only seed demos on the very first run
-        // (an empty saved list means the user cleared them — don't re-seed).
-        if store.loadPersisted() {
-            ui.selectedWorkspaceID = store.workspaces.first?.id
-        } else {
-            seedDemoWorkspacesIfNeeded()
-            store.save()
-        }
+        // Restore saved workspaces unless the user turned that off in Settings.
+        // No demo seeding — a fresh install opens to the empty state.
+        let restore = UserDefaults.standard.object(forKey: GaiPreferenceKey.restoreWorkspaces) as? Bool ?? true
+        if restore { store.loadPersisted() }
+        ui.selectedWorkspaceID = store.workspaces.first?.id
         warmFirstSurfaces()
         recomputeCardHeight()
         ensurePanel()
@@ -835,7 +832,10 @@ final class GaiWorkspaceManager {
     /// the 2-row height (below that the pull tab is taller than the card and its
     /// welds break).
     private func listHeight() -> CGFloat {
-        GaiDrawerMetrics.cardHeight(forRows: max(store.workspaces.count, 2))
+        // +1 row for the always-present "New workspace" button (when there's at
+        // least one workspace); never shorter than 2 rows so the pull tab fits.
+        let rows = store.workspaces.isEmpty ? 0 : store.workspaces.count + 1
+        return GaiDrawerMetrics.cardHeight(forRows: max(rows, 2))
     }
 
     private func recomputeCardHeight() {

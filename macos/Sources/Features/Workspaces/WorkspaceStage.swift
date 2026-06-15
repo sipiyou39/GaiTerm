@@ -58,6 +58,8 @@ struct WorkspaceStageView: View {
     @State private var generation = 0
     @State private var tabPressed = false
 
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
+
     private typealias D = GaiDrawerMetrics
 
     private var slabWidth: CGFloat { ui.stageCardWidth + D.tabWidth + D.bleed }
@@ -106,7 +108,13 @@ struct WorkspaceStageView: View {
     /// frame while the slab moved/resized, which made the animations stutter. A
     /// solid fill (matching the drawer and the pane headers) composites for free.
     private var glassBase: some View {
-        GaiStageSlabShape().fill(Color.gaiPanelGray)
+        let accent = store.workspace(for: store.openWorkspaceID)?.accentColor ?? .white
+        return GaiStageSlabShape().fill(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
+    }
+
+    /// The current stage workspace accent (for tinting headers).
+    private var stageAccent: Color {
+        store.workspace(for: store.openWorkspaceID)?.accentColor ?? .white
     }
 
     // MARK: Tab
@@ -202,6 +210,8 @@ private struct StageCard: View {
 
     /// One editor model per open file, so unsaved edits survive tab switches.
     @State private var models: [String: GaiEditorModel] = [:]
+
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
 
     /// Apple's elevated dark surface gray. The surfaces' Metal layers are
     /// screen-blended so their theme background melts into this fill while
@@ -302,7 +312,7 @@ private struct StageCard: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 34)
-        .background(Color.gaiPanelGray)
+        .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
     }
 
     private func closeFile(_ path: String) {
@@ -545,6 +555,7 @@ private struct GaiPaneView: View {
     let ui: GaiWorkspaceUIModel
     let splits: GaiSplitController
     let accent: Color
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
     let isFocused: Bool
     let isSplit: Bool
     let isZoomed: Bool
@@ -619,7 +630,7 @@ private struct GaiPaneView: View {
         }
         .padding(.horizontal, 9)
         .frame(height: GaiStageMetrics.paneHeaderHeight)
-        .background(Color.gaiPanelGray)
+        .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
         // Deliberately no tap handling on the header itself: it is app
         // chrome, outside the terminal focus system. Focus moves by
         // clicking inside a terminal.

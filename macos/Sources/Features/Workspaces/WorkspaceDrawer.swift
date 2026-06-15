@@ -221,7 +221,8 @@ struct WorkspaceDrawerView: View {
     /// frame while the card height animated, which is what made the expansion
     /// stutter. A solid fill animates for free.
     private var glassBase: some View {
-        GaiDrawerSlabShape().fill(Color.gaiPanelGray)
+        let accent = store.workspace(for: ui.selectedWorkspaceID)?.accentColor ?? .white
+        return GaiDrawerSlabShape().fill(Color.gaiPanelColor(accent: accent, tinted: tintGlass))
     }
 
     @ViewBuilder
@@ -404,6 +405,8 @@ struct WorkspaceDrawerView: View {
                     onDelete: { store.removeWorkspace(workspace.id) })
                 .frame(height: M.rowHeight)
             }
+            GaiAddWorkspaceRow(action: createNewWorkspace)
+                .frame(height: M.rowHeight)
         }
     }
 
@@ -463,6 +466,38 @@ struct WorkspaceDrawerView: View {
 }
 
 // MARK: - Row
+
+/// A subtle "add" row pinned under the workspace list — always available to
+/// create a new workspace, aligned with the rows above (dot column → "+").
+private struct GaiAddWorkspaceRow: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(hovering ? 0.8 : 0.45))
+                    .frame(width: 20)
+                Text("New workspace")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.white.opacity(hovering ? 0.75 : 0.45))
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hovering ? Color.white.opacity(0.06) : .clear))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
 
 private struct GaiWorkspaceRow: View {
     @ObservedObject var workspace: GaiWorkspace
@@ -612,6 +647,19 @@ extension Color {
     /// (its `backgroundDark`), and the same as the terminal interior, so the
     /// whole UI reads as one consistent gray.
     static let gaiPanelGray = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255)
+
+    /// The panel surface color: the flat dark gray, or — when the "tint panels
+    /// with workspace color" setting is on — that gray blended with the
+    /// workspace accent (a dark, colored gray, never the loud raw accent).
+    static func gaiPanelColor(accent: Color, tinted: Bool) -> Color {
+        guard tinted else { return gaiPanelGray }
+        let a = NSColor(accent).usingColorSpace(.sRGB) ?? .gray
+        let f: CGFloat = 0.22
+        func mix(_ base: CGFloat, _ c: CGFloat) -> CGFloat { base * (1 - f) + c * f }
+        return Color(red: mix(28 / 255, a.redComponent),
+                     green: mix(28 / 255, a.greenComponent),
+                     blue: mix(30 / 255, a.blueComponent))
+    }
 
     /// Deterministic accent color derived from a workspace name.
     static func gaiAccent(for name: String) -> Color {

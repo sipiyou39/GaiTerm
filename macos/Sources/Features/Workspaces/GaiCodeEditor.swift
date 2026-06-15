@@ -147,6 +147,14 @@ struct GaiCodeTextView: NSViewRepresentable {
     @ObservedObject var model: GaiEditorModel
     let accent: Color
 
+    @AppStorage(GaiPreferenceKey.editorFontSize) private var fontSize = 13.0
+    @AppStorage(GaiPreferenceKey.editorShowLineNumbers) private var showLineNumbers = true
+    @AppStorage(GaiPreferenceKey.editorWrapLines) private var wrapLines = true
+
+    private var editorFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -170,26 +178,23 @@ struct GaiCodeTextView: NSViewRepresentable {
         textView.allowsUndo = true
         textView.drawsBackground = true
         textView.backgroundColor = GaiEditorColors.codeArea
-        textView.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        textView.font = editorFont
         textView.textColor = NSColor(white: 1, alpha: 0.88)
         textView.insertionPointColor = NSColor(accent)
         textView.selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.16)]
         textView.textContainerInset = NSSize(width: 6, height: 12)
-        textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
         textView.string = model.text
 
         scrollView.documentView = textView
         scrollView.hasVerticalRuler = true
-        scrollView.rulersVisible = true
         let ruler = GaiLineNumberRuler(textView: textView)
         scrollView.verticalRulerView = ruler
 
         context.coordinator.textView = textView
         context.coordinator.ruler = ruler
         context.coordinator.language = model.language
+        applyPreferences(textView, scrollView)
         highlight(textView)
         DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
         return scrollView
@@ -198,19 +203,42 @@ struct GaiCodeTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
         context.coordinator.language = model.language
+        let fontChanged = (textView.font?.pointSize ?? 0) != fontSize
         if textView.string != model.text {
             textView.string = model.text
             textView.setSelectedRange(NSRange(location: 0, length: 0))
+        }
+        applyPreferences(textView, scrollView)
+        if textView.string != model.text || fontChanged {
             context.coordinator.ruler?.needsDisplay = true
             highlight(textView)
         }
         textView.insertionPointColor = NSColor(accent)
     }
 
+    /// Apply the live editor preferences (font size, gutter, wrapping).
+    private func applyPreferences(_ textView: NSTextView, _ scrollView: NSScrollView) {
+        textView.font = editorFont
+        scrollView.rulersVisible = showLineNumbers
+        guard let container = textView.textContainer else { return }
+        if wrapLines {
+            scrollView.hasHorizontalScroller = false
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            container.widthTracksTextView = true
+            container.size = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        } else {
+            scrollView.hasHorizontalScroller = true
+            textView.isHorizontallyResizable = true
+            textView.autoresizingMask = [.width, .height]
+            container.widthTracksTextView = false
+            container.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        }
+    }
+
     private func highlight(_ textView: NSTextView) {
         guard let storage = textView.textStorage else { return }
-        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        GaiSyntax.highlight(storage, language: model.language, font: font)
+        GaiSyntax.highlight(storage, language: model.language, font: editorFont)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
