@@ -463,8 +463,9 @@ class AppDelegate: NSObject,
         // but I haven't seen it happen in releases. I'm unsure why.
         guard applicationHasBecomeActive else { return true }
 
-        // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        // GaiTerm's home is the floating workspaces drawer, not a classic
+        // Ghostty terminal window. Reveal the drawer instead of spawning one.
+        gaiWorkspaceManager.reveal()
         return false
     }
 
@@ -864,8 +865,13 @@ class AppDelegate: NSObject,
     }
 
     private func updateAppIcon(from config: Ghostty.Config) {
+        // GaiTerm ships its own bundle icon (AppIcon asset). Only override at
+        // runtime if the user explicitly picked a non-default icon — otherwise
+        // leave the bundle icon alone (calling NSWorkspace.setIcon(nil,…) here
+        // wiped the GaiTerm icon off the Dock).
+        guard let icon = AppIcon(config: config) else { return }
         Task.detached {
-            await self.appIconUpdater.update(icon: AppIcon(config: config))
+            await self.appIconUpdater.update(icon: icon)
         }
     }
 

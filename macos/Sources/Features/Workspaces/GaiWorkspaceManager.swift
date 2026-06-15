@@ -236,6 +236,15 @@ final class GaiWorkspaceManager {
 
     // MARK: Lifecycle
 
+    /// Bring the drawer forward and slide it open — used when the app is
+    /// reopened from the Dock (instead of spawning a terminal window).
+    func reveal() {
+        start()
+        panel?.orderFrontRegardless()
+        if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+        ui.isExpanded = true
+    }
+
     func start() {
         // Idempotent: launch can reach this from several paths.
         if let panel {

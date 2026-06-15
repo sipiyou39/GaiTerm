@@ -7,13 +7,10 @@ extension UpdateDriver: SPUUpdaterDelegate {
             return nil
         }
 
-        // Sparkle supports a native concept of "channels" but it requires that
-        // you share a single appcast file. We don't want to do that so we
-        // do this instead.
-        switch appDelegate.ghostty.config.autoUpdateChannel {
-        case .tip: return "https://tip.files.ghostty.org/appcast.xml"
-        case .stable: return "https://release.files.ghostty.org/appcast.xml"
-        }
+        // GaiTerm ships a single appcast from its GitHub Releases (latest
+        // release's appcast.xml asset). Both channels point at it.
+        _ = appDelegate
+        return "https://github.com/sipiyou39/GaiTerm/releases/latest/download/appcast.xml"
     }
 
     /// Called when an update is scheduled to install silently,
