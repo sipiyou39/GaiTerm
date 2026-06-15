@@ -65,6 +65,27 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
     }
 }
 
+// MARK: - Terminal spec (per-folder mode)
+
+/// One terminal in a workspace's "folder per terminal" mode: which CLI to run
+/// (or a plain shell) and the folder it opens in. Lets a single workspace mix
+/// terminals across different directories — e.g. one per git worktree.
+struct GaiTerminalSpec: Identifiable, Codable, Equatable {
+    var id = UUID()
+    /// One of `GaiWorkspace.cliOrder`, or `GaiTerminalSpec.shell` for a plain shell.
+    var cli: String
+    /// Starting folder path; `nil` falls back to the workspace's default / home.
+    var directoryPath: String?
+
+    /// Sentinel `cli` value meaning "just a shell, no CLI".
+    static let shell = "shell"
+
+    var directoryURL: URL? { directoryPath.map { URL(fileURLWithPath: $0) } }
+
+    /// The command to type on open, or `nil` for a plain shell.
+    var command: String? { cli == GaiTerminalSpec.shell ? nil : cli }
+}
+
 // MARK: - Workspace
 
 /// A named workspace: a logical group of terminal sessions with a default
@@ -94,6 +115,14 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// How many panes of each CLI to open automatically (e.g. `["claude": 2,
     /// "codex": 1]`). Several CLIs can be mixed; the total is capped at 16.
     @Published var cliCounts: [String: Int] = [:]
+
+    /// When on, the workspace opens one pane per `terminals` entry, each in its
+    /// own folder (worktree workflow). When off, it opens `cliCounts` panes that
+    /// all share `defaultDirectory` — the simple, original behavior.
+    @Published var perTerminalFolders: Bool = false
+
+    /// Explicit per-terminal specs, used only when `perTerminalFolders` is on.
+    @Published var terminals: [GaiTerminalSpec] = []
 
     /// A one-off command run once when the workspace opens (e.g. `npm run dev`).
     @Published var startupCommand: String?
@@ -147,6 +176,18 @@ final class GaiWorkspace: ObservableObject, Identifiable {
         return list
     }
 
+    /// The ordered panes to open: each a command to type on open (`nil` = a
+    /// plain shell) and a starting directory (`nil` = home). Honors the
+    /// per-terminal-folders mode; otherwise every pane shares `defaultDirectory`.
+    func openPlan() -> [(command: String?, directory: URL?)] {
+        if perTerminalFolders, !terminals.isEmpty {
+            return terminals.map { ($0.command, $0.directoryURL ?? defaultDirectory) }
+        }
+        let commands = cliCommandList()
+        if commands.isEmpty { return [(defaultCommand, defaultDirectory)] }
+        return commands.map { ($0, defaultDirectory) }
+    }
+
     /// The session wrapping the given pane's surface, if any.
     func session(for view: Ghostty.SurfaceView) -> GaiTerminalSession? {
         sessions.first { $0.surfaceView === view }
@@ -188,6 +229,9 @@ struct GaiWorkspaceData: Codable {
     var startupCommand: String?
     var notifyOnInput: Bool
     var openAtLaunch: Bool
+    // Optional so older saved payloads (without these keys) still decode.
+    var perTerminalFolders: Bool?
+    var terminals: [GaiTerminalSpec]?
 
     init(_ w: GaiWorkspace) {
         name = w.name
@@ -198,6 +242,8 @@ struct GaiWorkspaceData: Codable {
         startupCommand = w.startupCommand
         notifyOnInput = w.notifyOnInput
         openAtLaunch = w.openAtLaunch
+        perTerminalFolders = w.perTerminalFolders
+        terminals = w.terminals
     }
 
     func makeWorkspace() -> GaiWorkspace {
@@ -210,6 +256,8 @@ struct GaiWorkspaceData: Codable {
         w.startupCommand = startupCommand
         w.notifyOnInput = notifyOnInput
         w.openAtLaunch = openAtLaunch
+        w.perTerminalFolders = perTerminalFolders ?? false
+        w.terminals = terminals ?? []
         return w
     }
 }
@@ -272,6 +320,8 @@ final class GaiWorkspaceStore: ObservableObject {
         copy.startupCommand = src.startupCommand
         copy.notifyOnInput = src.notifyOnInput
         copy.openAtLaunch = src.openAtLaunch
+        copy.perTerminalFolders = src.perTerminalFolders
+        copy.terminals = src.terminals.map { GaiTerminalSpec(cli: $0.cli, directoryPath: $0.directoryPath) }
         workspaces.insert(copy, at: index + 1)
         save()
         return copy

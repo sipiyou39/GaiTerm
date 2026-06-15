@@ -60,6 +60,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case appearance = "Appearance"
     case editor = "Editor"
+    case permissions = "Permissions"
     case updates = "Updates"
 
     var id: String { rawValue }
@@ -68,6 +69,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .general: return "gearshape"
         case .appearance: return "paintbrush"
         case .editor: return "chevron.left.forwardslash.chevron.right"
+        case .permissions: return "lock.shield"
         case .updates: return "arrow.down.circle"
         }
     }
@@ -153,6 +155,7 @@ struct SettingsView: View {
         case .general: GeneralSettings()
         case .appearance: AppearanceSettings()
         case .editor: EditorSettings()
+        case .permissions: PermissionsSettings()
         case .updates: UpdatesSettings()
         }
     }
@@ -313,6 +316,83 @@ private struct EditorSettings: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Permissions
+
+private struct PermissionsSettings: View {
+    @State private var fullDisk = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection(title: "File access") {
+                SettingsRow(
+                    title: "Full Disk Access",
+                    subtitle: "Grant this once and macOS stops asking for your Documents, Desktop and other folders every time the file explorer or a terminal touches them.",
+                    first: true) {
+                    statusBadge
+                }
+                SettingsRow(
+                    title: "Open System Settings",
+                    subtitle: "Find GaiTerm in the list, switch it on. If it isn't listed, use “+” and pick GaiTerm.") {
+                    actionButton("Open Full Disk Access", action: openFullDiskAccess)
+                }
+                SettingsRow(
+                    title: "Re-check status",
+                    subtitle: "After enabling it, refresh the status here.") {
+                    actionButton("Re-check", filled: false, action: { fullDisk = Self.hasFullDiskAccess() })
+                }
+            }
+
+            Text("After enabling Full Disk Access, quit and reopen GaiTerm once for it to take effect.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.4))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 2)
+        }
+        .onAppear { fullDisk = Self.hasFullDiskAccess() }
+    }
+
+    private var statusBadge: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(fullDisk ? Color(red: 0.35, green: 0.8, blue: 0.45) : Color(red: 0.95, green: 0.65, blue: 0.3))
+                .frame(width: 7, height: 7)
+            Text(fullDisk ? "Granted" : "Not granted")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private func actionButton(_ title: String, filled: Bool = true, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(filled ? S.accent.opacity(0.85) : Color.white.opacity(0.1)))
+    }
+
+    private func openFullDiskAccess() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Heuristic: try to open a TCC-protected file (the user's TCC database).
+    /// It only opens when Full Disk Access is granted.
+    static func hasFullDiskAccess() -> Bool {
+        let path = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db")
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+            return false
+        }
+        try? handle.close()
+        return true
     }
 }
 

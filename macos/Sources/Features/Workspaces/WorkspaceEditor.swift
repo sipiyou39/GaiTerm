@@ -75,8 +75,7 @@ struct GaiWorkspaceEditor: View {
             // The settings scroll inside the (large) card; the header stays put.
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 16) {
-                    folderSection
-                    cliSection
+                    folderModeSection
                     startupSection
                     toggleSection
                     colorSection
@@ -84,6 +83,9 @@ struct GaiWorkspaceEditor: View {
                         .padding(.top, 2)
                 }
                 .padding(.bottom, 4)
+                .onChange(of: workspace.perTerminalFolders) { on in
+                    seedTerminalsIfNeeded(on)
+                }
             }
         }
         // Mounted only once the card has finished opening (see
@@ -105,6 +107,116 @@ struct GaiWorkspaceEditor: View {
 
     private var fieldBackground: some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.07))
+    }
+
+    /// The CLI/folder area, switched by the "Folder per terminal" toggle:
+    /// off → one shared folder + CLI counts (simple, original); on → an explicit
+    /// list of terminals, each with its own CLI and folder (worktree workflow).
+    private var folderModeSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 0) {
+                toggleRow("Folder per terminal", $workspace.perTerminalFolders)
+            }
+            .background(fieldBackground)
+
+            if workspace.perTerminalFolders {
+                terminalsSection
+            } else {
+                folderSection
+                cliSection
+            }
+        }
+    }
+
+    /// One row per terminal: CLI menu + its folder + remove. Plus an add button.
+    private var terminalsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionLabel("Terminals")
+                Spacer(minLength: 0)
+                if !workspace.terminals.isEmpty {
+                    Text("\(workspace.terminals.count)")
+                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(workspace.terminals.enumerated()), id: \.element.id) { index, spec in
+                    if index > 0 {
+                        Divider().overlay(Color.white.opacity(0.06))
+                    }
+                    terminalRow(spec)
+                }
+                if workspace.terminals.isEmpty {
+                    Text("No terminals — add one below.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .frame(height: 34)
+                }
+            }
+            .background(fieldBackground)
+
+            Button(action: addTerminal) {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("Add terminal")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(color)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(color.opacity(0.12)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func terminalRow(_ spec: GaiTerminalSpec) -> some View {
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(Self.cliChoices, id: \.self) { choice in
+                    Button(choice) { updateTerminal(spec.id) { $0.cli = choice } }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(spec.cli)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.9))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+
+            Text("·").foregroundStyle(.white.opacity(0.2))
+
+            GaiDirectoryPicker(path: spec.directoryPath, accent: color) { picked in
+                updateTerminal(spec.id) { $0.directoryPath = picked }
+            }
+
+            Spacer(minLength: 0)
+
+            Button { removeTerminal(spec.id) } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove terminal")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
     }
 
     /// One row per CLI — check it on the left, set how many panes on the right.
@@ -264,7 +376,45 @@ struct GaiWorkspaceEditor: View {
 
     static let cliTools = GaiWorkspace.cliOrder
 
+    /// CLI options offered per terminal in the per-folder mode (plus a plain shell).
+    static let cliChoices: [String] = GaiWorkspace.cliOrder + [GaiTerminalSpec.shell]
+
     private var totalPanes: Int { workspace.cliCounts.values.reduce(0, +) }
+
+    // MARK: Per-terminal list editing
+
+    private func updateTerminal(_ id: UUID, _ mutate: (inout GaiTerminalSpec) -> Void) {
+        guard let i = workspace.terminals.firstIndex(where: { $0.id == id }) else { return }
+        var spec = workspace.terminals[i]
+        mutate(&spec)
+        workspace.terminals[i] = spec
+    }
+
+    /// "+ Add terminal" duplicates the last row (fast for several alike), else a
+    /// claude in the workspace's default folder.
+    private func addTerminal() {
+        let last = workspace.terminals.last
+        workspace.terminals.append(GaiTerminalSpec(
+            cli: last?.cli ?? "claude",
+            directoryPath: last?.directoryPath ?? workspace.defaultDirectory?.path))
+    }
+
+    private func removeTerminal(_ id: UUID) {
+        workspace.terminals.removeAll { $0.id == id }
+    }
+
+    /// First time the mode is switched on, pre-fill the list from the current CLI
+    /// counts (all in the default folder) so the user starts from what they had.
+    private func seedTerminalsIfNeeded(_ on: Bool) {
+        guard on, workspace.terminals.isEmpty else { return }
+        let dir = workspace.defaultDirectory?.path
+        let cmds = workspace.cliCommandList()
+        if cmds.isEmpty {
+            workspace.terminals = [GaiTerminalSpec(cli: "claude", directoryPath: dir)]
+        } else {
+            workspace.terminals = cmds.map { GaiTerminalSpec(cli: $0, directoryPath: dir) }
+        }
+    }
 
     /// Set a CLI's pane count, clamped to ≥ 0 and to a grand total of 16.
     private func setCLICount(_ cli: String, _ value: Int) {

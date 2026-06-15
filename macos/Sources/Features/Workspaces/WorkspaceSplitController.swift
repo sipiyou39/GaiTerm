@@ -129,64 +129,83 @@ final class GaiSplitController {
     func ensureFirstSurface(in workspace: GaiWorkspace, focus shouldFocus: Bool = true) {
         guard workspace.surfaceTree.isEmpty else { return }
 
-        let commands = workspace.cliCommandList()
-        guard commands.isEmpty else {
-            // CLI workspace: open one pane per configured CLI and type the
-            // command into each. Only on a real open (`shouldFocus`), never on
-            // warm-up — warming would spawn every workspace's CLIs at launch.
-            guard shouldFocus else { return }
-            openCLISurfaces(in: workspace, commands: commands)
-            return
-        }
+        let plan = workspace.openPlan()
+        // Don't warm up workspaces that auto-run a CLI — warming would spawn
+        // every workspace's CLIs at launch. A plain-shell plan may still warm.
+        let hasCommands = plan.contains { $0.command != nil }
+        if hasCommands && !shouldFocus { return }
 
-        guard let view = makeSurface(for: workspace, baseConfig: nil) else { return }
-        workspace.surfaceTree = SplitTree(view: view)
-        if shouldFocus { focus(view) }
+        openPlannedSurfaces(in: workspace, plan: plan, focus: shouldFocus)
     }
 
-    /// Open an even grid of panes — one per configured CLI — and run the CLI in
-    /// each, the way the user would (open a terminal, type `claude`, ⏎).
+    /// Open an even grid of panes from an open-plan — each pane in its own
+    /// directory, running its command (the way the user would: open a terminal,
+    /// type `claude`, ⏎). One pane per plan entry.
     ///
     /// The grid is built column-first: `cols = ⌈√n⌉` equal columns, each filled
     /// with as-even-as-possible rows. `equalized()` then weights every split by
     /// its leaf count, so all panes end up the same size (best effort for odd
     /// counts — the short column just gets fewer rows).
-    private func openCLISurfaces(in workspace: GaiWorkspace, commands: [String]) {
-        let n = commands.count
-        guard let first = makeSurface(for: workspace, baseConfig: nil) else { return }
-        workspace.surfaceTree = SplitTree(view: first)
+    private func openPlannedSurfaces(
+        in workspace: GaiWorkspace,
+        plan: [(command: String?, directory: URL?)],
+        focus shouldFocus: Bool
+    ) {
+        let n = plan.count
+        guard n > 0 else { return }
 
         let cols = max(1, Int(Double(n).squareRoot().rounded(.up)))
         var rowsPerColumn = [Int](repeating: n / cols, count: cols)
         for i in 0..<(n % cols) { rowsPerColumn[i] += 1 }
+
+        // The first plan index of each column (its top pane).
+        var columnStart = [Int](repeating: 0, count: cols)
+        for c in 1..<cols { columnStart[c] = columnStart[c - 1] + rowsPerColumn[c - 1] }
+
+        // A surface config carrying this pane's starting directory, so the shell
+        // opens there before we type its command.
+        func config(for index: Int) -> Ghostty.SurfaceConfiguration {
+            var cfg = Ghostty.SurfaceConfiguration()
+            cfg.workingDirectory = (plan[index].directory ?? workspace.defaultDirectory)?.path
+            return cfg
+        }
+
+        guard let first = makeSurface(for: workspace, baseConfig: config(for: 0)) else { return }
+        workspace.surfaceTree = SplitTree(view: first)
 
         // The top pane of each column (created by splitting the previous top
         // rightward).
         var columnTops = [first]
         for c in 1..<cols {
             guard let top = newSplit(
-                in: workspace, at: columnTops[c - 1], direction: .right) else { break }
+                in: workspace, at: columnTops[c - 1], direction: .right,
+                baseConfig: config(for: columnStart[c])) else { break }
             columnTops.append(top)
         }
 
-        // Fill each column downward, gathering panes in order.
-        var views: [Ghostty.SurfaceView] = []
+        // Fill each column downward, recording each pane at its plan index.
+        var views = [Ghostty.SurfaceView?](repeating: nil, count: n)
         for (c, top) in columnTops.enumerated() {
-            views.append(top)
+            let start = columnStart[c]
+            views[start] = top
             var last = top
-            for _ in 1..<rowsPerColumn[c] {
-                guard let view = newSplit(in: workspace, at: last, direction: .down) else { break }
-                views.append(view)
+            for r in 1..<rowsPerColumn[c] {
+                let idx = start + r
+                guard let view = newSplit(
+                    in: workspace, at: last, direction: .down,
+                    baseConfig: config(for: idx)) else { break }
+                views[idx] = view
                 last = view
             }
         }
 
         workspace.surfaceTree = workspace.surfaceTree.equalized()
 
-        for (index, view) in views.enumerated() where index < commands.count {
-            runCommand(commands[index], in: view)
+        for (index, view) in views.enumerated() {
+            guard let view, let command = plan[index].command else { continue }
+            runCommand(command, in: view)
         }
-        focus(first)
+        if shouldFocus { focus(first) }
     }
 
     /// Run a command in a freshly-opened pane once its shell is up: type the
@@ -321,6 +340,38 @@ final class GaiSplitController {
         } else {
             onTreeDidEmpty?(workspace)
         }
+    }
+
+    /// Reopen a pane in a different folder: swap its surface for a fresh one
+    /// rooted at `directory`, in place (same split slot & size). Used by the
+    /// folder selector in the pane header. The old shell/CLI is discarded — a
+    /// clean terminal opens in the chosen folder.
+    @discardableResult
+    func reopenPane(
+        in workspace: GaiWorkspace,
+        surface oldView: Ghostty.SurfaceView,
+        directory: String?
+    ) -> Ghostty.SurfaceView? {
+        guard let oldNode = workspace.surfaceTree.root?.node(view: oldView) else { return nil }
+
+        var cfg = Ghostty.SurfaceConfiguration()
+        cfg.workingDirectory = directory ?? workspace.defaultDirectory?.path
+        guard let newView = makeSurface(for: workspace, baseConfig: cfg) else { return nil }
+
+        // Drop a stale zoom on the pane being replaced so the tree stays valid.
+        let tree = workspace.surfaceTree.zoomed == oldNode
+            ? SplitTree(root: workspace.surfaceTree.root, zoomed: nil)
+            : workspace.surfaceTree
+        do {
+            workspace.surfaceTree = try tree.replacing(node: oldNode, with: .leaf(view: newView))
+        } catch {
+            Ghostty.logger.warning("failed to reopen pane: \(error, privacy: .public)")
+            store.detachSession(for: newView, in: workspace)
+            return nil
+        }
+        store.detachSession(for: oldView, in: workspace)
+        focus(newView)
+        return newView
     }
 
     @objc private func didRequestCloseSurface(_ notification: Notification) {

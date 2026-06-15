@@ -14,7 +14,7 @@ enum GaiStageMetrics {
     /// separate layers, never glued together.
     static let drawerGap: CGFloat = 8
     /// Height of each pane's header band.
-    static let paneHeaderHeight: CGFloat = 25
+    static let paneHeaderHeight: CGFloat = 30
     /// Clearance between the drawer's pull tab and the stage's pull tab when
     /// both are out — wide enough that the open spring's overshoot can't make
     /// the stage tab swing over the drawer tab.
@@ -213,10 +213,10 @@ private struct StageCard: View {
 
     @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
 
-    /// Apple's elevated dark surface gray. The surfaces' Metal layers are
-    /// screen-blended so their theme background melts into this fill while
-    /// the text stays crisp (see `GaiSplitController.applyInteriorBlend`).
-    private let interiorGray = Color(red: 0.110, green: 0.110, blue: 0.118)
+    /// The fill behind the surfaces. Their Metal layers are screen-blended
+    /// over it (see `GaiBlendAsserter`), so when it carries the workspace
+    /// accent the terminal interior takes that color too — lifted lighter than
+    /// the (un-blended) header by the blend, keeping the dark/light contrast.
 
     /// The pane that currently has keyboard focus, tracked so we can dim the
     /// others and ring the active one.
@@ -238,7 +238,7 @@ private struct StageCard: View {
                 terminalArea
             }
         }
-        .background(interiorGray)
+        .background(Color.gaiInteriorColor(accent: accent, tinted: tintPanels))
         .onAppear {
             syncModels()
             if !ui.stageShowsEditor { splits.ensureFirstSurface(in: workspace) }
@@ -449,6 +449,10 @@ private struct GaiSplitTreeView: View {
                 onClosePane: { [weak workspace] surface in
                     guard let workspace else { return }
                     splits.closePane(in: workspace, surface: surface)
+                },
+                onChangeFolder: { [weak workspace] surface, path in
+                    guard let workspace else { return }
+                    splits.reopenPane(in: workspace, surface: surface, directory: path)
                 })
             // SwiftUI's implicit structural identity is unreliable for tree
             // structures; see ghostty#7546.
@@ -472,6 +476,7 @@ private struct GaiSplitSubtree: View {
     let onToggleZoom: (Ghostty.SurfaceView) -> Void
     let onSplit: (Ghostty.SurfaceView, SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
     let onClosePane: (Ghostty.SurfaceView) -> Void
+    let onChangeFolder: (Ghostty.SurfaceView, String) -> Void
 
     var body: some View {
         switch node {
@@ -487,7 +492,8 @@ private struct GaiSplitSubtree: View {
                 isZoomed: zoomedNode == node,
                 onToggleZoom: { onToggleZoom(surfaceView) },
                 onSplit: { onSplit(surfaceView, $0) },
-                onClose: { onClosePane(surfaceView) })
+                onClose: { onClosePane(surfaceView) },
+                onChangeFolder: { onChangeFolder(surfaceView, $0) })
             // Explicit identity per leaf: without it SwiftUI may reuse one
             // pane's platform container for a *different* surface across
             // tree rebuilds, physically swapping terminals between slots
@@ -520,7 +526,8 @@ private struct GaiSplitSubtree: View {
                         action: action,
                         onToggleZoom: onToggleZoom,
                         onSplit: onSplit,
-                        onClosePane: onClosePane)
+                        onClosePane: onClosePane,
+                        onChangeFolder: onChangeFolder)
                 },
                 right: {
                     GaiSplitSubtree(
@@ -535,7 +542,8 @@ private struct GaiSplitSubtree: View {
                         action: action,
                         onToggleZoom: onToggleZoom,
                         onSplit: onSplit,
-                        onClosePane: onClosePane)
+                        onClosePane: onClosePane,
+                        onChangeFolder: onChangeFolder)
                 },
                 onEqualize: {
                     guard let surface = node.leftmostLeaf().surface else { return }
@@ -562,6 +570,7 @@ private struct GaiPaneView: View {
     let onToggleZoom: () -> Void
     let onSplit: (SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
     let onClose: () -> Void
+    let onChangeFolder: (String) -> Void
 
     @State private var branch: String?
 
@@ -575,7 +584,10 @@ private struct GaiPaneView: View {
             // Flat pane, no card: the focus ring wraps the terminal zone
             // only (the header is app chrome, outside the focus system).
             Ghostty.SurfaceWrapper(surfaceView: surfaceView, isSplit: isSplit)
-                .background(GaiBlendAsserter(surfaceView: surfaceView, ui: ui))
+                .background(GaiBlendAsserter(
+                    surfaceView: surfaceView,
+                    ui: ui,
+                    backdrop: NSColor(Color.gaiInteriorColor(accent: accent, tinted: tintPanels)).cgColor))
                 .overlay(
                     Rectangle().strokeBorder(
                         isFocused && isSplit ? accent.opacity(0.6) : Color.clear,
@@ -598,6 +610,8 @@ private struct GaiPaneView: View {
                 session: session,
                 ui: ui,
                 splits: splits)
+            Spacer(minLength: 6)
+            GaiDirectoryPicker(path: surfaceView.pwd, accent: accent, onPick: onChangeFolder)
             Spacer(minLength: 6)
             if let branch {
                 HStack(spacing: 3.5) {
@@ -663,10 +677,14 @@ private struct GaiBlendAsserter: NSViewRepresentable {
 
     let surfaceView: Ghostty.SurfaceView
     let ui: GaiWorkspaceUIModel
+    /// The fill the surface's Metal layer screen-blends against. Carries the
+    /// workspace accent when panel tinting is on, else the flat panel gray.
+    var backdrop: CGColor = GaiBlendAsserter.interiorGray
 
     final class AsserterView: NSView {
         weak var surfaceView: Ghostty.SurfaceView?
         weak var ui: GaiWorkspaceUIModel?
+        var backdrop: CGColor = GaiBlendAsserter.interiorGray
         /// Toggles the screen-blend the instant a slide starts/ends, without
         /// going through a SwiftUI re-render of the terminal tree.
         private var slideObserver: AnyCancellable?
@@ -692,7 +710,7 @@ private struct GaiBlendAsserter: NSViewRepresentable {
             // a slide starts/ends.
             layer.compositingFilter = "screenBlendMode"
             guard let superlayer = layer.superlayer else { return }
-            superlayer.backgroundColor = GaiBlendAsserter.interiorGray
+            superlayer.backgroundColor = backdrop
             // While the slab slides, the surface moves across the screen and
             // screen-blend forces a per-frame backdrop read+blend on the moving
             // layer — the dominant stutter when many busy panes are on stage.
@@ -719,12 +737,14 @@ private struct GaiBlendAsserter: NSViewRepresentable {
     func makeNSView(context: Context) -> AsserterView {
         let view = AsserterView()
         view.surfaceView = surfaceView
+        view.backdrop = backdrop
         view.bind(to: ui)
         return view
     }
 
     func updateNSView(_ view: AsserterView, context: Context) {
         view.surfaceView = surfaceView
+        view.backdrop = backdrop
         view.bind(to: ui)
         view.assertBlend()
         // The superlayer can be swapped after this update completes (the
