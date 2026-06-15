@@ -15,6 +15,11 @@ set -euo pipefail
 VERSION="${1:?usage: gaiterm-release.sh <version> [notes]}"
 NOTES="${2:-GaiTerm $VERSION}"
 REPO="sipiyou39/GaiTerm"
+# Stable self-signed code-signing identity. Gives every build the same code
+# identity so macOS keeps a user's granted permissions (Full Disk Access, folder
+# access) across updates instead of re-prompting. Created once in the login
+# keychain; see GAITERM.md. Falls back to ad-hoc if it's missing on this machine.
+SIGN_ID="GaiTerm Self-Signed"
 TAG="v$VERSION"
 BUILD="$(date +%Y%m%d%H%M)"           # monotonic build number for Sparkle
 ZIP="GaiTerm-$VERSION.zip"
@@ -39,6 +44,17 @@ zig build >/dev/null 2>&1 || true
 echo "▸ Stamping version $VERSION (build $BUILD)…"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+
+# Sign last (after the Info.plist edits, which invalidate any prior signature).
+# A stable identity is what lets a recipient grant Full Disk Access once and keep
+# it across updates. Without the cert on this machine, fall back to ad-hoc.
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+  echo "▸ Signing with '$SIGN_ID'…"
+  codesign --force --deep --sign "$SIGN_ID" "$APP" || { echo "✗ codesign failed"; exit 1; }
+else
+  echo "▸ '$SIGN_ID' not found — signing ad-hoc (permissions won't persist across updates)…"
+  codesign --force --deep --sign - "$APP" || { echo "✗ codesign failed"; exit 1; }
+fi
 
 echo "▸ Zipping…"
 mkdir -p "$OUT"
