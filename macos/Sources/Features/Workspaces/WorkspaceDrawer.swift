@@ -661,6 +661,22 @@ extension Color {
                      blue: mix(30 / 255, a.blueComponent))
     }
 
+    /// The terminal interior fill: the light interior gray, kept gray, with just
+    /// a *faint* wash of the workspace accent when tinting is on — enough to
+    /// sense the workspace color without losing the neutral gray. Much lighter a
+    /// tint than `gaiPanelColor` (the header), on purpose.
+    static func gaiInteriorColor(accent: Color, tinted: Bool) -> Color {
+        // The base elevated gray used behind the surfaces (matches WorkspaceStage).
+        let base = (r: 0.110, g: 0.110, b: 0.118)
+        guard tinted else { return Color(red: base.r, green: base.g, blue: base.b) }
+        let a = NSColor(accent).usingColorSpace(.sRGB) ?? .gray
+        let f: CGFloat = 0.06
+        func mix(_ b: CGFloat, _ c: CGFloat) -> CGFloat { b * (1 - f) + c * f }
+        return Color(red: mix(base.r, a.redComponent),
+                     green: mix(base.g, a.greenComponent),
+                     blue: mix(base.b, a.blueComponent))
+    }
+
     /// Deterministic accent color derived from a workspace name.
     static func gaiAccent(for name: String) -> Color {
         var hash: UInt64 = 5381
