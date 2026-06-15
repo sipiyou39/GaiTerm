@@ -2,6 +2,13 @@
 import AppKit
 import SwiftUI
 
+/// Editor two-tone: the line-number gutter matches the dark panel/tab gray, the
+/// code area matches the lighter terminal interior.
+enum GaiEditorColors {
+    static let gutter = NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 1)
+    static let codeArea = NSColor(srgbRed: 0.15, green: 0.15, blue: 0.16, alpha: 1)
+}
+
 /// Holds the contents of the file open in the stage editor. One long-lived model
 /// reused as the user switches files (`open(_:)`); reading/writing is UTF-8,
 /// binary files surface a friendly message instead of garbage.
@@ -73,6 +80,10 @@ final class GaiLineNumberRuler: NSRulerView {
     required init(coder: NSCoder) { fatalError() }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        // Dark gutter (panel/tab gray); clipped to the editor so it can't bleed up.
+        GaiEditorColors.gutter.setFill()
+        bounds.fill()
+
         guard let textView = sourceTextView,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer else { return }
@@ -143,7 +154,8 @@ struct GaiCodeTextView: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = GaiEditorColors.codeArea   // light gray (terminal interior)
         scrollView.borderType = .noBorder
 
         let textView = GaiSourceTextView()
@@ -156,7 +168,8 @@ struct GaiCodeTextView: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.allowsUndo = true
-        textView.drawsBackground = false
+        textView.drawsBackground = true
+        textView.backgroundColor = GaiEditorColors.codeArea
         textView.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
         textView.textColor = NSColor(white: 1, alpha: 0.88)
         textView.insertionPointColor = NSColor(accent)
@@ -176,31 +189,44 @@ struct GaiCodeTextView: NSViewRepresentable {
 
         context.coordinator.textView = textView
         context.coordinator.ruler = ruler
+        context.coordinator.language = model.language
+        highlight(textView)
         DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
+        context.coordinator.language = model.language
         if textView.string != model.text {
             textView.string = model.text
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             context.coordinator.ruler?.needsDisplay = true
+            highlight(textView)
         }
         textView.insertionPointColor = NSColor(accent)
+    }
+
+    private func highlight(_ textView: NSTextView) {
+        guard let storage = textView.textStorage else { return }
+        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        GaiSyntax.highlight(storage, language: model.language, font: font)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         let model: GaiEditorModel
         weak var textView: NSTextView?
         weak var ruler: GaiLineNumberRuler?
+        var language = ""
 
         init(model: GaiEditorModel) { self.model = model }
 
         func textDidChange(_ notification: Notification) {
-            guard let textView else { return }
+            guard let textView, let storage = textView.textStorage else { return }
             model.updateText(textView.string)
             ruler?.needsDisplay = true   // refresh line numbers after the edit
+            let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+            GaiSyntax.highlight(storage, language: language, font: font)
         }
     }
 }

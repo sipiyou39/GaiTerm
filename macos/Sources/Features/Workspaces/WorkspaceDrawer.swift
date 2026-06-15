@@ -247,7 +247,11 @@ struct WorkspaceDrawerView: View {
                 VStack(alignment: .leading, spacing: M.headerGap) {
                     tabsHeader
                     if ui.explorerOpen {
-                        fileTab
+                        // Mounted only once the card finished expanding, then
+                        // faded in — same as the workspace editor.
+                        if ui.explorerMounted {
+                            fileTab.opacity(ui.explorerContentVisible ? 1 : 0)
+                        }
                     } else {
                         rowsList
                     }
@@ -263,6 +267,9 @@ struct WorkspaceDrawerView: View {
         .padding(.trailing, M.tabWidth + 12)
         .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
         .animation(.easeInOut(duration: 0.35), value: ui.editorContentVisible)
+        // Fade the file tree in once mounted (a pure opacity crossfade on a
+        // settled card — safe, unlike a geometry animation on explorerOpen).
+        .animation(.easeInOut(duration: 0.35), value: ui.explorerContentVisible)
         // NOTE: no `.animation(value: explorerOpen)` here on purpose. The slab
         // frame height is already animated (with `.gaiCardResize`) by the
         // manager; adding a second, differently-timed animation here made the
@@ -274,7 +281,7 @@ struct WorkspaceDrawerView: View {
     // MARK: Tabs header
 
     private var tabsHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             HStack(spacing: 3) {
                 tabButton("square.grid.2x2", "Space", active: !ui.explorerOpen) { ui.explorerOpen = false }
                     .contextMenu { Button("New workspace", action: createNewWorkspace) }
@@ -297,9 +304,9 @@ struct WorkspaceDrawerView: View {
             if hasFile { ui.stageShowsEditor.toggle() }
         } label: {
             Image(systemName: ui.stageShowsEditor ? "doc.text" : "terminal")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.white.opacity(hasFile ? 0.85 : 0.25))
-                .frame(width: 30, height: 30)
+                .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -318,7 +325,7 @@ struct WorkspaceDrawerView: View {
             .foregroundStyle(active ? .white : .white.opacity(0.5))
             // Equal width for every tab (sized for the longest label) so they
             // line up no matter how short the word is.
-            .frame(width: 62, height: 26)
+            .frame(width: 66, height: 26)
             .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(active ? Color.white.opacity(0.16) : .clear))
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))

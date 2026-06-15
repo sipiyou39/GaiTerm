@@ -42,6 +42,12 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// expansion (same height as the workspace editor).
     @Published var explorerOpen: Bool = false
 
+    /// File-explorer content mount/fade gates — same trick as the editor: mount
+    /// only once the card has finished expanding, then fade in, so the files
+    /// never appear mid-expansion.
+    @Published var explorerMounted: Bool = false
+    @Published var explorerContentVisible: Bool = false
+
     /// Files open in the stage editor, in tab order. Empty = no editor.
     @Published var openFiles: [String] = []
 
@@ -913,8 +919,38 @@ final class GaiWorkspaceManager {
     /// the same drawer card. Same pure SwiftUI slab-height spring as the editor;
     /// the window is already sized for it (`panelHeightTarget`).
     private func updateExplorer(open: Bool) {
-        withAnimation(.gaiCardResize) {
-            ui.cardHeight = cardHeightTarget()
+        // Same choreography as the workspace editor: the card grows empty, then
+        // the file tree is mounted (opacity 0) on the settled card and faded in
+        // — so files never flash in mid-expansion.
+        ui.explorerMounted = false
+        ui.explorerContentVisible = false
+        if open {
+            let mountThenFade = {
+                self.ui.explorerMounted = true
+                DispatchQueue.main.async { self.ui.explorerContentVisible = true }
+            }
+            if #available(macOS 14.0, *) {
+                withAnimation(.gaiCardResize, completionCriteria: .logicallyComplete) {
+                    ui.cardHeight = cardHeightTarget()
+                } completion: { mountThenFade() }
+            } else {
+                withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.46, execute: mountThenFade)
+            }
+        } else {
+            withAnimation(.gaiCardResize) { ui.cardHeight = cardHeightTarget() }
+        }
+
+        // The file tab's search / rename / new-file fields need the keyboard, so
+        // the drawer must be key while it's open (it's otherwise never key, to
+        // avoid stealing focus from terminals).
+        guard let panel = panel as? FloatingPanel else { return }
+        panel.allowsKeyForEditing = open
+        if open {
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            panel.makeKeyAndOrderFront(nil)
+        } else if let stagePanel, stagePanel.isVisible {
+            stagePanel.makeKeyAndOrderFront(nil)
         }
     }
 
