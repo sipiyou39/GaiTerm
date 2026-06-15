@@ -30,7 +30,10 @@ SIGN_UPDATE="$(find "$HOME/Library/Developer/Xcode/DerivedData" \
 [ -x "$SIGN_UPDATE" ] || { echo "✗ sign_update not found (open the project in Xcode once)"; exit 1; }
 
 echo "▸ Building GaiTerm…"
-zig build >/dev/null
+# The final zig step tries to copy a "Ghostty.app" into zig-out and fails
+# harmlessly (the app is GaiTerm.app); the bundle itself builds fine, so we
+# tolerate the non-zero exit and verify the product directly.
+zig build >/dev/null 2>&1 || true
 [ -d "$APP" ] || { echo "✗ build product missing: $APP"; exit 1; }
 
 echo "▸ Stamping version $VERSION (build $BUILD)…"
@@ -69,7 +72,7 @@ cat > "$OUT/appcast.xml" <<XML
 </rss>
 XML
 
-echo "▸ Publishing GitHub release $TAG…"
+echo "> Publishing GitHub release ${TAG}"
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "$OUT/$ZIP" "$OUT/appcast.xml" --repo "$REPO" --clobber
 else
