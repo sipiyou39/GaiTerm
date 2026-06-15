@@ -2,6 +2,11 @@
 
 A file for [guiding coding agents](https://agents.md/).
 
+> **GaiTerm (ce fork) :** avant de travailler sur l'app macOS, lis
+> [`GAITERM.md`](GAITERM.md) — architecture, carte des fichiers, pièges de build,
+> et procédure de publication des mises à jour. Ce fichier-ci reste le guide
+> Ghostty amont.
+
 ## Commands
 
 - **Build:** `zig build`
