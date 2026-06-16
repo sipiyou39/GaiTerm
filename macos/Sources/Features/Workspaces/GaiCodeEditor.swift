@@ -69,6 +69,10 @@ final class GaiEditorModel: ObservableObject {
 /// the numbers, on a transparent gutter.
 final class GaiLineNumberRuler: NSRulerView {
     private weak var sourceTextView: NSTextView?
+    /// Gutter fill — the dark panel gray, optionally tinted with the workspace
+    /// accent. Set by the editor so the gutter tracks the workspace exactly like
+    /// the terminal does (see `gaiPanelColor`).
+    var gutterColor: NSColor = GaiEditorColors.gutter
 
     init(textView: NSTextView) {
         self.sourceTextView = textView
@@ -80,8 +84,9 @@ final class GaiLineNumberRuler: NSRulerView {
     required init(coder: NSCoder) { fatalError() }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        // Dark gutter (panel/tab gray); clipped to the editor so it can't bleed up.
-        GaiEditorColors.gutter.setFill()
+        // Dark gutter (panel/tab gray, accent-tinted like the terminal); clipped
+        // to the editor so it can't bleed up.
+        gutterColor.setFill()
         bounds.fill()
 
         guard let textView = sourceTextView,
@@ -150,10 +155,18 @@ struct GaiCodeTextView: NSViewRepresentable {
     @AppStorage(GaiPreferenceKey.editorFontSize) private var fontSize = 13.0
     @AppStorage(GaiPreferenceKey.editorShowLineNumbers) private var showLineNumbers = true
     @AppStorage(GaiPreferenceKey.editorWrapLines) private var wrapLines = true
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
 
     private var editorFont: NSFont {
         NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
     }
+
+    /// Editor backgrounds derived from the workspace accent, exactly like the
+    /// terminal: the code area = the terminal interior, the gutter = the panel.
+    /// When the "tint panels with workspace color" setting is off these collapse
+    /// to the neutral grays, just like the terminal.
+    private var codeBg: NSColor { NSColor(Color.gaiInteriorColor(accent: accent, tinted: tintPanels)) }
+    private var gutterBg: NSColor { NSColor(Color.gaiPanelColor(accent: accent, tinted: tintPanels)) }
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
@@ -163,7 +176,7 @@ struct GaiCodeTextView: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
-        scrollView.backgroundColor = GaiEditorColors.codeArea   // light gray (terminal interior)
+        scrollView.backgroundColor = codeBg   // terminal interior, tracks the workspace accent
         scrollView.borderType = .noBorder
 
         let textView = GaiSourceTextView()
@@ -177,7 +190,7 @@ struct GaiCodeTextView: NSViewRepresentable {
         textView.isGrammarCheckingEnabled = false
         textView.allowsUndo = true
         textView.drawsBackground = true
-        textView.backgroundColor = GaiEditorColors.codeArea
+        textView.backgroundColor = codeBg
         textView.font = editorFont
         textView.textColor = NSColor(white: 1, alpha: 0.88)
         textView.insertionPointColor = NSColor(accent)
@@ -189,11 +202,14 @@ struct GaiCodeTextView: NSViewRepresentable {
         scrollView.documentView = textView
         scrollView.hasVerticalRuler = true
         let ruler = GaiLineNumberRuler(textView: textView)
+        ruler.gutterColor = gutterBg
         scrollView.verticalRulerView = ruler
 
         context.coordinator.textView = textView
         context.coordinator.ruler = ruler
         context.coordinator.language = model.language
+        context.coordinator.lastAccent = accent
+        context.coordinator.lastTinted = tintPanels
         applyPreferences(textView, scrollView)
         highlight(textView)
         DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
@@ -214,6 +230,18 @@ struct GaiCodeTextView: NSViewRepresentable {
             highlight(textView)
         }
         textView.insertionPointColor = NSColor(accent)
+        // Recolor to the workspace accent — like the terminal — when the stage
+        // switches workspace or the tint setting toggles. Skipped on plain edits
+        // so typing never repaints the gutter needlessly.
+        if context.coordinator.lastAccent != accent || context.coordinator.lastTinted != tintPanels {
+            context.coordinator.lastAccent = accent
+            context.coordinator.lastTinted = tintPanels
+            let bg = codeBg
+            scrollView.backgroundColor = bg
+            textView.backgroundColor = bg
+            context.coordinator.ruler?.gutterColor = gutterBg
+            context.coordinator.ruler?.needsDisplay = true
+        }
     }
 
     /// Apply the live editor preferences (font size, gutter, wrapping).
@@ -246,6 +274,10 @@ struct GaiCodeTextView: NSViewRepresentable {
         weak var textView: NSTextView?
         weak var ruler: GaiLineNumberRuler?
         var language = ""
+        /// Last accent/tint applied to the backgrounds, so we only repaint on a
+        /// real workspace/setting change, not on every keystroke.
+        var lastAccent: Color?
+        var lastTinted: Bool?
 
         init(model: GaiEditorModel) { self.model = model }
 
