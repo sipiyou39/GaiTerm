@@ -255,7 +255,12 @@ final class GaiWorkspaceManager {
         // No demo seeding — a fresh install opens to the empty state.
         let restore = UserDefaults.standard.object(forKey: GaiPreferenceKey.restoreWorkspaces) as? Bool ?? true
         if restore { store.loadPersisted() }
-        ui.selectedWorkspaceID = store.workspaces.first?.id
+        // Open the first workspace at launch (its terminals + accent color on
+        // stage). The default scratch terminal / neutral gray show only when there
+        // are no workspaces at all. Deliberately don't pre-select a row: the gray
+        // highlight should mean "you clicked this", so nothing is highlighted until
+        // the user actually selects a workspace.
+        store.openWorkspaceID = store.workspaces.first?.id
         warmFirstSurfaces()
         recomputeCardHeight()
         ensurePanel()
