@@ -67,9 +67,9 @@ struct WorkspaceStageView: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             Color.clear
-            if let workspace = store.workspace(for: store.openWorkspaceID) {
-                slab(workspace).offset(x: slide)
-            }
+            // Always show a terminal: the open workspace, or the default scratch
+            // terminal when none is open.
+            slab(store.stageWorkspace).offset(x: slide)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .environmentObject(ghostty)
@@ -108,13 +108,13 @@ struct WorkspaceStageView: View {
     /// frame while the slab moved/resized, which made the animations stutter. A
     /// solid fill (matching the drawer and the pane headers) composites for free.
     private var glassBase: some View {
-        let accent = store.workspace(for: store.openWorkspaceID)?.accentColor ?? .white
+        let accent = store.stageWorkspace.accentColor
         return GaiStageSlabShape().fill(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
     }
 
     /// The current stage workspace accent (for tinting headers).
     private var stageAccent: Color {
-        store.workspace(for: store.openWorkspaceID)?.accentColor ?? .white
+        store.stageWorkspace.accentColor
     }
 
     // MARK: Tab

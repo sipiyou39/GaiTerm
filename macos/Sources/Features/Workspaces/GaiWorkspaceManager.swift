@@ -221,6 +221,11 @@ final class GaiWorkspaceManager {
     private var cancellables: Set<AnyCancellable> = []
     private var clickOutsideLocal: Any?
     private var clickOutsideGlobal: Any?
+    /// Monotonic time the stage last opened. Opening it focuses its terminal,
+    /// which emits a `leftMouseDown` the click-outside monitors would otherwise
+    /// read as an outside click and immediately collapse the stage (and, via the
+    /// mirror, the drawer). Ignore outside clicks briefly after opening.
+    private var stageOpenedAt: TimeInterval = 0
 
     /// Transparent margins around the slab in the open frame so the glass can
     /// cast its light and shadow without being clipped at the window edge.
@@ -264,6 +269,10 @@ final class GaiWorkspaceManager {
         panel?.orderFrontRegardless()
         (panel as? FloatingPanel)?.latchMaterialActive()
         registerObservers()
+        // Always show a terminal: the default scratch terminal until a workspace
+        // is opened. The drawer has no pull tab — it mirrors the stage (see
+        // `registerObservers`), so opening the stage here opens the drawer too.
+        showStage()
 
         if ProcessInfo.processInfo.environment["GAI_AUTOEXPAND"] != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -647,10 +656,8 @@ final class GaiWorkspaceManager {
             onDidCollapse: { [weak self] in self?.snapStagePanel(open: false) })
         let host = StageHostingView(rootView: stage)
         host.surfacesProvider = { [weak self] in
-            guard let self,
-                  let workspace = self.store.workspace(for: self.store.openWorkspaceID)
-            else { return [] }
-            return workspace.sessions.map(\.surfaceView)
+            guard let self else { return [] }
+            return self.store.stageWorkspace.sessions.map(\.surfaceView)
         }
         host.autoresizingMask = [.width, .height]
         // Non-flipped container as the panel's contentView. Ghostty's
@@ -675,6 +682,7 @@ final class GaiWorkspaceManager {
     private func showStage() {
         ensureStagePanel()
         guard let stagePanel else { return }
+        stageOpenedAt = ProcessInfo.processInfo.systemUptime
         recomputeStageCardWidth()
         let wasVisible = stagePanel.isVisible
         if !wasVisible {
@@ -693,8 +701,10 @@ final class GaiWorkspaceManager {
         }
         // Don't spin up terminals (or auto-launch CLIs) when the stage opens
         // straight into the editor from a file click — only when the terminals
-        // are what's being shown.
-        if !ui.stageShowsEditor, let workspace = store.workspace(for: store.openWorkspaceID) {
+        // are what's being shown. `stageWorkspace` is the open workspace, or the
+        // default scratch terminal when none is open.
+        if !ui.stageShowsEditor {
+            let workspace = store.stageWorkspace
             splits.ensureFirstSurface(in: workspace)
             if let leaf = workspace.surfaceTree.root?.leftmostLeaf() {
                 DispatchQueue.main.async { Ghostty.moveFocus(to: leaf) }
@@ -985,7 +995,9 @@ final class GaiWorkspaceManager {
     }
 
     private func updateClickOutsideMonitors() {
-        if ui.isExpanded || ui.isStageExpanded {
+        // The drawer has no pull tab and stays open — only the stage collapses on
+        // an outside click, so we only watch while the stage is out.
+        if ui.isStageExpanded {
             installClickOutsideMonitors()
         } else {
             removeClickOutsideMonitors()
@@ -1000,44 +1012,39 @@ final class GaiWorkspaceManager {
         let tabExtent = GaiDrawerMetrics.tabExtent
         var rects: [NSRect] = []
 
-        // Drawer (left edge): card+tab when out, tab only when tucked.
-        if ui.isExpanded {
-            rects.append(visibleDrawerRect(on: screen))
+        // Drawer (left edge): always unfolded now (no pull tab), so always its card.
+        rects.append(visibleDrawerRect(on: screen))
+
+        // Stage (right edge): its card when out (it always shows a terminal — the
+        // default scratch one if no workspace is open), or its pull tab when tucked.
+        if ui.isStageExpanded {
+            let stageLeft = visible.maxX - ui.stageCardWidth
+            rects.append(NSRect(
+                x: stageLeft - GaiDrawerMetrics.tabWidth, y: visible.minY,
+                width: ui.stageCardWidth + GaiDrawerMetrics.tabWidth,
+                height: visible.height))
         } else {
             rects.append(NSRect(
-                x: visible.minX, y: visible.midY - tabExtent / 2,
+                x: visible.maxX - GaiDrawerMetrics.tabWidth,
+                y: visible.midY - tabExtent / 2,
                 width: GaiDrawerMetrics.tabWidth, height: tabExtent))
-        }
-
-        // Stage (right edge): only while a workspace is on stage.
-        if store.openWorkspaceID != nil {
-            if ui.isStageExpanded {
-                let stageLeft = visible.maxX - ui.stageCardWidth
-                rects.append(NSRect(
-                    x: stageLeft - GaiDrawerMetrics.tabWidth, y: visible.minY,
-                    width: ui.stageCardWidth + GaiDrawerMetrics.tabWidth,
-                    height: visible.height))
-            } else {
-                rects.append(NSRect(
-                    x: visible.maxX - GaiDrawerMetrics.tabWidth,
-                    y: visible.midY - tabExtent / 2,
-                    width: GaiDrawerMetrics.tabWidth, height: tabExtent))
-            }
         }
         return rects
     }
 
-    /// A click outside every panel region folds whatever is expanded — both
-    /// the drawer and the stage.
+    /// A click outside the panels folds the stage. The drawer has no pull tab now
+    /// and stays open, so it is never collapsed.
     private func collapseIfClickOutside() {
-        guard ui.isExpanded || ui.isStageExpanded, let screen = targetScreen() else { return }
+        guard ui.isStageExpanded, let screen = targetScreen() else { return }
+        // Ignore the burst right after opening (terminal focus) so the stage
+        // doesn't collapse the instant it appears.
+        guard ProcessInfo.processInfo.systemUptime - stageOpenedAt > 0.5 else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.ui.isExpanded || self.ui.isStageExpanded else { return }
+            guard let self, self.ui.isStageExpanded else { return }
             let point = NSEvent.mouseLocation
             let regions = self.panelRegions(on: screen)
             guard !regions.contains(where: { $0.contains(point) }) else { return }
-            if self.ui.isExpanded { self.ui.isExpanded = false }
-            if self.ui.isStageExpanded { self.ui.isStageExpanded = false }
+            self.ui.isStageExpanded = false
         }
     }
 
@@ -1056,7 +1063,13 @@ final class GaiWorkspaceManager {
         ui.$isStageExpanded
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
+            .sink { [weak self] open in
+                guard let self else { return }
+                self.updateClickOutsideMonitors()
+                // The drawer has no pull tab: it mirrors the stage. Stage opens →
+                // drawer opens; stage closes → drawer closes.
+                self.ui.isExpanded = open
+            }
             .store(in: &cancellables)
 
         // Grow the drawer for the editor and make the panel keyboard-eligible
@@ -1098,17 +1111,12 @@ final class GaiWorkspaceManager {
             }
             .store(in: &cancellables)
 
-        // Show/hide the stage when a workspace is opened/closed.
+        // Opening/closing a workspace swaps the stage's content; the stage always
+        // shows *something* (the open workspace, or the default scratch terminal).
         store.$openWorkspaceID
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] id in
-                if id != nil {
-                    self?.showStage()
-                } else {
-                    self?.hideStage()
-                }
-            }
+            .sink { [weak self] _ in self?.showStage() }
             .store(in: &cancellables)
 
         NotificationCenter.default

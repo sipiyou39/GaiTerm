@@ -362,6 +362,24 @@ final class GaiWorkspaceStore: ObservableObject {
         return workspaces.first { $0.id == id }
     }
 
+    /// A scratch workspace shown on stage whenever no real workspace is open, so
+    /// there is always a terminal to type in. It is never part of `workspaces`
+    /// (so it never shows in the drawer list) and is never persisted. Its accent
+    /// is the neutral panel gray (`#1C1C1E`) so it shows the *default* color, not
+    /// a hash-derived accent from its empty name.
+    private(set) lazy var defaultWorkspace: GaiWorkspace =
+        GaiWorkspace(
+            name: "",
+            colorHex: "1C1C1E",
+            defaultDirectory: FileManager.default.homeDirectoryForCurrentUser)
+
+    /// The workspace the stage should display: the open one, or the default
+    /// scratch terminal when none is open. Opening a workspace therefore replaces
+    /// the default terminal with that workspace's terminals.
+    var stageWorkspace: GaiWorkspace {
+        workspace(for: openWorkspaceID) ?? defaultWorkspace
+    }
+
     // MARK: Session bookkeeping
 
     /// Wrap a freshly created pane surface in a session, giving it its

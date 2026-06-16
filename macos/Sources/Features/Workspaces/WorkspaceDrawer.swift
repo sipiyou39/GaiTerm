@@ -203,9 +203,8 @@ struct WorkspaceDrawerView: View {
             glassBase
             cardContent
         }
-        .frame(width: M.slabWidth, height: ui.cardHeight)
-        .overlay(alignment: .trailing) { chevron }
-        .overlay(alignment: .trailing) { tabHitArea }
+        // No pull tab anymore — just the card (off-screen bleed + card width).
+        .frame(width: M.bleed + M.cardWidth, height: ui.cardHeight)
     }
 
     /// Accent of the selected workspace — the glass is tinted with it, so
@@ -221,8 +220,19 @@ struct WorkspaceDrawerView: View {
     /// frame while the card height animated, which is what made the expansion
     /// stutter. A solid fill animates for free.
     private var glassBase: some View {
-        let accent = store.workspace(for: ui.selectedWorkspaceID)?.accentColor ?? .white
-        return GaiDrawerSlabShape().fill(Color.gaiPanelColor(accent: accent, tinted: tintGlass))
+        // Linked to the stage: same accent as `stageWorkspace` (the open workspace,
+        // or the default scratch terminal when none) + the same tint setting, so
+        // the drawer and the stage are always the exact same color.
+        let accent = store.stageWorkspace.accentColor
+        // No tab silhouette now: a plain card, flat on the left (flush with the
+        // screen edge), rounded on the right.
+        return UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: M.cardCornerRadius,
+            topTrailingRadius: M.cardCornerRadius,
+            style: .continuous)
+            .fill(Color.gaiPanelColor(accent: accent, tinted: tintGlass))
     }
 
     @ViewBuilder
@@ -265,7 +275,7 @@ struct WorkspaceDrawerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.vertical, M.verticalPadding)
         .padding(.leading, M.bleed + 14)
-        .padding(.trailing, M.tabWidth + 12)
+        .padding(.trailing, 14)   // no tab to clear anymore
         .animation(.easeInOut(duration: 0.28), value: ui.editingWorkspaceID)
         .animation(.easeInOut(duration: 0.35), value: ui.editorContentVisible)
         // Fade the file tree in once mounted (a pure opacity crossfade on a
