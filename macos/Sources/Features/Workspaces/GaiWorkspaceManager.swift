@@ -219,13 +219,6 @@ final class GaiWorkspaceManager {
     /// springs to its new height — see `updateWorkspaceEditor`.
     private var panelContentHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
     private var cancellables: Set<AnyCancellable> = []
-    private var clickOutsideLocal: Any?
-    private var clickOutsideGlobal: Any?
-    /// Monotonic time the stage last opened. Opening it focuses its terminal,
-    /// which emits a `leftMouseDown` the click-outside monitors would otherwise
-    /// read as an outside click and immediately collapse the stage (and, via the
-    /// mirror, the drawer). Ignore outside clicks briefly after opening.
-    private var stageOpenedAt: TimeInterval = 0
 
     /// Transparent margins around the slab in the open frame so the glass can
     /// cast its light and shadow without being clipped at the window edge.
@@ -245,9 +238,10 @@ final class GaiWorkspaceManager {
     /// reopened from the Dock (instead of spawning a terminal window).
     func reveal() {
         start()
-        panel?.orderFrontRegardless()
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
-        ui.isExpanded = true
+        // Open the block (stage + drawer via the mirror), like the pull tab does —
+        // not just the drawer.
+        showStage()
     }
 
     func start() {
@@ -682,7 +676,6 @@ final class GaiWorkspaceManager {
     private func showStage() {
         ensureStagePanel()
         guard let stagePanel else { return }
-        stageOpenedAt = ProcessInfo.processInfo.systemUptime
         recomputeStageCardWidth()
         let wasVisible = stagePanel.isVisible
         if !wasVisible {
@@ -814,16 +807,6 @@ final class GaiWorkspaceManager {
         var frame = openFrame(on: screen).offsetBy(dx: -GaiDrawerMetrics.cardWidth, dy: 0)
         frame.size.width = GaiDrawerMetrics.slabWidth + closedMargin
         return frame
-    }
-
-    /// The on-screen part of the open drawer, used for click-outside tests.
-    private func visibleDrawerRect(on screen: NSScreen) -> NSRect {
-        let visible = screen.visibleFrame
-        return NSRect(
-            x: visible.minX,
-            y: visible.midY - ui.cardHeight / 2,
-            width: GaiDrawerMetrics.cardWidth + GaiDrawerMetrics.tabWidth,
-            height: ui.cardHeight)
     }
 
     private func snapPanel(open: Bool) {
@@ -974,78 +957,15 @@ final class GaiWorkspaceManager {
     }
 
 
-    // MARK: Click-outside
+    // MARK: Dismiss on leaving GaiTerm
 
-    private func installClickOutsideMonitors() {
-        guard clickOutsideLocal == nil else { return }
-        clickOutsideLocal = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            self?.collapseIfClickOutside()
-            return event
-        }
-        clickOutsideGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
-            self?.collapseIfClickOutside()
-        }
-    }
-
-    private func removeClickOutsideMonitors() {
-        if let clickOutsideLocal { NSEvent.removeMonitor(clickOutsideLocal) }
-        if let clickOutsideGlobal { NSEvent.removeMonitor(clickOutsideGlobal) }
-        clickOutsideLocal = nil
-        clickOutsideGlobal = nil
-    }
-
-    private func updateClickOutsideMonitors() {
-        // The drawer has no pull tab and stays open — only the stage collapses on
-        // an outside click, so we only watch while the stage is out.
-        if ui.isStageExpanded {
-            installClickOutsideMonitors()
-        } else {
-            removeClickOutsideMonitors()
-        }
-    }
-
-    /// Screen-space regions our panels occupy right now — each panel's card
-    /// when out, or just its pull tab when tucked. A click landing in none of
-    /// them is "outside the panels".
-    private func panelRegions(on screen: NSScreen) -> [NSRect] {
-        let visible = screen.visibleFrame
-        let tabExtent = GaiDrawerMetrics.tabExtent
-        var rects: [NSRect] = []
-
-        // Drawer (left edge): always unfolded now (no pull tab), so always its card.
-        rects.append(visibleDrawerRect(on: screen))
-
-        // Stage (right edge): its card when out (it always shows a terminal — the
-        // default scratch one if no workspace is open), or its pull tab when tucked.
-        if ui.isStageExpanded {
-            let stageLeft = visible.maxX - ui.stageCardWidth
-            rects.append(NSRect(
-                x: stageLeft - GaiDrawerMetrics.tabWidth, y: visible.minY,
-                width: ui.stageCardWidth + GaiDrawerMetrics.tabWidth,
-                height: visible.height))
-        } else {
-            rects.append(NSRect(
-                x: visible.maxX - GaiDrawerMetrics.tabWidth,
-                y: visible.midY - tabExtent / 2,
-                width: GaiDrawerMetrics.tabWidth, height: tabExtent))
-        }
-        return rects
-    }
-
-    /// A click outside the panels folds the stage. The drawer has no pull tab now
-    /// and stays open, so it is never collapsed.
-    private func collapseIfClickOutside() {
-        guard ui.isStageExpanded, let screen = targetScreen() else { return }
-        // Ignore the burst right after opening (terminal focus) so the stage
-        // doesn't collapse the instant it appears.
-        guard ProcessInfo.processInfo.systemUptime - stageOpenedAt > 0.5 else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.ui.isStageExpanded else { return }
-            let point = NSEvent.mouseLocation
-            let regions = self.panelRegions(on: screen)
-            guard !regions.contains(where: { $0.contains(point) }) else { return }
-            self.ui.isStageExpanded = false
-        }
+    /// Close the block. Called when GaiTerm stops being the active app — i.e. the
+    /// user clicked another app or the desktop. We let that click act normally
+    /// (which is what switches apps in a single click, the way macOS intends);
+    /// here we just fold the panels away. A single click on a folder only selects
+    /// it, so nothing destructive is triggered behind.
+    private func dismissBlock() {
+        if ui.isStageExpanded { ui.isStageExpanded = false }
     }
 
     // MARK: Observers
@@ -1053,23 +973,12 @@ final class GaiWorkspaceManager {
     private func registerObservers() {
         guard cancellables.isEmpty else { return }
 
-        // Watch the click-outside monitors whenever either panel is out.
-        ui.$isExpanded
-            .removeDuplicates()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateClickOutsideMonitors() }
-            .store(in: &cancellables)
-
+        // The drawer has no pull tab: it mirrors the stage. Stage opens → drawer
+        // opens; stage closes → drawer closes.
         ui.$isStageExpanded
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] open in
-                guard let self else { return }
-                self.updateClickOutsideMonitors()
-                // The drawer has no pull tab: it mirrors the stage. Stage opens →
-                // drawer opens; stage closes → drawer closes.
-                self.ui.isExpanded = open
-            }
+            .sink { [weak self] open in self?.ui.isExpanded = open }
             .store(in: &cancellables)
 
         // Grow the drawer for the editor and make the panel keyboard-eligible
@@ -1123,6 +1032,14 @@ final class GaiWorkspaceManager {
             .publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.refreshGeometry() }
+            .store(in: &cancellables)
+
+        // Clicking another app or the desktop makes GaiTerm resign active — that
+        // single click switches apps natively; we just fold the block away.
+        NotificationCenter.default
+            .publisher(for: NSApplication.didResignActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.dismissBlock() }
             .store(in: &cancellables)
     }
 
