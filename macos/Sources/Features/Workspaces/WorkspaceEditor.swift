@@ -442,12 +442,23 @@ struct GaiWorkspaceEditor: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
         panel.prompt = "Choose"
         panel.directoryURL = workspace.defaultDirectory
             ?? FileManager.default.homeDirectoryForCurrentUser
-        NSApp.activate(ignoringOtherApps: true)
-        if panel.runModal() == .OK, let url = panel.url {
-            workspace.defaultDirectory = url
+
+        // The drawer/stage float at `.statusBar`. A blocking `runModal()` froze the
+        // whole app (main run loop stuck) and the dialog opened *behind* those
+        // panels (invisible). Fix: activate (only if needed), drop our panels below
+        // the dialog, lift the dialog, and present it non-blocking with `begin`.
+        if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+        let restore = GaiFloatingPanels.lower()
+        panel.level = .modalPanel
+        panel.begin { response in
+            restore()
+            if response == .OK, let url = panel.url {
+                workspace.defaultDirectory = url
+            }
         }
     }
 
@@ -601,12 +612,17 @@ struct GaiWorkspaceEditor: View {
     // MARK: Actions
 
     /// Back: cancel. Discards a just-created workspace; otherwise just closes.
+    /// After discarding a draft, fall back to the workspace that's actually on
+    /// stage so the drawer comes back to it instead of a dangling selection.
     private func cancel() {
         let id = workspace.id
         let wasNew = ui.editingIsNew
         ui.editingIsNew = false
         ui.editingWorkspaceID = nil
-        if wasNew { store.removeWorkspace(id) }
+        if wasNew {
+            store.removeWorkspace(id)
+            ui.selectedWorkspaceID = store.openWorkspaceID
+        }
     }
 
     /// Checkmark: keep the workspace, committing the picked color. For a
