@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
 
 const DRAW_INTERVAL = 8; // 120 FPS
+const UNFOCUSED_RENDER_INTERVAL = 250; // ~4 FPS for visible background panes
 const CURSOR_BLINK_INTERVAL = 600;
 
 /// Whether calls to `drawFrame` must be done from the app thread.
@@ -276,10 +277,9 @@ fn setQosClass(self: *const Thread) void {
         // general forced updates and CPU usage i.e. a rebuild cells call.
         if (!self.flags.visible) break :class .utility;
 
-        // If we're not focused, but we're visible, then we set a higher
-        // than default priority because framerates still matter but it isn't
-        // as important as when we're focused.
-        if (!self.flags.focused) break :class .user_initiated;
+        // GaiTerm commonly keeps 8-16 terminal panes visible. A visible
+        // background pane should not compete with the active CLI for CPU.
+        if (!self.flags.focused) break :class .utility;
 
         // We are focused and visible, we are the definition of user interactive.
         break :class .user_interactive;
@@ -534,25 +534,20 @@ fn wakeupCallback(
     t.drainMailbox() catch |err|
         log.err("error draining mailbox err={}", .{err});
 
-    // Render immediately
-    _ = renderCallback(t, undefined, undefined, {});
-
-    // The below is not used anymore but if we ever want to introduce
-    // a configuration to introduce a delay to coalesce renders, we can
-    // use this.
-    //
-    // // If the timer is already active then we don't have to do anything.
-    // if (t.render_c.state() == .active) return .rearm;
-    //
-    // // Timer is not active, let's start it
-    // t.render_h.run(
-    //     &t.loop,
-    //     &t.render_c,
-    //     10,
-    //     Thread,
-    //     t,
-    //     renderCallback,
-    // );
+    // Focused panes stay fully interactive. Visible unfocused panes are
+    // coalesced so many busy splits do not each render every PTY wakeup.
+    if (t.flags.focused) {
+        _ = renderCallback(t, undefined, undefined, {});
+    } else if (t.flags.visible and t.render_c.state() != .active) {
+        t.render_h.run(
+            &t.loop,
+            &t.render_c,
+            UNFOCUSED_RENDER_INTERVAL,
+            Thread,
+            t,
+            renderCallback,
+        );
+    }
 
     return .rearm;
 }

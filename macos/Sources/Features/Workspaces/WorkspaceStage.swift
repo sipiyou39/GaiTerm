@@ -175,8 +175,8 @@ struct WorkspaceStageView: View {
     }
 
     /// Runs a slab slide, flagging `isSliding` for its whole duration so the
-    /// terminals can drop their screen-blend while moving. Bridges the macOS 14
-    /// completion API and the timer fallback so both clear the flag.
+    /// manager can pause terminal rendering while the panel moves. Bridges the
+    /// macOS 14 completion API and the timer fallback so both clear the flag.
     private func runSlide(
         _ animation: Animation,
         _ changes: @escaping () -> Void,
@@ -212,11 +212,6 @@ private struct StageCard: View {
     @State private var models: [String: GaiEditorModel] = [:]
 
     @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
-
-    /// The fill behind the surfaces. Their Metal layers are screen-blended
-    /// over it (see `GaiBlendAsserter`), so when it carries the workspace
-    /// accent the terminal interior takes that color too — lifted lighter than
-    /// the (un-blended) header by the blend, keeping the dark/light contrast.
 
     /// The pane that currently has keyboard focus, tracked so we can dim the
     /// others and ring the active one.
@@ -574,24 +569,15 @@ private struct GaiPaneView: View {
 
     @State private var branch: String?
 
-    /// Refreshes the branch even when the pwd doesn't change (checkout,
-    /// new repo, worktree switch).
-    private let branchRefresh = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
-
     var body: some View {
         VStack(spacing: 0) {
             paneHeader
             // Flat pane, no card: the focus ring wraps the terminal zone
             // only (the header is app chrome, outside the focus system).
-            Ghostty.SurfaceWrapper(surfaceView: surfaceView, isSplit: isSplit)
-                .background(GaiBlendAsserter(
+            GaiFastSurfaceWrapper(surfaceView: surfaceView)
+                .background(GaiSurfaceLayerAsserter(
                     surfaceView: surfaceView,
-                    ui: ui,
                     backdrop: NSColor(Color.gaiInteriorColor(accent: accent, tinted: tintPanels)).cgColor))
-                .overlay(
-                    Rectangle().strokeBorder(
-                        isFocused && isSplit ? accent.opacity(0.6) : Color.clear,
-                        lineWidth: 1.5))
                 // Ghostty's scroll view sets `contentView.clipsToBounds = false`,
                 // so on an elastic overscroll the surface can draw past its top
                 // edge — up over the fixed header. Clip the terminal to its own
@@ -600,7 +586,6 @@ private struct GaiPaneView: View {
         }
         .onAppear(perform: refreshBranch)
         .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
-        .onReceive(branchRefresh) { _ in refreshBranch() }
     }
 
     private var paneHeader: some View {
@@ -661,33 +646,36 @@ private struct GaiPaneView: View {
     }
 }
 
-/// Keeps the pane's gray interior alive. Two parts, re-asserted on every
-/// layout pass (resize, reparent, window change — whenever AppKit can have
-/// rebuilt layers):
-///
-/// 1. The screen-blend compositing filter on the surface's Metal layer.
-/// 2. The gray itself, painted on the surface's *direct superlayer*. The
-///    blend can only sample content within the surface's own compositing
-///    group — once the tree splits, SwiftUI isolates each pane in its own
-///    group and a gray painted anywhere else composites as empty (black).
-///    The direct superlayer is in the group by construction.
-private struct GaiBlendAsserter: NSViewRepresentable {
+/// Minimal terminal wrapper for GaiTerm's performance path. It keeps the
+/// native Ghostty surface and focus values, but skips Ghostty's per-surface
+/// SwiftUI overlays.
+private struct GaiFastSurfaceWrapper: View {
+    @ObservedObject var surfaceView: Ghostty.SurfaceView
+    @FocusState private var surfaceFocus: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            Ghostty.SurfaceRepresentable(view: surfaceView, size: geo.size)
+                .focused($surfaceFocus)
+                .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
+                .focusedValue(\.ghosttySurfaceView, surfaceView)
+                .focusedValue(\.ghosttySurfaceCellSize, surfaceView.cellSize)
+        }
+        .ghosttySurfaceView(surfaceView)
+    }
+}
+
+/// Keeps the pane's opaque backing alive and strips expensive layer effects.
+private struct GaiSurfaceLayerAsserter: NSViewRepresentable {
     /// Apple's elevated dark surface gray — must match `StageCard`'s.
     static let interiorGray = CGColor(red: 0.110, green: 0.110, blue: 0.118, alpha: 1)
 
     let surfaceView: Ghostty.SurfaceView
-    let ui: GaiWorkspaceUIModel
-    /// The fill the surface's Metal layer screen-blends against. Carries the
-    /// workspace accent when panel tinting is on, else the flat panel gray.
-    var backdrop: CGColor = GaiBlendAsserter.interiorGray
+    var backdrop: CGColor = GaiSurfaceLayerAsserter.interiorGray
 
     final class AsserterView: NSView {
         weak var surfaceView: Ghostty.SurfaceView?
-        weak var ui: GaiWorkspaceUIModel?
-        var backdrop: CGColor = GaiBlendAsserter.interiorGray
-        /// Toggles the screen-blend the instant a slide starts/ends, without
-        /// going through a SwiftUI re-render of the terminal tree.
-        private var slideObserver: AnyCancellable?
+        var backdrop: CGColor = GaiSurfaceLayerAsserter.interiorGray
 
         /// Invisible to clicks, always. As a plain NSView this would
         /// otherwise swallow mouse events meant for the terminal whenever
@@ -695,42 +683,30 @@ private struct GaiBlendAsserter: NSViewRepresentable {
         /// reshuffles on re-renders, making clicks land erratically.
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-        func bind(to ui: GaiWorkspaceUIModel) {
-            guard self.ui !== ui else { return }
-            self.ui = ui
-            slideObserver = ui.$isSliding
-                .receive(on: RunLoop.main)
-                .sink { [weak self] _ in self?.assertBlend() }
-        }
-
-        func assertBlend() {
+        func assertLayerPolicy() {
             guard let layer = surfaceView?.layer else { return }
-            // The screen-blend (terminal bg melted into the gray) stays on at
-            // all times — toggling it would visibly flash the panes' shade as
-            // a slide starts/ends.
-            layer.compositingFilter = "screenBlendMode"
+            layer.compositingFilter = nil
+            layer.filters = nil
+            layer.backgroundFilters = nil
+            layer.opacity = 1
+            layer.isOpaque = true
+            layer.shouldRasterize = false
+            layer.drawsAsynchronously = true
             guard let superlayer = layer.superlayer else { return }
             superlayer.backgroundColor = backdrop
-            // While the slab slides, the surface moves across the screen and
-            // screen-blend forces a per-frame backdrop read+blend on the moving
-            // layer — the dominant stutter when many busy panes are on stage.
-            // Rasterizing the pane's layer for the slide bakes its *already
-            // blended* look into a bitmap, so the move is a cheap bitmap
-            // translate (re-baked only when the terminal actually repaints, not
-            // every frame of motion) and the appearance never changes.
-            let sliding = ui?.isSliding ?? false
-            superlayer.rasterizationScale = surfaceView?.window?.backingScaleFactor ?? 2
-            superlayer.shouldRasterize = sliding
+            superlayer.compositingFilter = nil
+            superlayer.isOpaque = true
+            superlayer.shouldRasterize = false
         }
 
         override func layout() {
             super.layout()
-            assertBlend()
+            assertLayerPolicy()
         }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            assertBlend()
+            assertLayerPolicy()
         }
     }
 
@@ -738,20 +714,18 @@ private struct GaiBlendAsserter: NSViewRepresentable {
         let view = AsserterView()
         view.surfaceView = surfaceView
         view.backdrop = backdrop
-        view.bind(to: ui)
         return view
     }
 
     func updateNSView(_ view: AsserterView, context: Context) {
         view.surfaceView = surfaceView
         view.backdrop = backdrop
-        view.bind(to: ui)
-        view.assertBlend()
+        view.assertLayerPolicy()
         // The superlayer can be swapped after this update completes (the
         // representable attaches before the surface settles into its new
         // hierarchy) — assert once more on the next turn.
         DispatchQueue.main.async { [weak view] in
-            view?.assertBlend()
+            view?.assertLayerPolicy()
         }
     }
 }

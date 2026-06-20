@@ -17,6 +17,8 @@ final class GaiSplitController {
     /// Called when a workspace's tree becomes empty (its last pane closed),
     /// so the owner can dismiss the stage.
     var onTreeDidEmpty: ((GaiWorkspace) -> Void)?
+    /// Called whenever the set of live/visible panes may have changed.
+    var onTopologyDidChange: (() -> Void)?
 
     init(store: GaiWorkspaceStore, ghostty: Ghostty.App) {
         self.store = store
@@ -103,18 +105,27 @@ final class GaiSplitController {
         }
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         store.attachSession(for: view, in: workspace)
-        applyInteriorBlend(view)
+        applyPerformanceLayerPolicy(view)
+        parkSurface(view)
         return view
     }
 
-    /// Screen-blend the surface's Metal layer so its theme background melts
-    /// into the stage's gray fill beneath (see `WorkspaceStage`). Asserted
-    /// now and on the next runloop turn in case the layer attaches late.
-    private func applyInteriorBlend(_ view: Ghostty.SurfaceView) {
-        view.layer?.compositingFilter = "screenBlendMode"
+    /// New panes start cheap: no compositing filters, opaque layer hints.
+    /// GaiWorkspaceManager later decides which surfaces are actually visible.
+    private func applyPerformanceLayerPolicy(_ view: Ghostty.SurfaceView) {
+        view.layer?.compositingFilter = nil
+        view.layer?.isOpaque = true
         DispatchQueue.main.async {
-            view.layer?.compositingFilter = "screenBlendMode"
+            view.layer?.compositingFilter = nil
+            view.layer?.isOpaque = true
         }
+    }
+
+    /// Never let freshly-created or off-stage surfaces render/focus by default.
+    private func parkSurface(_ view: Ghostty.SurfaceView) {
+        guard let surface = view.surface else { return }
+        view.focusDidChange(false)
+        ghostty_surface_set_occlusion(surface, false)
     }
 
     // MARK: Tree operations
@@ -150,6 +161,7 @@ final class GaiSplitController {
         guard workspace.surfaceTree.isEmpty else { return workspace.surfaceTree.root?.leftmostLeaf() }
         guard let view = makeSurface(for: workspace, baseConfig: baseConfig) else { return nil }
         workspace.surfaceTree = SplitTree(view: view)
+        onTopologyDidChange?()
         if shouldFocus { focus(view) }
         return view
     }
@@ -216,6 +228,7 @@ final class GaiSplitController {
         }
 
         workspace.surfaceTree = workspace.surfaceTree.equalized()
+        onTopologyDidChange?()
 
         for (index, view) in views.enumerated() {
             guard let view, let command = plan[index].command else { continue }
@@ -254,6 +267,7 @@ final class GaiSplitController {
             Ghostty.logger.warning("failed to insert split: \(error, privacy: .public)")
             return nil
         }
+        onTopologyDidChange?()
         focus(newView)
         return newView
     }
@@ -266,6 +280,7 @@ final class GaiSplitController {
             do {
                 workspace.surfaceTree = try workspace.surfaceTree.replacing(
                     node: resize.node, with: resized)
+                onTopologyDidChange?()
             } catch {
                 Ghostty.logger.warning("failed split resize: \(error, privacy: .public)")
             }
@@ -287,6 +302,7 @@ final class GaiSplitController {
                 Ghostty.logger.warning("failed split drop: \(error, privacy: .public)")
                 return
             }
+            onTopologyDidChange?()
             focus(drop.payload)
         }
     }
@@ -302,6 +318,7 @@ final class GaiSplitController {
             guard tree.isSplit else { return }
             workspace.surfaceTree = SplitTree(root: tree.root, zoomed: node)
         }
+        onTopologyDidChange?()
         focus(surface)
     }
 
@@ -350,6 +367,8 @@ final class GaiSplitController {
         let newTree = workspace.surfaceTree.removing(node)
         workspace.surfaceTree = newTree
         store.detachSession(for: surface, in: workspace)
+        parkSurface(surface)
+        onTopologyDidChange?()
 
         if let next = newTree.root?.leftmostLeaf() {
             focus(next)
@@ -386,6 +405,8 @@ final class GaiSplitController {
             return nil
         }
         store.detachSession(for: oldView, in: workspace)
+        parkSurface(oldView)
+        onTopologyDidChange?()
         focus(newView)
         return newView
     }
@@ -406,6 +427,7 @@ final class GaiSplitController {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard let workspace = workspace(containing: target) else { return }
         workspace.surfaceTree = workspace.surfaceTree.equalized()
+        onTopologyDidChange?()
     }
 
     @objc private func didRequestFocusSplit(_ notification: Notification) {

@@ -24,6 +24,12 @@ Depuis la passe de nettoyage, GaiTerm est l'application principale. Ghostty rest
 une couche terminale embarquée : parsing VT, PTY, rendu GPU, surfaces, input,
 split/focus bas niveau, `Ghostty.App`, `Ghostty.SurfaceView` et `SurfaceWrapper`.
 
+Exception assumée côté moteur : GaiTerm ajuste `src/renderer/Thread.zig` pour le
+cas multi-pane. Le pane focus rend immédiatement ; les panes visibles mais non
+focus coalescent leurs redraws (~4 FPS) et passent en QoS `utility` pour éviter
+que 8-16 CLIs qui streament réveillent chacune leur renderer à chaque sortie PTY.
+Ne retirer ce throttling qu'après mesure Instruments sur un workspace chargé.
+
 Ce qu'on a volontairement retiré de l'ancienne UI macOS Ghostty :
 - fenêtres/tabs terminal classiques (`TerminalController`, `TerminalWindow`,
   `BaseTerminalController`) ;
@@ -112,6 +118,8 @@ Tout le code GaiTerm vit sous `macos/Sources/Features/`. Les fichiers préfixés
 - `macos/Ghostty-Info.plist` — contient `SUPublicEDKey` (clé publique Sparkle).
 - `src/build/GhosttyXcodebuild.zig` — construit la cible macOS et copie
   `GaiTerm.app` vers `zig-out/`.
+- `src/renderer/Thread.zig` — seule adaptation moteur GaiTerm actuelle :
+  coalescing des redraws pour panes visibles non focus en workspace multi-CLI.
 
 ---
 
@@ -121,7 +129,17 @@ Tout le code GaiTerm vit sous `macos/Sources/Features/`. Les fichiers préfixés
 zig build
 ```
 
-Le produit final est **`macos/build/Debug/GaiTerm.app`**.
+Le produit de développement par défaut est **`macos/build/Debug/GaiTerm.app`**.
+Pour mesurer les performances réelles, utiliser impérativement :
+
+```sh
+zig build -Doptimize=ReleaseFast
+```
+
+Le bundle optimisé sort dans **`macos/build/ReleaseLocal/GaiTerm.app`**. Ne pas
+tirer de diagnostic CPU/GPU sérieux depuis le build Debug : il active le debug
+allocator Zig, des assertions et des vérifications d'intégrité de pages terminal
+qui apparaissent directement dans les samples CPU.
 
 Note : le bundle visible s'appelle `GaiTerm.app`, mais l'exécutable interne est
 encore `Contents/MacOS/ghostty`. C'est acceptable pendant le chantier et ne bloque
@@ -136,6 +154,7 @@ publique en §6.
    l'horodatage du binaire :
    ```sh
    ls -la macos/build/Debug/GaiTerm.app/Contents/MacOS/ghostty
+   ls -la macos/build/ReleaseLocal/GaiTerm.app/Contents/MacOS/ghostty
    ```
    S'il est récent -> build OK.
 
@@ -175,7 +194,13 @@ Le prochain build les recrée (plus lent une fois, normal).
    pkill -f "GaiTerm.app/Contents/MacOS/ghostty"
    open macos/build/Debug/GaiTerm.app
    ```
-4. Formatage : `zig fmt .` (Zig), `swiftlint lint --strict --fix` (Swift).
+4. Pour tester les performances :
+   ```sh
+   zig build -Doptimize=ReleaseFast
+   pkill -f "GaiTerm.app/Contents/MacOS/ghostty"
+   open macos/build/ReleaseLocal/GaiTerm.app
+   ```
+5. Formatage : `zig fmt .` (Zig), `swiftlint lint --strict --fix` (Swift).
 
 ### Préférences & persistance (clés)
 
@@ -345,15 +370,22 @@ des issues ni des PR.)
 ## 8. Aide-mémoire express
 
 ```sh
-# Build
+# Build dev
 zig build
 ls -la macos/build/Debug/GaiTerm.app/Contents/MacOS/ghostty   # vérifier l'horodatage
+
+# Build perf/release local
+zig build -Doptimize=ReleaseFast
+ls -la macos/build/ReleaseLocal/GaiTerm.app/Contents/MacOS/ghostty
 
 # Vraies erreurs de compil (ignorer SourceKit)
 zig build 2>&1 | grep -E '\.swift:[0-9]+:[0-9]+: error:'
 
-# Relancer
+# Relancer dev
 pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/Debug/GaiTerm.app
+
+# Relancer perf/release local
+pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/ReleaseLocal/GaiTerm.app
 
 # Disque saturé ?
 rm -rf .zig-cache ~/Library/Developer/Xcode/DerivedData/* zig-out build/release

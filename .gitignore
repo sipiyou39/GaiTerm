@@ -34,3 +34,4 @@ vgcore.*
 clipboard-*.png
 *.profraw
 /build/
+/perf-logs/

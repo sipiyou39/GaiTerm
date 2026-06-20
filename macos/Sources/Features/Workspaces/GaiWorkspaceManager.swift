@@ -80,26 +80,35 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// Whether the terminal stage is slid out (true) or tucked to its
     /// right-edge pull tab (false). Mirrors `isExpanded` for the drawer.
     @Published var isStageExpanded: Bool = false
+    /// Whether terminal surfaces may render. This intentionally lags behind
+    /// `isStageExpanded` while the slab is sliding.
+    @Published private(set) var terminalRenderingAllowed: Bool = false
     /// Visible width of the terminal card when the stage is out. Owned by the
     /// manager (depends on the screen) so the panel frames and the SwiftUI
     /// slab always agree — same contract as `cardHeight` for the drawer.
     @Published var stageCardWidth: CGFloat = 600
 
-    /// True while the stage slab is mid-slide. Lets each terminal surface drop
-    /// its expensive screen-blend compositing while it's moving across the
-    /// screen (see `GaiBlendAsserter`) — the per-frame backdrop blend of many
-    /// busy panes is what makes the slide stutter. Reference-counted so
-    /// overlapping slides (e.g. click-outside folding both panels) don't clear
-    /// it early.
+    /// True while the stage slab is mid-slide. The manager pauses terminal
+    /// rendering during slides so the panel movement does not compete with
+    /// busy CLI redraws.
     @Published private(set) var isSliding: Bool = false
     private var slideDepth: Int = 0
     func beginSlide() {
         slideDepth += 1
+        setTerminalRenderingAllowed(false)
         if !isSliding { isSliding = true }
     }
     func endSlide() {
         slideDepth = max(0, slideDepth - 1)
-        if slideDepth == 0, isSliding { isSliding = false }
+        if slideDepth == 0, isSliding {
+            isSliding = false
+            setTerminalRenderingAllowed(isStageExpanded)
+        }
+    }
+    func setTerminalRenderingAllowed(_ allowed: Bool) {
+        if terminalRenderingAllowed != allowed {
+            terminalRenderingAllowed = allowed
+        }
     }
 }
 
@@ -208,6 +217,9 @@ final class GaiWorkspaceManager {
             if self?.store.openWorkspaceID == workspace.id {
                 self?.store.openWorkspaceID = nil
             }
+        }
+        controller.onTopologyDidChange = { [weak self] in
+            self?.updateSurfacePerformanceState()
         }
         return controller
     }()
@@ -334,6 +346,7 @@ final class GaiWorkspaceManager {
         // Idempotent: launch can reach this from several paths.
         if let panel {
             panel.orderFrontRegardless()
+            updateSurfacePerformanceState()
             return
         }
 
@@ -379,6 +392,7 @@ final class GaiWorkspaceManager {
                             at: nil,
                             direction: i.isMultiple(of: 2) ? .right : .down)
                     }
+                    self.updateSurfacePerformanceState()
                 }
             }
         }
@@ -397,16 +411,44 @@ final class GaiWorkspaceManager {
         }
     }
 
-    /// Toggle rendering for the open workspace's panes via Ghostty's occlusion
-    /// hook (`visible == false` pauses the renderer). Used to freeze the panes
-    /// for the duration of a slide so the rasterized slab can glide without any
-    /// pane re-baking the bitmap underneath it.
-    private func setStageSurfacesVisible(_ visible: Bool) {
-        guard let workspace = store.workspace(for: store.openWorkspaceID) else { return }
-        for session in workspace.sessions {
-            guard let surface = session.surfaceView.surface else { continue }
-            ghostty_surface_set_occlusion(surface, visible)
+    /// Performance policy for Ghostty surfaces. A surface renders only when it
+    /// is actually visible in the terminal stage. Everything off-stage, hidden
+    /// by the editor, hidden by zoom, or moving during a slide is occluded.
+    private func updateSurfacePerformanceState() {
+        let canRenderStage =
+            stagePanel?.isVisible == true &&
+            ui.isStageExpanded &&
+            ui.terminalRenderingAllowed &&
+            !ui.isSliding &&
+            !ui.stageShowsEditor
+
+        let visibleViews: [Ghostty.SurfaceView] = if canRenderStage {
+            visibleTerminalSurfaces(in: store.stageWorkspace)
+        } else {
+            []
         }
+        let visibleIDs = Set(visibleViews.map { ObjectIdentifier($0) })
+        let appFocused = enclosingSurface(in: stagePanel?.firstResponder)
+
+        for workspace in allWorkspaces {
+            for view in workspace.surfaceTree {
+                let isVisible = visibleIDs.contains(ObjectIdentifier(view))
+                guard let surface = view.surface else { continue }
+
+                ghostty_surface_set_occlusion(surface, isVisible)
+
+                if !isVisible || view !== appFocused {
+                    view.focusDidChange(false)
+                }
+            }
+        }
+    }
+
+    private func visibleTerminalSurfaces(in workspace: GaiWorkspace) -> [Ghostty.SurfaceView] {
+        if let zoomed = workspace.surfaceTree.zoomed {
+            return Array(zoomed)
+        }
+        return Array(workspace.surfaceTree)
     }
 
     // MARK: Panel
@@ -510,8 +552,8 @@ final class GaiWorkspaceManager {
         panel.isMovableByWindowBackground = false
         panel.isReleasedWhenClosed = false
         panel.animationBehavior = .none
-        // Dark rendition always: the terminals' screen-blended text needs a
-        // dark frosted backdrop to stay readable over bright content.
+        // Dark rendition always: terminal rendering is optimized for a dark,
+        // opaque stage backing.
         panel.appearance = NSAppearance(named: .darkAqua)
 
         let stage = WorkspaceStageView(
@@ -552,6 +594,7 @@ final class GaiWorkspaceManager {
         guard let stagePanel else { return }
         recomputeStageCardWidth()
         let wasVisible = stagePanel.isVisible
+        let wasExpanded = ui.isStageExpanded
         if !wasVisible {
             // Start tucked, then let the slide-out choreography snap it open
             // and spring the slab in from the edge.
@@ -591,12 +634,25 @@ final class GaiWorkspaceManager {
         // The drawer stays open: selecting a workspace only ever *shows* it.
         // The only ways to fold the panels are the pull tab or a click
         // outside both panels.
+        if wasExpanded {
+            ui.setTerminalRenderingAllowed(true)
+        } else {
+            ui.setTerminalRenderingAllowed(false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self else { return }
+                guard self.ui.isStageExpanded, !self.ui.isSliding else { return }
+                self.ui.setTerminalRenderingAllowed(true)
+            }
+        }
+        updateSurfacePerformanceState()
     }
 
     private func hideStage() {
         guard let stagePanel, stagePanel.isVisible else { return }
+        ui.setTerminalRenderingAllowed(false)
         ui.isStageExpanded = false
         stagePanel.orderOut(nil)
+        updateSurfacePerformanceState()
     }
 
     // MARK: Stage geometry (right-edge drawer, mirror of the left drawer)
@@ -852,7 +908,25 @@ final class GaiWorkspaceManager {
         ui.$isStageExpanded
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] open in self?.ui.isExpanded = open }
+            .sink { [weak self] open in
+                self?.ui.isExpanded = open
+                if !open {
+                    self?.ui.setTerminalRenderingAllowed(false)
+                }
+                self?.updateSurfacePerformanceState()
+            }
+            .store(in: &cancellables)
+
+        ui.$terminalRenderingAllowed
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateSurfacePerformanceState() }
+            .store(in: &cancellables)
+
+        ui.$stageShowsEditor
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateSurfacePerformanceState() }
             .store(in: &cancellables)
 
         // Grow the drawer for the editor and make the panel keyboard-eligible
@@ -871,16 +945,10 @@ final class GaiWorkspaceManager {
             .store(in: &cancellables)
 
 
-        // Pause the on-stage terminals' rendering for the duration of a slide.
-        // The slab moves as a rasterized bitmap; if a pane keeps repainting it
-        // re-bakes that bitmap mid-slide, which is what still made the motion
-        // hitch with several busy Claude Code sessions running. Ghostty keeps
-        // reading their PTYs while paused, so they catch up instantly when the
-        // slide settles and rendering resumes.
         ui.$isSliding
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] sliding in self?.setStageSurfacesVisible(!sliding) }
+            .sink { [weak self] _ in self?.updateSurfacePerformanceState() }
             .store(in: &cancellables)
 
         // Resize if the workspace count changes, and give any freshly created
@@ -891,6 +959,7 @@ final class GaiWorkspaceManager {
             .sink { [weak self] _ in
                 self?.refreshGeometry()
                 self?.warmFirstSurfaces()
+                self?.updateSurfacePerformanceState()
             }
             .store(in: &cancellables)
 

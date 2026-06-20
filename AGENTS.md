@@ -9,8 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ghostty-org/ghostty) : on est parti de leur code pour ne pas réinventer la roue,
 et on en fait notre appli à nous — on la modifie, c'est la nôtre. De Ghostty on
 ne garde que le **moteur de terminal** (parsing VT, rendu GPU, PTY, gestion des
-surfaces), la fondation qu'on n'a pas envie de réécrire. On n'y touche pas (0
-commit sur `src/`) ; tout notre travail est dans la couche UI macOS.
+surfaces), la fondation qu'on n'a pas envie de réécrire. Par défaut on évite de
+toucher `src/`, sauf exception performance strictement documentée : GaiTerm
+coalesce les redraws des panes visibles non focus dans `src/renderer/Thread.zig`.
+Le reste de notre travail reste dans la couche UI macOS.
 
 Notre logiciel vit dans **`macos/Sources/Features/Workspaces/`** (fichiers
 `Gai*` / `Workspace*`) + `Features/Settings`, `Features/Update`,
@@ -28,8 +30,13 @@ Mais c'est de la doc *moteur* — pas la doc du logiciel.
   `GaiTerm.app`; un échec doit être traité.
 - **Les diagnostics SourceKit sont des faux positifs.** Pour une *vraie* erreur :
   `zig build 2>&1 | grep -E '\.swift:[0-9]+:[0-9]+: error:'` (vide = OK).
-- Produit du build : **`macos/build/Debug/GaiTerm.app`**.
-- Relancer : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/Debug/GaiTerm.app`.
+- Produit du build dev : **`macos/build/Debug/GaiTerm.app`**.
+- Produit perf/release local : `zig build -Doptimize=ReleaseFast` puis
+  **`macos/build/ReleaseLocal/GaiTerm.app`**.
+- Ne jamais diagnostiquer la consommation CPU/GPU sur Debug : le debug allocator
+  Zig et les vérifications d'intégrité polluent les samples.
+- Relancer dev : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/Debug/GaiTerm.app`.
+- Relancer perf : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/ReleaseLocal/GaiTerm.app`.
 
 ---
 
