@@ -412,7 +412,7 @@ private struct EditorSaveButton: View {
 
 /// Renders a workspace's split tree with our own pane chrome (per-pane
 /// header). The recursive structure and resize plumbing mirror
-/// `TerminalSplitTreeView`; only the leaves differ.
+/// the original split rendering; only the leaves differ.
 private struct GaiSplitTreeView: View {
     @ObservedObject var workspace: GaiWorkspace
     let ui: GaiWorkspaceUIModel
@@ -472,7 +472,7 @@ private struct GaiSplitSubtree: View {
     let accent: Color
     let focusedSurface: Ghostty.SurfaceView?
     let sessionLookup: (Ghostty.SurfaceView) -> GaiTerminalSession?
-    let action: (TerminalSplitOperation) -> Void
+    let action: (GaiSplitOperation) -> Void
     let onToggleZoom: (Ghostty.SurfaceView) -> Void
     let onSplit: (Ghostty.SurfaceView, SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
     let onClosePane: (Ghostty.SurfaceView) -> Void

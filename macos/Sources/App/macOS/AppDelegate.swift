@@ -33,8 +33,6 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuSplitDown: NSMenuItem?
     @IBOutlet private var menuSplitUp: NSMenuItem?
     @IBOutlet private var menuClose: NSMenuItem?
-    @IBOutlet private var menuCloseTab: NSMenuItem?
-    @IBOutlet private var menuCloseWindow: NSMenuItem?
     @IBOutlet private var menuCloseAllWindows: NSMenuItem?
 
     @IBOutlet private var menuUndo: NSMenuItem?
@@ -70,11 +68,8 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuDecreaseFontSize: NSMenuItem?
     @IBOutlet private var menuResetFontSize: NSMenuItem?
     @IBOutlet private var menuChangeTitle: NSMenuItem?
-    @IBOutlet private var menuChangeTabTitle: NSMenuItem?
     @IBOutlet private var menuReadonly: NSMenuItem?
-    @IBOutlet private var menuQuickTerminal: NSMenuItem?
-    @IBOutlet private var menuTerminalInspector: NSMenuItem?
-    @IBOutlet private var menuCommandPalette: NSMenuItem?
+    @IBOutlet private var menuShowGaiTerm: NSMenuItem?
 
     @IBOutlet private var menuEqualizeSplits: NSMenuItem?
     @IBOutlet private var menuMoveSplitDividerUp: NSMenuItem?
@@ -100,40 +95,12 @@ class AppDelegate: NSObject,
 
     /// GaiTerm's floating workspaces system: the always-on-top panel hosting
     /// the workspace handles (Repos), Aperçu, and Scène.
-    private lazy var gaiWorkspaceManager = GaiWorkspaceManager(ghostty: ghostty)
+    lazy var gaiWorkspaceManager = GaiWorkspaceManager(ghostty: ghostty)
 
-    /// The global undo manager for app-level state such as window restoration.
+    /// The global undo manager for app-level actions. This remains
+    /// ExpiringUndoManager while the classic Ghostty window files are still
+    /// compiled; they are no longer used as GaiTerm entry points.
     lazy var undoManager = ExpiringUndoManager()
-
-    /// The current state of the quick terminal.
-    private var quickTerminalControllerState: QuickTerminalState = .uninitialized
-
-    /// Our quick terminal. This starts out uninitialized and only initializes if used.
-    var quickController: QuickTerminalController {
-        switch quickTerminalControllerState {
-        case .initialized(let controller):
-            return controller
-
-        case .pendingRestore(let state):
-            let controller = QuickTerminalController(
-                ghostty,
-                position: derivedConfig.quickTerminalPosition,
-                baseConfig: state.baseConfig,
-                restorationState: state
-            )
-            quickTerminalControllerState = .initialized(controller)
-            return controller
-
-        case .uninitialized:
-            let controller = QuickTerminalController(
-                ghostty,
-                position: derivedConfig.quickTerminalPosition,
-                restorationState: nil
-            )
-            quickTerminalControllerState = .initialized(controller)
-            return controller
-        }
-    }
 
     /// Manages updates
     let updateController = UpdateController()
@@ -224,10 +191,7 @@ class AppDelegate: NSObject,
         // Start our update checker.
         updateController.startUpdater()
 
-        // Register our service provider. This must happen after everything is initialized.
-        NSApp.servicesProvider = ServiceProvider()
-
-        // This registers the Ghostty => Services menu to exist.
+        // This registers the Services menu to exist.
         NSApp.servicesMenu = menuServices
 
         // Setup a local event monitor for app-level keyboard shortcuts. See
@@ -245,12 +209,6 @@ class AppDelegate: NSObject,
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(quickTerminalDidChangeVisibility),
-            name: .quickTerminalDidChangeVisibility,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(ghosttyConfigDidChange(_:)),
             name: .ghosttyConfigDidChange,
             object: nil
@@ -259,12 +217,6 @@ class AppDelegate: NSObject,
             self,
             selector: #selector(ghosttyBellDidRing(_:)),
             name: .ghosttyBellDidRing,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(terminalWindowHasBell(_:)),
-            name: .terminalWindowBellDidChangeNotification,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -359,33 +311,9 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            if derivedConfig.initialWindow {
                 gaiWorkspaceManager.start()
             }
-        }
-    }
-
-    private func presentInitialTerminalStackLauncher() {
-        TerminalStackLaunchPanel.present(defaultCount: 3) { [weak self] count in
-            guard let self else { return }
-            self.createInitialTerminalStack(count: count)
-        }
-    }
-
-    private func createInitialTerminalStack(count rawCount: Int) {
-        let count = min(max(rawCount, 1), 8)
-
-        undoManager.disableUndoRegistration()
-        let controllers = (0..<count).map { _ in
-            TerminalController.newWindow(self.ghostty)
-        }
-        undoManager.enableUndoRegistration()
-
-        if count == 1 {
-            controllers.first?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } else {
-            TerminalStackManager.shared.collapseWhenReady(controllers)
         }
     }
 
@@ -410,7 +338,7 @@ class AppDelegate: NSObject,
         // NOTE(mitchellh): I don't think we need this check at all anymore. I'm keeping it
         // here because I don't want to remove it in a patch release cycle but we should
         // target removing it soon.
-        if (windows.allSatisfy { !$0.isVisible }) && !TerminalStackManager.shared.hasCollapsedTerminals {
+        if windows.allSatisfy({ !$0.isVisible }) {
             return .terminateNow
         }
 
@@ -448,23 +376,13 @@ class AppDelegate: NSObject,
     /// This is called when the application is already open and someone double-clicks the icon
     /// or clicks the dock icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // If we have visible windows then we allow macOS to do its default behavior
-        // of focusing one of them.
-        guard !flag else { return true }
-
-        // If we have any windows in our terminal manager we don't do anything.
-        // This is possible with flag set to false if there a race where the
-        // window is still initializing and is not visible but the user clicked
-        // the dock icon.
-        guard TerminalController.all.isEmpty else { return true }
-
         // If the application isn't active yet then we don't want to process
         // this because we're not ready. This happens sometimes in Xcode runs
         // but I haven't seen it happen in releases. I'm unsure why.
         guard applicationHasBecomeActive else { return true }
 
-        // GaiTerm's home is the floating workspaces drawer, not a classic
-        // Ghostty terminal window. Reveal the drawer instead of spawning one.
+        // GaiTerm's home is the floating workspaces block, not a classic
+        // Ghostty terminal window.
         gaiWorkspaceManager.reveal()
         return false
     }
@@ -531,15 +449,7 @@ class AppDelegate: NSObject,
             }
         }
 
-        switch ghostty.config.macosDockDropBehavior {
-        case .new_tab:
-            _ = TerminalController.newTab(
-                ghostty,
-                from: TerminalController.preferredParent?.window,
-                withBaseConfig: config
-            )
-        case .new_window: _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
-        }
+        _ = gaiWorkspaceManager.openTerminal(baseConfig: config)
 
         return true
     }
@@ -650,11 +560,6 @@ class AppDelegate: NSObject,
         syncFloatOnTopMenu(notification.object as? NSWindow)
     }
 
-    @objc private func quickTerminalDidChangeVisibility(_ notification: Notification) {
-        guard let quickController = notification.object as? QuickTerminalController else { return }
-        self.menuQuickTerminal?.state = if quickController.visible { .on } else { .off }
-    }
-
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
         // We only care if the configuration is a global configuration, not a surface one.
         guard notification.object == nil else { return }
@@ -684,11 +589,6 @@ class AppDelegate: NSObject,
             // Bounce the dock icon if we're not focused.
             NSApp.requestUserAttention(.informationalRequest)
         }
-    }
-
-    @objc private func terminalWindowHasBell(_ notification: Notification) {
-        guard notification.object is BaseTerminalController else { return }
-        syncDockBadge()
     }
 
     private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
@@ -742,30 +642,17 @@ class AppDelegate: NSObject,
     @objc private func ghosttyNewWindow(_ notification: Notification) {
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
-        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        _ = gaiWorkspaceManager.openTerminal(baseConfig: config)
     }
 
     @objc private func ghosttyNewTab(_ notification: Notification) {
-        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
-        guard let window = surfaceView.window else { return }
-
-        // We only want to listen to new tabs if the focused parent is
-        // a regular terminal controller.
-        guard window.windowController is TerminalController else { return }
-
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
-
-        _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        _ = gaiWorkspaceManager.openTerminal(baseConfig: config)
     }
 
     private func setDockBadge() {
-        let bellCount = NSApp.windows
-            .compactMap { $0.windowController as? BaseTerminalController }
-            .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-        let wantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
-        let label = wantsBadge ? (bellCount > 99 ? "99+" : String(bellCount)) : nil
-        NSApp.dockTile.badgeLabel = label
+        NSApp.dockTile.badgeLabel = nil
         NSApp.dockTile.display()
     }
 
@@ -809,8 +696,6 @@ class AppDelegate: NSObject,
         DispatchQueue.main.async {
             self.syncMenuShortcuts(config)
         }
-        TerminalController.all.forEach { $0.relabelTabs() }
-
         // Update our badge since config can change what we show.
         syncDockBadge()
 
@@ -835,25 +720,6 @@ class AppDelegate: NSObject,
             if c.window == nil || !c.window!.isVisible {
                 c.showWindow(self)
             }
-        }
-
-        // We need to handle our global event tap depending on if there are global
-        // events that we care about in Ghostty.
-        if ghostty_app_has_global_keybinds(ghostty.app!) {
-            if timeSinceLaunch > 5 {
-                // If the process has been running for awhile we enable right away
-                // because no windows are likely to pop up.
-                GlobalEventTap.shared.enable()
-            } else {
-                // If the process just started, we wait a couple seconds to allow
-                // the initial windows and so on to load so our permissions dialog
-                // doesn't get buried.
-                DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(2)) {
-                    GlobalEventTap.shared.enable()
-                }
-            }
-        } else {
-            GlobalEventTap.shared.disable()
         }
 
         updateAppIcon(from: config)
@@ -883,30 +749,12 @@ class AppDelegate: NSObject,
     }
 
     func application(_ app: NSApplication, willEncodeRestorableState coder: NSCoder) {
-        guard ghostty.config.windowSaveState != "never" else { return }
-
-        // Encode our quick terminal state if we have it.
-        switch quickTerminalControllerState {
-        case .initialized(let controller) where controller.restorable:
-            let data = QuickTerminalRestorableState(from: controller)
-            data.encode(with: coder)
-
-        case .pendingRestore(let state):
-            state.encode(with: coder)
-
-        default:
-            break
-        }
+        // GaiTerm persists workspaces via GaiWorkspaceStore/UserDefaults, not
+        // AppKit's classic Ghostty window restoration.
     }
 
     func application(_ app: NSApplication, didDecodeRestorableState coder: NSCoder) {
-        Self.logger.debug("application will restore window state")
-
-        // Decode our quick terminal state.
-        if ghostty.config.windowSaveState != "never",
-            let state = QuickTerminalRestorableState(coder: coder) {
-            quickTerminalControllerState = .pendingRestore(state)
-        }
+        Self.logger.debug("GaiTerm ignores classic Ghostty window restoration")
     }
 
     // MARK: - UNUserNotificationCenterDelegate
@@ -933,13 +781,7 @@ class AppDelegate: NSObject,
     // MARK: - GhosttyAppDelegate
 
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
-        for c in TerminalController.all {
-            for view in c.surfaceTree where view.id == uuid {
-                return view
-            }
-        }
-
-        return nil
+        gaiWorkspaceManager.surface(for: uuid)
     }
 
     // MARK: - Global State
@@ -980,27 +822,39 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        _ = TerminalController.newWindow(ghostty)
+        _ = gaiWorkspaceManager.openTerminal()
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        _ = TerminalController.newTab(
-            ghostty,
-            from: TerminalController.preferredParent?.window
-        )
+        _ = gaiWorkspaceManager.openTerminal()
+    }
+
+    @IBAction func closeTerminal(_ sender: Any?) {
+        guard let surface = gaiWorkspaceManager.focusedSurface() else {
+            NSApp.keyWindow?.performClose(sender)
+            return
+        }
+        gaiWorkspaceManager.closeSurface(surface)
+    }
+
+    @IBAction func closeTab(_ sender: Any?) {
+        closeTerminal(sender)
+    }
+
+    @IBAction func closeWindow(_ sender: Any?) {
+        closeTerminal(sender)
     }
 
     @IBAction func closeAllWindows(_ sender: Any?) {
-        TerminalController.closeAllWindows()
-        AboutController.shared.hide()
+        gaiWorkspaceManager.closeAllSurfaces()
     }
 
     @IBAction func showAbout(_ sender: Any?) {
-        AboutController.shared.show()
+        NSApp.orderFrontStandardAboutPanel(sender)
     }
 
     @IBAction func showHelp(_ sender: Any) {
-        guard let url = URL(string: "https://ghostty.org/docs") else { return }
+        guard let url = URL(string: "https://github.com/sipiyou39/GaiTerm") else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -1008,8 +862,8 @@ class AppDelegate: NSObject,
         setSecureInput(.toggle)
     }
 
-    @IBAction func toggleQuickTerminal(_ sender: Any) {
-        quickController.toggle()
+    @IBAction func showGaiTerm(_ sender: Any) {
+        gaiWorkspaceManager.reveal()
     }
 
     /// Toggles visibility of all GaiTerm Terminal windows. When hidden, activates GaiTerm as the frontmost application
@@ -1054,18 +908,15 @@ class AppDelegate: NSObject,
     private struct DerivedConfig {
         let initialWindow: Bool
         let shouldQuitAfterLastWindowClosed: Bool
-        let quickTerminalPosition: QuickTerminalPosition
 
         init() {
             self.initialWindow = true
             self.shouldQuitAfterLastWindowClosed = false
-            self.quickTerminalPosition = .top
         }
 
         init(_ config: Ghostty.Config) {
             self.initialWindow = config.initialWindow
             self.shouldQuitAfterLastWindowClosed = config.shouldQuitAfterLastWindowClosed
-            self.quickTerminalPosition = config.quickTerminalPosition
         }
     }
 
@@ -1117,12 +968,12 @@ extension AppDelegate {
     }
 
     private func reloadDockMenu() {
-        let newWindow = NSMenuItem(title: "New Window", action: #selector(newWindow), keyEquivalent: "")
-        let newTab = NSMenuItem(title: "New Tab", action: #selector(newTab), keyEquivalent: "")
+        let reveal = NSMenuItem(title: "Show GaiTerm", action: #selector(showGaiTerm), keyEquivalent: "")
+        let newTerminal = NSMenuItem(title: "New Terminal", action: #selector(newWindow), keyEquivalent: "")
 
         dockMenu.removeAllItems()
-        dockMenu.addItem(newWindow)
-        dockMenu.addItem(newTab)
+        dockMenu.addItem(reveal)
+        dockMenu.addItem(newTerminal)
     }
 
     /// Setup all the images for our menu items.
@@ -1145,10 +996,7 @@ extension AppDelegate {
         self.menuIncreaseFontSize?.setImageIfDesired(systemSymbolName: "textformat.size.larger")
         self.menuResetFontSize?.setImageIfDesired(systemSymbolName: "textformat.size")
         self.menuDecreaseFontSize?.setImageIfDesired(systemSymbolName: "textformat.size.smaller")
-        self.menuCommandPalette?.setImageIfDesired(systemSymbolName: "filemenu.and.selection")
-        self.menuQuickTerminal?.setImageIfDesired(systemSymbolName: "apple.terminal")
-        self.menuChangeTabTitle?.setImageIfDesired(systemSymbolName: "pencil.line")
-        self.menuTerminalInspector?.setImageIfDesired(systemSymbolName: "scope")
+        self.menuShowGaiTerm?.setImageIfDesired(systemSymbolName: "apple.terminal")
         self.menuReadonly?.setImageIfDesired(systemSymbolName: "eye.fill")
         self.menuSetAsDefaultTerminal?.setImageIfDesired(systemSymbolName: "star.fill")
         self.menuToggleFullScreen?.setImageIfDesired(systemSymbolName: "square.arrowtriangle.4.outward")
@@ -1183,8 +1031,6 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "new_window", menuItem: self.menuNewWindow)
         syncMenuShortcut(config, action: "new_tab", menuItem: self.menuNewTab)
         syncMenuShortcut(config, action: "close_surface", menuItem: self.menuClose)
-        syncMenuShortcut(config, action: "close_tab", menuItem: self.menuCloseTab)
-        syncMenuShortcut(config, action: "close_window", menuItem: self.menuCloseWindow)
         syncMenuShortcut(config, action: "close_all_windows", menuItem: self.menuCloseAllWindows)
         syncMenuShortcut(config, action: "new_split:right", menuItem: self.menuSplitRight)
         syncMenuShortcut(config, action: "new_split:left", menuItem: self.menuSplitLeft)
@@ -1222,12 +1068,9 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "decrease_font_size:1", menuItem: self.menuDecreaseFontSize)
         syncMenuShortcut(config, action: "reset_font_size", menuItem: self.menuResetFontSize)
         syncMenuShortcut(config, action: "prompt_surface_title", menuItem: self.menuChangeTitle)
-        syncMenuShortcut(config, action: "prompt_tab_title", menuItem: self.menuChangeTabTitle)
-        syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: self.menuQuickTerminal)
+        syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: self.menuShowGaiTerm)
         syncMenuShortcut(config, action: "toggle_visibility", menuItem: self.menuToggleVisibility)
         syncMenuShortcut(config, action: "toggle_window_float_on_top", menuItem: self.menuFloatOnTop)
-        syncMenuShortcut(config, action: "inspector:toggle", menuItem: self.menuTerminalInspector)
-        syncMenuShortcut(config, action: "toggle_command_palette", menuItem: self.menuCommandPalette)
 
         syncMenuShortcut(config, action: "toggle_secure_input", menuItem: self.menuSecureInput)
 
@@ -1254,12 +1097,7 @@ extension AppDelegate {
 
 extension AppDelegate {
     func syncFloatOnTopMenu(_ window: NSWindow?) {
-        guard let window = (window ?? NSApp.keyWindow) as? TerminalWindow else {
-            // If some other window became key we always turn this off
-            self.menuFloatOnTop?.state = .off
-            return
-        }
-
+        guard let window = window ?? NSApp.keyWindow else { return }
         self.menuFloatOnTop?.state = window.level == .floating ? .on : .off
     }
 
@@ -1270,13 +1108,8 @@ extension AppDelegate {
     }
 
     @IBAction func useAsDefault(_ sender: NSMenuItem) {
-        let ud = UserDefaults.ghostty
-        let key = TerminalWindow.defaultLevelKey
-        if menuFloatOnTop?.state == .on {
-            ud.set(NSWindow.Level.floating, forKey: key)
-        } else {
-            ud.removeObject(forKey: key)
-        }
+        // GaiTerm's panels own their levels directly; there is no classic
+        // terminal window default level to persist.
     }
 
     @IBAction func setAsDefaultTerminal(_ sender: NSMenuItem) {
@@ -1307,9 +1140,7 @@ extension AppDelegate: NSMenuItemValidation {
 
         case #selector(floatOnTop(_:)),
             #selector(useAsDefault(_:)):
-            // Float on top items only active if the key window is a primary
-            // terminal window (not quick terminal).
-            return NSApp.keyWindow is TerminalWindow
+            return NSApp.keyWindow != nil
 
         case #selector(undo(_:)):
             if undoManager.canUndo {
@@ -1337,81 +1168,22 @@ extension AppDelegate: NSMenuItemValidation {
 
 extension AppDelegate {
     func terminate() -> NSApplication.TerminateReply {
-        let controllersNeedConfirmation = NSApplication.shared.windows
-            .compactMap { $0.windowController as? BaseTerminalController }
-            .filter { !$0.windowCanBeClosedWithoutConfirmation() }
-
-        guard !controllersNeedConfirmation.isEmpty else {
+        guard ghostty.needsConfirmQuit else {
             return .terminateNow
         }
 
-        if controllersNeedConfirmation.count == 1 {
-            Task {
-                let response = await controllersNeedConfirmation[0].confirmCloseAsync(
-                    messageText: "Quit GaiTerm?",
-                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
-                    confirmButtonTitle: "Terminate",
-                )
+        let alert = NSAlert()
+        alert.messageText = "Quit GaiTerm?"
+        alert.informativeText = "At least one terminal process is still running. If you quit, those processes will be terminated."
+        alert.addButton(withTitle: "Terminate")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
 
-                if [.OK, .alertFirstButtonReturn].contains(response) {
-                    await NSApp.reply(toApplicationShouldTerminate: true)
-                } else {
-                    await NSApp.reply(toApplicationShouldTerminate: false)
-                }
-            }
-
-            return .terminateLater
-        } else {
-            let alert = NSAlert()
-            alert.messageText = "You have \(controllersNeedConfirmation.count) windows with running processes. Do you want to review these windows before quitting?"
-            alert.informativeText = "If you don't review your windows, any running processes will be terminated"
-            alert.addButton(withTitle: "Review Windows...")
-            alert.addButton(withTitle: "Terminate Processes")
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .warning
-
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                reviewWindows(controllersNeedConfirmation)
-                return .terminateLater
-            case .alertSecondButtonReturn:
-                return .terminateNow
-            default:
-                return .terminateCancel
-            }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
         }
     }
-
-    private func reviewWindows(_ controllers: [BaseTerminalController]) {
-        Task {
-            for controller in controllers {
-                let response = await controller.confirmCloseAsync(
-                    messageText: "Quit GaiTerm?",
-                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
-                    confirmButtonTitle: "Terminate",
-                )
-
-                if [.OK, .alertFirstButtonReturn].contains(response) {
-                    // Close this window and until next review is cancelled
-                    await controller.window?.close()
-                    continue
-                } else {
-                    await NSApp.reply(toApplicationShouldTerminate: false)
-                    // Cancel the review
-                    return
-                }
-            }
-            await NSApp.reply(toApplicationShouldTerminate: true)
-        }
-    }
-}
-
-/// Represents the state of the quick terminal controller.
-private enum QuickTerminalState {
-    /// Controller has not been initialized and has no pending restoration state.
-    case uninitialized
-    /// Restoration state is pending; controller will use this when first accessed.
-    case pendingRestore(QuickTerminalRestorableState)
-    /// Controller has been initialized.
-    case initialized(QuickTerminalController)
 }

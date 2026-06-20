@@ -16,14 +16,10 @@
             <connections>
                 <outlet property="menuAbout" destination="5kV-Vb-QxS" id="Y5y-UO-NK6"/>
                 <outlet property="menuBringAllToFront" destination="LE2-aR-0XJ" id="AP9-oK-60V"/>
-                <outlet property="menuChangeTabTitle" destination="iac-lh-Cl7" id="tId-v0-a3E"/>
                 <outlet property="menuChangeTitle" destination="24I-xg-qIq" id="kg6-kT-jNL"/>
                 <outlet property="menuCheckForUpdates" destination="GEA-5y-yzH" id="0nV-Tf-nJQ"/>
                 <outlet property="menuClose" destination="DVo-aG-piG" id="R3t-0C-aSU"/>
                 <outlet property="menuCloseAllWindows" destination="yKr-Vi-Yqw" id="Zet-Ir-zbm"/>
-                <outlet property="menuCloseTab" destination="Obb-Mk-j8J" id="Gda-L0-gdz"/>
-                <outlet property="menuCloseWindow" destination="W5w-UZ-crk" id="6ff-BT-ENV"/>
-                <outlet property="menuCommandPalette" destination="et6-de-Mh7" id="53t-cu-dm5"/>
                 <outlet property="menuCopy" destination="Jqf-pv-Zcu" id="bKd-1C-oy9"/>
                 <outlet property="menuDecreaseFontSize" destination="kzb-SZ-dOA" id="Y1B-Vh-6Z2"/>
                 <outlet property="menuEqualizeSplits" destination="3gH-VD-vL9" id="SiZ-ce-FOF"/>
@@ -45,7 +41,7 @@
                 <outlet property="menuPaste" destination="i27-pK-umN" id="ICc-X2-gV3"/>
                 <outlet property="menuPasteSelection" destination="akq-ov-Jjh" id="GS8-aQ-hVw"/>
                 <outlet property="menuPreviousSplit" destination="Lic-px-1wg" id="Rto-CG-yRe"/>
-                <outlet property="menuQuickTerminal" destination="1pv-LF-NBJ" id="glN-5B-IGi"/>
+                <outlet property="menuShowGaiTerm" destination="1pv-LF-NBJ" id="glN-5B-IGi"/>
                 <outlet property="menuQuit" destination="4sb-4s-VLi" id="qYN-S1-6UW"/>
                 <outlet property="menuReadonly" destination="xpe-ia-Yjw" id="MMT-Sl-AfD"/>
                 <outlet property="menuRedo" destination="EX8-lB-4s7" id="wON-2J-yT1"/>
@@ -66,7 +62,6 @@
                 <outlet property="menuSplitLeft" destination="Ppv-GP-lQU" id="Xd5-Cd-Jut"/>
                 <outlet property="menuSplitRight" destination="VUR-Ld-nLx" id="RxO-Zw-ovb"/>
                 <outlet property="menuSplitUp" destination="Ggp-7N-GbX" id="YJF-uq-S4Y"/>
-                <outlet property="menuTerminalInspector" destination="QwP-M5-fvh" id="wJi-Dh-S9f"/>
                 <outlet property="menuToggleFullScreen" destination="8kY-Pi-KaY" id="yQg-6V-OO6"/>
                 <outlet property="menuToggleVisibility" destination="DOX-wA-ilh" id="iBj-Bc-2bq"/>
                 <outlet property="menuUndo" destination="r83-CV-syt" id="bU9-0b-xgQ"/>
@@ -160,16 +155,16 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="File" id="bib-Uj-vzu">
                         <items>
-                            <menuItem title="New Window" id="Was-JA-tGl">
+                            <menuItem title="New Terminal" id="Was-JA-tGl">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="newWindow:" target="-1" id="pnf-fE-gHi"/>
+                                    <action selector="newWindow:" target="bbz-4X-AYv" id="pnf-fE-gHi"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="New Tab" id="uTG-Vz-hJU">
+                            <menuItem title="New Terminal Split" id="uTG-Vz-hJU">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="newTab:" target="-1" id="KoW-K7-hw5"/>
+                                    <action selector="newTab:" target="bbz-4X-AYv" id="KoW-K7-hw5"/>
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="m54-Is-iLE"/>
@@ -198,28 +193,16 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="sjq-M1-UGS"/>
-                            <menuItem title="Close" id="DVo-aG-piG">
+                            <menuItem title="Close Terminal" id="DVo-aG-piG">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="close:" target="-1" id="tTZ-2b-Mbm"/>
+                                    <action selector="closeTerminal:" target="bbz-4X-AYv" id="tTZ-2b-Mbm"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Close Tab" id="Obb-Mk-j8J">
+                            <menuItem title="Close All Terminals" id="yKr-Vi-Yqw">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="closeTab:" target="-1" id="UBb-Bd-nkj"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Close Window" id="W5w-UZ-crk">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="closeWindow:" target="-1" id="ovs-xn-3ju"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Close All Windows" id="yKr-Vi-Yqw">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="closeAllWindows:" target="-1" id="hrz-eb-l5t"/>
+                                    <action selector="closeAllWindows:" target="bbz-4X-AYv" id="hrz-eb-l5t"/>
                                 </connections>
                             </menuItem>
                         </items>
@@ -339,18 +322,6 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="L3L-I8-sqk"/>
-                            <menuItem title="Command Palette" id="et6-de-Mh7">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="toggleCommandPalette:" target="-1" id="FcT-XD-gM1"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Change Tab Title..." id="iac-lh-Cl7">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="changeTabTitle:" target="-1" id="Jhl-9P-bMj"/>
-                                </connections>
-                            </menuItem>
                             <menuItem title="Change Terminal Title..." id="24I-xg-qIq">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
@@ -364,17 +335,10 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="Vkj-tP-dMZ"/>
-                            <menuItem title="Quick Terminal" id="1pv-LF-NBJ">
+                            <menuItem title="Show GaiTerm" id="1pv-LF-NBJ">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="toggleQuickTerminal:" target="bbz-4X-AYv" id="qDV-sz-Agc"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem isSeparatorItem="YES" id="bC9-n9-RbJ"/>
-                            <menuItem title="Terminal Inspector" id="QwP-M5-fvh">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="toggleTerminalInspector:" target="-1" id="87m-3R-fQl"/>
+                                    <action selector="showGaiTerm:" target="bbz-4X-AYv" id="qDV-sz-Agc"/>
                                 </connections>
                             </menuItem>
                         </items>
@@ -399,10 +363,10 @@
                             <menuItem title="Toggle Full Screen" keyEquivalent="f" id="8kY-Pi-KaY">
                                 <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
                                 <connections>
-                                    <action selector="toggleGhosttyFullScreen:" target="-1" id="QB9-7R-xyc"/>
+                                    <action selector="toggleFullScreen:" target="-1" id="QB9-7R-xyc"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Show/Hide All Terminals" id="DOX-wA-ilh">
+                            <menuItem title="Show/Hide GaiTerm" id="DOX-wA-ilh">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="toggleVisibility:" target="bbz-4X-AYv" id="2vT-tL-3tQ"/>

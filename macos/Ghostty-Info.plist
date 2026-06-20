@@ -21,7 +21,7 @@
 			<key>CFBundleTypeIconFile</key>
 			<string>AppIcon.icns</string>
 			<key>CFBundleTypeName</key>
-			<string>Terminal scripts</string>
+			<string>GaiTerm shell scripts</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 		</dict>
@@ -56,54 +56,9 @@
 		<string>app</string>
 	</dict>
 	<key>MDItemKeywords</key>
-	<string>Terminal</string>
-	<key>NSAppleScriptEnabled</key>
-	<true/>
+	<string>GaiTerm, Terminal, Workspaces</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>OSAScriptingDefinition</key>
-	<string>Ghostty.sdef</string>
-	<key>NSServices</key>
-	<array>
-		<dict>
-			<key>NSMenuItem</key>
-			<dict>
-				<key>default</key>
-				<string>New $(INFOPLIST_KEY_CFBundleDisplayName) Tab Here</string>
-			</dict>
-			<key>NSMessage</key>
-			<string>openTab</string>
-			<key>NSRequiredContext</key>
-			<dict>
-				<key>NSTextContent</key>
-				<string>FilePath</string>
-			</dict>
-			<key>NSSendTypes</key>
-			<array>
-				<string>NSFilenamesPboardType</string>
-				<string>public.plain-text</string>
-			</array>
-		</dict>
-		<dict>
-			<key>NSMenuItem</key>
-			<dict>
-				<key>default</key>
-				<string>New $(INFOPLIST_KEY_CFBundleDisplayName) Window Here</string>
-			</dict>
-			<key>NSMessage</key>
-			<string>openWindow</string>
-			<key>NSRequiredContext</key>
-			<dict>
-				<key>NSTextContent</key>
-				<string>FilePath</string>
-			</dict>
-			<key>NSSendTypes</key>
-			<array>
-				<string>NSFilenamesPboardType</string>
-				<string>public.plain-text</string>
-			</array>
-		</dict>
-	</array>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUPublicEDKey</key>

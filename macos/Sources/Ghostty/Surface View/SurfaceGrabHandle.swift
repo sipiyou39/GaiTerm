@@ -19,9 +19,8 @@ extension Ghostty {
             guard let window = surfaceView.window else { return true }
             guard window.styleMask.contains(.fullScreen) else { return true }
 
-            // If fullscreen, only show the handle if we have splits
-            guard let controller = window.windowController as? BaseTerminalController else { return false }
-            return controller.surfaceTree.isSplit
+            // GaiTerm stage surfaces do not use the classic fullscreen split chrome.
+            return false
         }
 
         private var ellipsisVisible: Bool {

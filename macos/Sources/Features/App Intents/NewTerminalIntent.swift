@@ -2,13 +2,13 @@ import AppKit
 import AppIntents
 import GhosttyKit
 
-/// App intent that allows creating a new terminal window or tab.
+/// App intent that creates a terminal inside GaiTerm's stage.
 ///
 /// This requires macOS 15 or greater because we use features of macOS 15 here.
 @available(macOS 15.0, *)
 struct NewTerminalIntent: AppIntent {
     static var title: LocalizedStringResource = "New Terminal"
-    static var description = IntentDescription("Create a new terminal.")
+    static var description = IntentDescription("Create a new GaiTerm terminal.")
 
     @Parameter(
         title: "Location",
@@ -61,8 +61,6 @@ struct NewTerminalIntent: AppIntent {
         guard let appDelegate = NSApp.delegate as? AppDelegate else {
             throw GhosttyIntentError.appUnavailable
         }
-        let ghostty = appDelegate.ghostty
-
         var config = Ghostty.SurfaceConfiguration()
 
         // We don't run command as "command" and instead use "initialInput" so
@@ -86,7 +84,6 @@ struct NewTerminalIntent: AppIntent {
             }
         }
 
-        // Determine if we have a parent and get it
         let parent: Ghostty.SurfaceView?
         if let parentParam = self.parent {
             guard let view = parentParam.surfaceView else {
@@ -94,8 +91,6 @@ struct NewTerminalIntent: AppIntent {
             }
 
             parent = view
-        } else if let preferred = TerminalController.preferredParent {
-            parent = preferred.focusedSurface ?? preferred.surfaceTree.root?.leftmostLeaf()
         } else {
             parent = nil
         }
@@ -105,38 +100,13 @@ struct NewTerminalIntent: AppIntent {
                 NSApp.activate(ignoringOtherApps: true)
             }
         }
-        switch location {
-        case .window:
-            let newController = TerminalController.newWindow(
-                ghostty,
-                withBaseConfig: config,
-                withParent: parent?.window)
-            if let view = newController.surfaceTree.root?.leftmostLeaf() {
-                return .result(value: TerminalEntity(view))
-            }
-
-        case .tab:
-            let newController = TerminalController.newTab(
-                ghostty,
-                from: parent?.window,
-                withBaseConfig: config)
-            if let view = newController?.surfaceTree.root?.leftmostLeaf() {
-                return .result(value: TerminalEntity(view))
-            }
-
-        case .splitLeft, .splitRight, .splitUp, .splitDown:
-            guard let parent,
-                  let controller = parent.window?.windowController as? BaseTerminalController else {
-                throw GhosttyIntentError.surfaceNotFound
-            }
-
-            if let view = controller.newSplit(
-                at: parent,
-                direction: location.splitDirection!,
-                baseConfig: config
-            ) {
-                return .result(value: TerminalEntity(view))
-            }
+        let direction = location.splitDirection
+        if let view = appDelegate.gaiWorkspaceManager.openTerminal(
+            baseConfig: config,
+            parent: parent,
+            direction: direction
+        ) {
+            return .result(value: TerminalEntity(view))
         }
 
         return .result(value: .none)
@@ -155,11 +125,11 @@ enum NewTerminalLocation: String {
 
     var splitDirection: SplitTree<Ghostty.SurfaceView>.NewDirection? {
         switch self {
+        case .tab, .window: return .right
         case .splitLeft: return .left
         case .splitRight: return .right
         case .splitUp: return .up
         case .splitDown: return .down
-        default: return nil
         }
     }
 }
@@ -168,8 +138,8 @@ extension NewTerminalLocation: AppEnum {
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Terminal Location")
 
     static var caseDisplayRepresentations: [Self: DisplayRepresentation] = [
-        .tab: .init(title: "Tab"),
-        .window: .init(title: "Window"),
+        .tab: .init(title: "Stage Pane"),
+        .window: .init(title: "Stage Pane"),
         .splitLeft: .init(title: "Split Left"),
         .splitRight: .init(title: "Split Right"),
         .splitUp: .init(title: "Split Up"),

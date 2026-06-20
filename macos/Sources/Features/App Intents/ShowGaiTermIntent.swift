@@ -1,9 +1,9 @@
 import AppKit
 import AppIntents
 
-struct QuickTerminalIntent: AppIntent {
-    static var title: LocalizedStringResource = "Open the Quick Terminal"
-    static var description = IntentDescription("Open the Quick Terminal. If it is already open, then do nothing.")
+struct ShowGaiTermIntent: AppIntent {
+    static var title: LocalizedStringResource = "Show GaiTerm"
+    static var description = IntentDescription("Show the GaiTerm stage and drawer.")
 
 #if compiler(>=6.2)
     @available(macOS 26.0, *)
@@ -20,14 +20,10 @@ struct QuickTerminalIntent: AppIntent {
             throw GhosttyIntentError.appUnavailable
         }
 
-        // This is safe to call even if it is already shown.
-        let c = delegate.quickController
-        c.animateIn()
-
-        // Grab all our terminals
-        let terminals = c.surfaceTree.root?.leaves().map {
+        delegate.gaiWorkspaceManager.reveal()
+        let terminals = delegate.gaiWorkspaceManager.terminalSurfaces.map {
             TerminalEntity($0)
-        } ?? []
+        }
 
         return .result(value: terminals)
     }

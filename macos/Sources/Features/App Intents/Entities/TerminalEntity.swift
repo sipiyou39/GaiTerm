@@ -61,25 +61,18 @@ struct TerminalEntity: AppEntity {
             self.screenshot = nsImage
         }
 
-        // Determine the kind based on the window controller type
-        if view.window?.windowController is QuickTerminalController {
-            self.kind = .quick
-        } else {
-            self.kind = .normal
-        }
+        self.kind = .stage
     }
 }
 
 extension TerminalEntity {
     enum Kind: String, AppEnum {
-        case normal
-        case quick
+        case stage
 
         static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Terminal Kind")
 
         static var caseDisplayRepresentations: [Self: DisplayRepresentation] = [
-            .normal: .init(title: "Normal"),
-            .quick: .init(title: "Quick")
+            .stage: .init(title: "Stage")
         ]
     }
 }
@@ -115,15 +108,7 @@ struct TerminalQuery: EntityStringQuery, EnumerableEntityQuery {
 
     @MainActor
     var all: [Ghostty.SurfaceView] {
-        // Find all of our terminal windows. This will include the quick terminal
-        // but only if it was previously opened.
-        let controllers = NSApp.windows.compactMap {
-            $0.windowController as? BaseTerminalController
-        }
-
-        // Get all our surfaces
-        return controllers.flatMap {
-            $0.surfaceTree.root?.leaves() ?? []
-        }
+        guard let delegate = NSApp.delegate as? AppDelegate else { return [] }
+        return delegate.gaiWorkspaceManager.terminalSurfaces
     }
 }

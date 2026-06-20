@@ -24,9 +24,8 @@ macOS) et que le remote `upstream` reste branché pour tirer leurs correctifs.
 Mais c'est de la doc *moteur* — pas la doc du logiciel.
 
 ### Pièges qui te feront perdre du temps
-- **`Build Summary: 339/341 steps succeeded; 1 failed` est NORMAL** — l'étape qui
-  échoue est `cp Ghostty.app` (notre app s'appelle `GaiTerm.app`). Le bundle se
-  construit quand même.
+- **`zig build` doit finir avec un code de sortie 0.** Le script copie
+  `GaiTerm.app`; un échec doit être traité.
 - **Les diagnostics SourceKit sont des faux positifs.** Pour une *vraie* erreur :
   `zig build 2>&1 | grep -E '\.swift:[0-9]+:[0-9]+: error:'` (vide = OK).
 - Produit du build : **`macos/build/Debug/GaiTerm.app`**.

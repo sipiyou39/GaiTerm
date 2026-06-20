@@ -342,18 +342,6 @@ extension Notification.Name {
     static let ghosttyMoveTab = Notification.Name("com.sipiyou.gaiterm.moveTab")
     static let GhosttyMoveTabKey = ghosttyMoveTab.rawValue
 
-    /// Close tab
-    static let ghosttyCloseTab = Notification.Name("com.sipiyou.gaiterm.closeTab")
-
-    /// Close other tabs
-    static let ghosttyCloseOtherTabs = Notification.Name("com.sipiyou.gaiterm.closeOtherTabs")
-
-    /// Close tabs to the right of the focused tab
-    static let ghosttyCloseTabsOnTheRight = Notification.Name("com.sipiyou.gaiterm.closeTabsOnTheRight")
-
-    /// Close window
-    static let ghosttyCloseWindow = Notification.Name("com.sipiyou.gaiterm.closeWindow")
-
     /// Resize the window to a default size.
     static let ghosttyResetWindowSize = Notification.Name("com.sipiyou.gaiterm.resetWindowSize")
 
@@ -366,8 +354,6 @@ extension Notification.Name {
     /// Readonly mode changed
     static let ghosttyDidChangeReadonly = Notification.Name("com.sipiyou.gaiterm.didChangeReadonly")
     static let ReadonlyKey = ghosttyDidChangeReadonly.rawValue + ".readonly"
-    static let ghosttyCommandPaletteDidToggle = Notification.Name("com.sipiyou.gaiterm.commandPaletteDidToggle")
-
     /// Toggle maximize of current window
     static let ghosttyMaximizeDidToggle = Notification.Name("com.sipiyou.gaiterm.maximizeDidToggle")
 
@@ -419,12 +405,6 @@ extension Ghostty.Notification {
     /// Notification
     static let didReceiveInitialWindowFrame = Notification.Name("com.sipiyou.gaiterm.didReceiveInitialWindowFrame")
     static let FrameKey = "com.sipiyou.gaiterm.frame"
-
-    /// Notification to render the inspector for a surface
-    static let inspectorNeedsDisplay = Notification.Name("com.sipiyou.gaiterm.inspectorNeedsDisplay")
-
-    /// Notification to show/hide the inspector
-    static let didControlInspector = Notification.Name("com.sipiyou.gaiterm.didControlInspector")
 
     static let confirmClipboard = Notification.Name("com.sipiyou.gaiterm.confirmClipboard")
     static let ConfirmClipboardStrKey = confirmClipboard.rawValue + ".str"

@@ -10,31 +10,10 @@ class UpdateDriver: NSObject, SPUUserDriver {
         self.viewModel = viewModel
         self.standard = SPUStandardUserDriver(hostBundle: hostBundle, delegate: nil)
         super.init()
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleTerminalWindowWillClose),
-            name: TerminalWindow.terminalWillCloseNotification,
-            object: nil)
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-    }
-
-    @objc private func handleTerminalWindowWillClose() {
-        // If we lost the ability to show unobtrusive states, cancel whatever
-        // update state we're in. This will allow the manual `check for updates`
-        // call to initialize the standard driver.
-        //
-        // We have to do this after a short delay so that the window can fully
-        // close.
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-            guard let self else { return }
-            guard !hasUnobtrusiveTarget else { return }
-            viewModel.state.cancel()
-            viewModel.state = .idle
-        }
     }
 
     func show(_ request: SPUUpdatePermissionRequest,
@@ -204,9 +183,6 @@ class UpdateDriver: NSObject, SPUUserDriver {
 
     /// True if there is a target that can render our unobtrusive update checker.
     var hasUnobtrusiveTarget: Bool {
-        NSApp.windows.contains { window in
-            (window is TerminalWindow || window is QuickTerminalWindow) &&
-            window.isVisible
-        }
+        false
     }
 }

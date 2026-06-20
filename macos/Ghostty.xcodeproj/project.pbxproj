@@ -120,14 +120,7 @@
 				"App/macOS/AppDelegate+Ghostty.swift",
 				App/macOS/main.swift,
 				App/macOS/MainMenu.xib,
-				Features/About/About.xib,
-				Features/About/AboutController.swift,
-				Features/About/AboutView.swift,
-				Features/About/AboutViewModel.swift,
-				Features/About/CyclingIconView.swift,
 				"Features/App Intents/CloseTerminalIntent.swift",
-				"Features/App Intents/CommandPaletteIntent.swift",
-				"Features/App Intents/Entities/CommandEntity.swift",
 				"Features/App Intents/Entities/TerminalEntity.swift",
 				"Features/App Intents/FocusTerminalIntent.swift",
 				"Features/App Intents/GetTerminalDetailsIntent.swift",
@@ -136,24 +129,7 @@
 				"Features/App Intents/IntentPermission.swift",
 				"Features/App Intents/KeybindIntent.swift",
 				"Features/App Intents/NewTerminalIntent.swift",
-				"Features/App Intents/QuickTerminalIntent.swift",
-				"Features/AppleScript/AppDelegate+AppleScript.swift",
-				"Features/AppleScript/Ghostty.Input.Mods+AppleScript.swift",
-				Features/AppleScript/ScriptInputTextCommand.swift,
-				Features/AppleScript/ScriptKeyEventCommand.swift,
-				Features/AppleScript/ScriptMouseButtonCommand.swift,
-				Features/AppleScript/ScriptMousePosCommand.swift,
-				Features/AppleScript/ScriptMouseScrollCommand.swift,
-				Features/AppleScript/ScriptRecord.swift,
-				Features/AppleScript/ScriptSurfaceConfiguration.swift,
-				Features/AppleScript/ScriptTab.swift,
-				Features/AppleScript/ScriptTerminal.swift,
-				Features/AppleScript/ScriptWindow.swift,
-				Features/ClipboardConfirmation/ClipboardConfirmation.xib,
-				Features/ClipboardConfirmation/ClipboardConfirmationController.swift,
-				Features/ClipboardConfirmation/ClipboardConfirmationView.swift,
-				"Features/Command Palette/CommandPalette.swift",
-				"Features/Command Palette/TerminalCommandPalette.swift",
+				"Features/App Intents/ShowGaiTermIntent.swift",
 				"Features/Custom App Icon/AppIcon.swift",
 				"Features/Custom App Icon/ColorizedGhosttyIcon.swift",
 				"Features/Custom App Icon/ColorizedGhosttyIconImage.swift",
@@ -161,19 +137,8 @@
 				"Features/Custom App Icon/DockTilePlugin.swift",
 				"Features/Custom App Icon/Extensions/Notification+AppIcon.swift",
 				"Features/Custom App Icon/Extensions/UserDefaults+AppIcon.swift",
-				"Features/Global Keybinds/GlobalEventTap.swift",
-				Features/QuickTerminal/QuickTerminal.xib,
-				Features/QuickTerminal/QuickTerminalController.swift,
-				Features/QuickTerminal/QuickTerminalPosition.swift,
-				Features/QuickTerminal/QuickTerminalRestorableState.swift,
-				Features/QuickTerminal/QuickTerminalScreen.swift,
-				Features/QuickTerminal/QuickTerminalScreenStateCache.swift,
-				Features/QuickTerminal/QuickTerminalSize.swift,
-				Features/QuickTerminal/QuickTerminalSpaceBehavior.swift,
-				Features/QuickTerminal/QuickTerminalWindow.swift,
 				"Features/Secure Input/SecureInput.swift",
 				"Features/Secure Input/SecureInputOverlay.swift",
-				Features/Services/ServiceProvider.swift,
 				Features/Settings/ConfigurationErrors.xib,
 				Features/Settings/ConfigurationErrorsController.swift,
 				Features/Settings/ConfigurationErrorsView.swift,
@@ -181,25 +146,6 @@
 				Features/Splits/SplitTree.swift,
 				Features/Splits/SplitView.Divider.swift,
 				Features/Splits/SplitView.swift,
-				Features/Splits/TerminalSplitTreeView.swift,
-				Features/Terminal/BaseTerminalController.swift,
-				Features/Terminal/ErrorView.swift,
-				Features/Terminal/TerminalController.swift,
-				Features/Terminal/TerminalRestorable.swift,
-				"Features/Terminal/TerminalRestorableState+InteralState.swift",
-				Features/Terminal/TerminalTabColor.swift,
-				Features/Terminal/TerminalView.swift,
-				Features/Terminal/TerminalViewContainer.swift,
-				"Features/Terminal/Window Styles/HiddenTitlebarTerminalWindow.swift",
-				"Features/Terminal/Window Styles/Terminal.xib",
-				"Features/Terminal/Window Styles/TerminalHiddenTitlebar.xib",
-				"Features/Terminal/Window Styles/TerminalTabsTitlebarTahoe.xib",
-				"Features/Terminal/Window Styles/TerminalTabsTitlebarVentura.xib",
-				"Features/Terminal/Window Styles/TerminalTransparentTitlebar.xib",
-				"Features/Terminal/Window Styles/TerminalWindow.swift",
-				"Features/Terminal/Window Styles/TitlebarTabsTahoeTerminalWindow.swift",
-				"Features/Terminal/Window Styles/TitlebarTabsVenturaTerminalWindow.swift",
-				"Features/Terminal/Window Styles/TransparentTitlebarTerminalWindow.swift",
 				Features/Update/UpdateBadge.swift,
 				Features/Update/UpdateController.swift,
 				Features/Update/UpdateDelegate.swift,
@@ -215,7 +161,6 @@
 				Ghostty/Ghostty.MenuShortcutManager.swift,
 				Ghostty/Ghostty.Surface.swift,
 				"Ghostty/NSEvent+Extension.swift",
-				"Ghostty/Surface View/InspectorView.swift",
 				"Ghostty/Surface View/SurfaceDragSource.swift",
 				"Ghostty/Surface View/SurfaceGrabHandle.swift",
 				"Ghostty/Surface View/SurfaceScrollView.swift",
@@ -755,7 +700,7 @@
 				INFOPLIST_FILE = "Ghostty-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = GaiTerm;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within GaiTerm would like to use AppleScript.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A process running in GaiTerm would like to control another application.";
 				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "A program running within GaiTerm would like to access your system's audio.";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within GaiTerm would like to use Bluetooth.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within GaiTerm would like to access your Calendar.";
@@ -1153,7 +1098,7 @@
 				INFOPLIST_FILE = "Ghostty-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "GaiTerm[DEBUG]";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within GaiTerm would like to use AppleScript.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A process running in GaiTerm would like to control another application.";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within GaiTerm would like to use Bluetooth.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within GaiTerm would like to access your Calendar.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A program running within GaiTerm would like to use the camera.";
@@ -1208,7 +1153,7 @@
 				INFOPLIST_FILE = "Ghostty-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = GaiTerm;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within GaiTerm would like to use AppleScript.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A process running in GaiTerm would like to control another application.";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within GaiTerm would like to use Bluetooth.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within GaiTerm would like to access your Calendar.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A program running within GaiTerm would like to use the camera.";

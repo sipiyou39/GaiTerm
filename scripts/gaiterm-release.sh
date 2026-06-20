@@ -35,10 +35,7 @@ SIGN_UPDATE="$(find "$HOME/Library/Developer/Xcode/DerivedData" \
 [ -x "$SIGN_UPDATE" ] || { echo "✗ sign_update not found (open the project in Xcode once)"; exit 1; }
 
 echo "▸ Building GaiTerm…"
-# The final zig step tries to copy a "Ghostty.app" into zig-out and fails
-# harmlessly (the app is GaiTerm.app); the bundle itself builds fine, so we
-# tolerate the non-zero exit and verify the product directly.
-zig build >/dev/null 2>&1 || true
+zig build >/dev/null
 [ -d "$APP" ] || { echo "✗ build product missing: $APP"; exit 1; }
 
 echo "▸ Stamping version $VERSION (build $BUILD)…"

@@ -252,13 +252,6 @@ extension Ghostty {
             }
         }
 
-        func toggleTerminalInspector(surface: ghostty_surface_t) {
-            let action = "inspector:toggle"
-            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
-                logger.warning("action failed action=\(action, privacy: .public)")
-            }
-        }
-
         func resetTerminal(surface: ghostty_surface_t) {
             let action = "reset"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -585,13 +578,13 @@ extension Ghostty {
                 rendererHealth(app, target: target, v: action.action.renderer_health)
 
             case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
-                toggleCommandPalette(app, target: target)
+                ignoreCommandPaletteAction(app, target: target)
 
             case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
                 toggleMaximize(app, target: target)
 
             case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
-                toggleQuickTerminal(app, target: target)
+                showGaiTerm(app, target: target)
 
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)
@@ -916,23 +909,18 @@ extension Ghostty {
                 switch mode {
                 case GHOSTTY_ACTION_CLOSE_TAB_MODE_THIS:
                     NotificationCenter.default.post(
-                        name: .ghosttyCloseTab,
-                        object: surfaceView
+                        name: Notification.ghosttyCloseSurface,
+                        object: surfaceView,
+                        userInfo: ["process_alive": false]
                     )
                     return
 
                 case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER:
-                    NotificationCenter.default.post(
-                        name: .ghosttyCloseOtherTabs,
-                        object: surfaceView
-                    )
+                    Ghostty.logger.warning("close other tabs is ignored in GaiTerm stage terminals")
                     return
 
                 case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT:
-                    NotificationCenter.default.post(
-                        name: .ghosttyCloseTabsOnTheRight,
-                        object: surfaceView
-                    )
+                    Ghostty.logger.warning("close tabs to the right is ignored in GaiTerm stage terminals")
                     return
 
                 default:
@@ -955,8 +943,9 @@ extension Ghostty {
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
 
                 NotificationCenter.default.post(
-                    name: .ghosttyCloseWindow,
-                    object: surfaceView
+                    name: Notification.ghosttyCloseSurface,
+                    object: surfaceView,
+                    userInfo: ["process_alive": false]
                 )
 
             default:
@@ -998,25 +987,10 @@ extension Ghostty {
             }
         }
 
-        private static func toggleCommandPalette(
-            _ app: ghostty_app_t,
-            target: ghostty_target_s) {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.warning("toggle command palette does nothing with an app target")
-                return
-
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                NotificationCenter.default.post(
-                    name: .ghosttyCommandPaletteDidToggle,
-                    object: surfaceView
-                )
-
-            default:
-                assertionFailure()
-            }
+        private static func ignoreCommandPaletteAction(
+            _: ghostty_app_t,
+            target _: ghostty_target_s) {
+            Ghostty.logger.warning("command palette is not part of GaiTerm")
         }
 
         private static func toggleMaximize(
@@ -1194,26 +1168,8 @@ extension Ghostty {
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
-
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
-                    // Convert the C API direction to our Swift type
                     guard let splitDirection = SplitFocusDirection.from(direction: direction) else { return false }
 
-                    // Find the current node in the tree
-                    guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
-
-                    // Check if a split actually exists in the target direction before
-                    // returning true. This ensures performable keybinds only consume
-                    // the key event when we actually perform navigation.
-                    let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
-                    guard controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode) != nil else {
-                        return false
-                    }
-
-                    // We have a valid target, post the notification to perform the navigation
                     NotificationCenter.default.post(
                         name: Notification.ghosttyFocusSplit,
                         object: surfaceView,
@@ -1235,56 +1191,7 @@ extension Ghostty {
             target: ghostty_target_s,
             direction: ghostty_action_goto_window_e
         ) -> Bool {
-            // Collect candidate windows: visible terminal windows that are either
-            // standalone or the currently selected tab in their tab group. This
-            // treats each native tab group as a single "window" for navigation
-            // purposes, since goto_tab handles per-tab navigation.
-            let candidates: [NSWindow] = NSApplication.shared.windows.filter { window in
-                guard window.windowController is BaseTerminalController else { return false }
-                guard window.isVisible, !window.isMiniaturized else { return false }
-                // For native tabs, only include the selected tab in each group
-                if let group = window.tabGroup, group.selectedWindow !== window {
-                    return false
-                }
-                return true
-            }
-
-            // Need at least two windows to navigate between
-            guard candidates.count > 1 else { return false }
-
-            // Find starting index from the current key/main window
-            let startIndex = candidates.firstIndex(where: { $0.isKeyWindow })
-                ?? candidates.firstIndex(where: { $0.isMainWindow })
-                ?? 0
-
-            let step: Int
-            switch direction {
-            case GHOSTTY_GOTO_WINDOW_NEXT:
-                step = 1
-            case GHOSTTY_GOTO_WINDOW_PREVIOUS:
-                step = -1
-            default:
-                return false
-            }
-
-            // Iterate with wrap-around until we find a valid window or return to start
-            let count = candidates.count
-            var index = (startIndex + step + count) % count
-
-            while index != startIndex {
-                let candidate = candidates[index]
-                if candidate.isVisible, !candidate.isMiniaturized {
-                    candidate.makeKeyAndOrderFront(nil)
-                    // Also focus the terminal surface within the window
-                    if let controller = candidate.windowController as? BaseTerminalController,
-                       let surface = controller.focusedSurface {
-                        Ghostty.moveFocus(to: surface)
-                    }
-                    return true
-                }
-                index = (index + step + count) % count
-            }
-
+            // GaiTerm has one stage shell instead of multiple terminal windows.
             return false
         }
 
@@ -1300,11 +1207,6 @@ extension Ghostty {
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
-
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
                     guard let resizeDirection = SplitResizeDirection.from(direction: resize.direction) else { return false }
                     NotificationCenter.default.post(
                         name: Notification.didResizeSplit,
@@ -1354,10 +1256,6 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return false }
                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
-
-                // If the window has no splits, the action is not performable
-                guard controller.surfaceTree.isSplit else { return false }
 
                 NotificationCenter.default.post(
                     name: Notification.didToggleSplitZoom,
@@ -1372,26 +1270,10 @@ extension Ghostty {
         }
 
         private static func controlInspector(
-            _ app: ghostty_app_t,
-            target: ghostty_target_s,
-            mode: ghostty_action_inspector_e) {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.warning("toggle inspector does nothing with an app target")
-                return
-
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                NotificationCenter.default.post(
-                    name: Notification.didControlInspector,
-                    object: surfaceView,
-                    userInfo: ["mode": mode]
-                )
-
-            default:
-                assertionFailure()
-            }
+            _: ghostty_app_t,
+            target _: ghostty_target_s,
+            mode _: ghostty_action_inspector_e) {
+            Ghostty.logger.warning("terminal inspector is not part of GaiTerm")
         }
 
         private static func showDesktopNotification(
@@ -1519,32 +1401,13 @@ extension Ghostty {
             target: ghostty_target_s,
             mode mode_raw: ghostty_action_float_window_e
         ) {
-            guard let mode = SetFloatWIndow.from(mode_raw) else { return }
-
             switch target.tag {
             case GHOSTTY_TARGET_APP:
                 Ghostty.logger.warning("toggle float window does nothing with an app target")
                 return
 
             case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let window = surfaceView.window as? TerminalWindow else { return }
-
-                switch mode {
-                case .on:
-                    window.level = .floating
-
-                case .off:
-                    window.level = .normal
-
-                case .toggle:
-                    window.level = window.level == .floating ? .normal : .floating
-                }
-
-                if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
-                    appDelegate.syncFloatOnTopMenu(window)
-                }
+                Ghostty.logger.debug("toggle float window ignored for GaiTerm stage surfaces")
 
             default:
                 assertionFailure()
@@ -1561,11 +1424,7 @@ extension Ghostty {
                 return
 
             case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface,
-                    let surfaceView = self.surfaceView(from: surface),
-                    let controller = surfaceView.window?.windowController as? BaseTerminalController else { return }
-
-                controller.toggleBackgroundOpacity()
+                Ghostty.logger.debug("toggle background opacity ignored for GaiTerm stage surfaces")
 
             default:
                 assertionFailure()
@@ -1606,12 +1465,12 @@ extension Ghostty {
             }
         }
 
-        private static func toggleQuickTerminal(
-            _ app: ghostty_app_t,
-            target: ghostty_target_s
+        private static func showGaiTerm(
+            _: ghostty_app_t,
+            target _: ghostty_target_s
         ) {
             guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return }
-            appDelegate.toggleQuickTerminal(self)
+            appDelegate.gaiWorkspaceManager.reveal()
         }
 
         private static func setTitle(
@@ -1646,13 +1505,9 @@ extension Ghostty {
 
             case GHOSTTY_TARGET_SURFACE:
                 guard let title = String(cString: v.title!, encoding: .utf8) else { return false }
-                let titleOverride = title.isEmpty ? nil : title
                 guard let surface = target.target.surface else { return false }
                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                guard let window = surfaceView.window,
-                      let controller = window.windowController as? BaseTerminalController
-                else { return false }
-                controller.titleOverride = titleOverride
+                surfaceView.setTitle(title)
                 return true
 
             default:
@@ -1726,19 +1581,12 @@ extension Ghostty {
             case .tab:
                 switch target.tag {
                 case GHOSTTY_TARGET_APP:
-                    guard let window = NSApp.mainWindow ?? NSApp.keyWindow,
-                          let controller = window.windowController as? BaseTerminalController
-                    else { return false }
-                    controller.promptTabTitle()
-                    return true
+                    return false
 
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let window = surfaceView.window,
-                          let controller = window.windowController as? BaseTerminalController
-                    else { return false }
-                    controller.promptTabTitle()
+                    surfaceView.promptTitle()
                     return true
 
                 default:
@@ -1904,24 +1752,9 @@ extension Ghostty {
         }
 
         private static func renderInspector(
-            _ app: ghostty_app_t,
-            target: ghostty_target_s) {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.warning("mouse over link does nothing with an app target")
-                return
-
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                NotificationCenter.default.post(
-                    name: Notification.inspectorNeedsDisplay,
-                    object: surfaceView
-                )
-
-            default:
-                assertionFailure()
-            }
+            _: ghostty_app_t,
+            target _: ghostty_target_s) {
+            Ghostty.logger.warning("terminal inspector is not part of GaiTerm")
         }
 
         private static func rendererHealth(

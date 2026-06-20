@@ -27,11 +27,10 @@ struct FocusTerminalIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
-        guard let controller = surfaceView.window?.windowController as? BaseTerminalController else {
-            return .result()
+        guard let delegate = NSApp.delegate as? AppDelegate else {
+            throw GhosttyIntentError.appUnavailable
         }
-
-        controller.focusSurface(surfaceView)
+        delegate.gaiWorkspaceManager.focusSurface(surfaceView)
         return .result()
     }
 }

@@ -18,6 +18,28 @@ Ce n'est **plus** un terminal Ghostty générique : c'est notre appli. Le cœur 
 de Ghostty reste le moteur de terminal, mais toute la couche UI macOS est
 remplacée par notre design.
 
+### État architectural actuel
+
+Depuis la passe de nettoyage, GaiTerm est l'application principale. Ghostty reste
+une couche terminale embarquée : parsing VT, PTY, rendu GPU, surfaces, input,
+split/focus bas niveau, `Ghostty.App`, `Ghostty.SurfaceView` et `SurfaceWrapper`.
+
+Ce qu'on a volontairement retiré de l'ancienne UI macOS Ghostty :
+- fenêtres/tabs terminal classiques (`TerminalController`, `TerminalWindow`,
+  `BaseTerminalController`) ;
+- Quick Terminal, Terminal Stack, Command Palette ;
+- AppleScript, Services macOS, GlobalEventTap ;
+- confirmation clipboard, inspector UI, About custom Ghostty ;
+- menus et App Intents liés à ces anciennes features.
+
+Les points d'entrée macOS (`newWindow`, `newTab`, Dock reopen, notifications
+Ghostty `new_window` / `new_tab`, App Intents) passent maintenant par
+`GaiWorkspaceManager` : ils ouvrent/révèlent la stage GaiTerm et créent des
+surfaces terminal dans nos workspaces, pas des fenêtres Ghostty autonomes.
+
+Sparkle est conservé. La couche `Features/Update`, `SUPublicEDKey`, l'appcast et
+`Sparkle.framework` restent la voie officielle pour les mises à jour.
+
 ### L'interface en deux pièces
 
 - **Le drawer (gauche)** : une languette flottante sur le bord gauche de l'écran.
@@ -54,7 +76,8 @@ Tout le code GaiTerm vit sous `macos/Sources/Features/`. Les fichiers préfixés
 | `WorkspaceModel.swift` | Modèle `GaiWorkspace` (cliCounts, dossier, couleur, notifs…), DTO Codable `GaiWorkspaceData`, le `store` (load/save UserDefaults), `cliOrder` = `["claude","codex","agy","opencode"]`. |
 | `WorkspaceDrawer.swift` | UI du drawer gauche : header à onglets, lignes de workspace, intégration de l'onglet File, **`GaiDrawerMetrics`** (toutes les dimensions), `Color.gaiPanelColor`. |
 | `WorkspaceStage.swift` | UI de la stage droite : grille de terminaux **ou** éditeur (`StageCard`, `GaiPaneView`). |
-| `WorkspaceSplitController.swift` | Création des surfaces/panes. `openCLISurfaces` construit une **grille équilibrée** (cols = ceil(√n), colonne d'abord, `equalized()`) et lance chaque CLI. |
+| `WorkspaceSplitController.swift` | Création/fermeture/focus des surfaces terminal dans les arbres de split GaiTerm. Reçoit aussi les notifications Ghostty de split/focus/resize/zoom. |
+| `GaiSplitOperation.swift` | Payloads SwiftUI de drag/drop de panes terminal pour splitter/réorganiser la stage. |
 | `WorkspaceEditor.swift` | Le formulaire de réglages d'un workspace (la grande expansion : multi-CLI + compteurs, dossier, notifs, couleur, back/valider/supprimer). |
 | `GaiFileTree.swift` | `GaiFileNode` (lazy, un niveau, pas d'enfants stockés) + `GaiFileTreeScanner` (children/search) + `GaiFileIcon`. |
 | `GaiFileExplorerView.swift` | UI de l'explorateur : arbre lazy, barre d'outils (nouveau fichier/dossier, corbeille, replier, rescan), création/renommage/corbeille (`GaiFileOps`). |
@@ -82,10 +105,13 @@ Tout le code GaiTerm vit sous `macos/Sources/Features/`. Les fichiers préfixés
 ### Hors `Features/`
 - `macos/Sources/App/macOS/AppDelegate.swift` — `applicationShouldHandleReopen`
   appelle `gaiWorkspaceManager.reveal()` (et **pas** une nouvelle fenêtre
-  terminal). `updateAppIcon` est neutralisé pour l'icône officielle.
+  terminal). `newWindow`/`newTab` créent des terminaux dans la stage GaiTerm.
+  `updateAppIcon` est neutralisé pour l'icône officielle.
 - `macos/Assets.xcassets/AppIcon.appiconset/` — l'icône de l'app (PNG générés).
   `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` dans le projet.
 - `macos/Ghostty-Info.plist` — contient `SUPublicEDKey` (clé publique Sparkle).
+- `src/build/GhosttyXcodebuild.zig` — construit la cible macOS et copie
+  `GaiTerm.app` vers `zig-out/`.
 
 ---
 
@@ -97,17 +123,21 @@ zig build
 
 Le produit final est **`macos/build/Debug/GaiTerm.app`**.
 
+Note : le bundle visible s'appelle `GaiTerm.app`, mais l'exécutable interne est
+encore `Contents/MacOS/ghostty`. C'est acceptable pendant le chantier et ne bloque
+ni le build, ni Sparkle, ni la signature. Voir la checklist avant publication
+publique en §6.
+
 ### ⚠️ Pièges de build (à connaître absolument)
 
-1. **« Build Summary: 339/341 steps succeeded; 1 failed » est NORMAL.**
-   L'étape qui échoue est un `cp Ghostty.app` (l'app s'appelle GaiTerm.app, pas
-   Ghostty.app). Le bundle se construit quand même. **Ne perds pas de temps à
-   debugger cet échec.** Pour confirmer que le build a réussi : regarde
+1. **`zig build` doit finir avec un code de sortie 0.**
+   Le script Zig copie `GaiTerm.app`. Si le build échoue, il faut traiter
+   l'erreur. Pour confirmer que le bundle a bien été produit : regarde
    l'horodatage du binaire :
    ```sh
    ls -la macos/build/Debug/GaiTerm.app/Contents/MacOS/ghostty
    ```
-   S'il est récent → build OK.
+   S'il est récent -> build OK.
 
 2. **Les diagnostics SourceKit sont des FAUX POSITIFS.** SourceKit n'arrive pas à
    résoudre les types entre fichiers (et entre la cible app et la cible plugin).
@@ -195,7 +225,7 @@ Tout passe par un seul script :
 ```
 
 Ce qu'il fait, dans l'ordre :
-1. `zig build` (tolère l'échec bénin du `cp`).
+1. `zig build` (doit réussir avec un code de sortie 0).
 2. Estampille `CFBundleShortVersionString` = version et `CFBundleVersion` =
    `AAAAMMJJHHmm` (numéro de build monotone, requis par Sparkle).
 3. Zippe le bundle (`ditto -c -k --keepParent`) → `build/release/GaiTerm-X.zip`.
@@ -219,6 +249,25 @@ Ce qu'il fait, dans l'ordre :
 - Numéro de build (`CFBundleVersion`) **strictement croissant** = ce qui décide
   qu'une version est « plus récente ». Le script utilise un timestamp, donc OK
   tant qu'on ne publie pas deux fois dans la même minute.
+
+### Avant une publication publique
+
+Avant une vraie release grand public, faire une passe dédiée pour renommer le
+binaire interne. Aujourd'hui l'app visible est `GaiTerm.app`, mais le process
+lancé reste `GaiTerm.app/Contents/MacOS/ghostty`. Concrètement, ce nom peut
+apparaître dans le Moniteur d'activité, les crash reports, les logs système et
+les scripts de relance.
+
+Ce n'est pas urgent pendant le développement, mais avant publication il faudra :
+- changer `EXECUTABLE_NAME = ghostty` vers `GaiTerm` (ou `gaiterm`) dans le projet
+  Xcode ;
+- mettre à jour les `TEST_HOST` de la cible de tests ;
+- mettre à jour `src/build/GhosttyXcodebuild.zig` pour lancer le nouveau binaire ;
+- mettre à jour les commandes de relance/docs/scripts qui ciblent
+  `Contents/MacOS/ghostty` ;
+- refaire `zig build`, lancement manuel, `codesign --verify --deep --strict`, et
+  vérifier que Sparkle embarque toujours `Sparkle.framework` et lit le même
+  `SUPublicEDKey`.
 
 ### Signature de code (identité stable) — important pour les permissions
 

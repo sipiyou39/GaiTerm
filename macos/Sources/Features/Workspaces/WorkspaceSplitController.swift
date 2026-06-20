@@ -4,8 +4,7 @@ import SwiftUI
 import GhosttyKit
 
 /// Handles Ghostty's split actions for surfaces living in workspace split
-/// trees — a slim mirror of `BaseTerminalController`'s split handling, but
-/// the tree belongs to a `GaiWorkspace` instead of a window controller.
+/// trees — GaiTerm's local split handling for surfaces owned by a workspace.
 ///
 /// All Ghostty split notifications are global; like every other handler we
 /// guard by membership: we only act when the target surface lives in one of
@@ -76,8 +75,9 @@ final class GaiSplitController {
     // MARK: Surfaces
 
     /// The workspace whose tree contains the given surface, if any.
-    private func workspace(containing view: Ghostty.SurfaceView) -> GaiWorkspace? {
-        store.workspaces.first { $0.surfaceTree.root?.node(view: view) != nil }
+    func workspace(containing view: Ghostty.SurfaceView) -> GaiWorkspace? {
+        (store.workspaces + [store.defaultWorkspace])
+            .first { $0.surfaceTree.root?.node(view: view) != nil }
     }
 
     /// Create a surface for a workspace. Without a base config (the first
@@ -136,6 +136,22 @@ final class GaiSplitController {
         if hasCommands && !shouldFocus { return }
 
         openPlannedSurfaces(in: workspace, plan: plan, focus: shouldFocus)
+    }
+
+    /// Opens the first pane in an empty workspace using an optional inherited
+    /// Ghostty surface config. The terminal is rooted in the stage, not in a
+    /// classic terminal window.
+    @discardableResult
+    func openRootSurface(
+        in workspace: GaiWorkspace,
+        baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        focus shouldFocus: Bool = true
+    ) -> Ghostty.SurfaceView? {
+        guard workspace.surfaceTree.isEmpty else { return workspace.surfaceTree.root?.leftmostLeaf() }
+        guard let view = makeSurface(for: workspace, baseConfig: baseConfig) else { return nil }
+        workspace.surfaceTree = SplitTree(view: view)
+        if shouldFocus { focus(view) }
+        return view
     }
 
     /// Open an even grid of panes from an open-plan — each pane in its own
@@ -242,8 +258,8 @@ final class GaiSplitController {
         return newView
     }
 
-    /// Divider drags & drag-and-drop rearranging from `TerminalSplitTreeView`.
-    func performSplitAction(_ workspace: GaiWorkspace, _ action: TerminalSplitOperation) {
+    /// Divider drags & drag-and-drop rearranging from the stage split view.
+    func performSplitAction(_ workspace: GaiWorkspace, _ action: GaiSplitOperation) {
         switch action {
         case .resize(let resize):
             let resized = resize.node.resizing(to: resize.ratio)

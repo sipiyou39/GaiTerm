@@ -244,6 +244,92 @@ final class GaiWorkspaceManager {
         showStage()
     }
 
+    /// GaiTerm's app-level "new terminal" entry point. Old Ghostty actions such
+    /// as "new window" and "new tab" are mapped here: they create or split a
+    /// terminal inside the stage instead of spawning a classic terminal window.
+    @discardableResult
+    func openTerminal(
+        baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        parent: Ghostty.SurfaceView? = nil,
+        direction: SplitTree<Ghostty.SurfaceView>.NewDirection? = nil
+    ) -> Ghostty.SurfaceView? {
+        start()
+        if ui.stageShowsEditor { ui.stageShowsEditor = false }
+        showStage()
+
+        let workspace = parent.flatMap { splits.workspace(containing: $0) } ?? store.stageWorkspace
+        if workspace.surfaceTree.isEmpty {
+            return splits.openRootSurface(in: workspace, baseConfig: baseConfig)
+        }
+
+        let target = parent ?? workspace.surfaceTree.root?.leftmostLeaf()
+        return splits.newSplit(
+            in: workspace,
+            at: target,
+            direction: direction ?? .right,
+            baseConfig: baseConfig)
+    }
+
+    /// Finds a live surface owned by GaiTerm's workspace system.
+    func surface(for uuid: UUID) -> Ghostty.SurfaceView? {
+        for workspace in allWorkspaces {
+            if let view = workspace.surfaceTree.first(where: { $0.id == uuid }) {
+                return view
+            }
+        }
+        return nil
+    }
+
+    var terminalSurfaces: [Ghostty.SurfaceView] {
+        allWorkspaces.flatMap { workspace in Array(workspace.surfaceTree) }
+    }
+
+    func focusSurface(_ surface: Ghostty.SurfaceView) {
+        showStage()
+        Ghostty.moveFocus(to: surface)
+    }
+
+    func focusedSurface() -> Ghostty.SurfaceView? {
+        let responders = [stagePanel?.firstResponder, NSApp.keyWindow?.firstResponder]
+        for responder in responders {
+            if let surface = enclosingSurface(in: responder) {
+                return surface
+            }
+        }
+
+        if let focused = terminalSurfaces.first(where: { $0.focused }) {
+            return focused
+        }
+
+        return store.stageWorkspace.surfaceTree.root?.leftmostLeaf()
+    }
+
+    func closeSurface(_ surface: Ghostty.SurfaceView) {
+        guard let workspace = splits.workspace(containing: surface) else { return }
+        splits.closePane(in: workspace, surface: surface)
+    }
+
+    func closeAllSurfaces() {
+        for surface in terminalSurfaces {
+            closeSurface(surface)
+        }
+    }
+
+    private var allWorkspaces: [GaiWorkspace] {
+        store.workspaces + [store.defaultWorkspace]
+    }
+
+    private func enclosingSurface(in responder: NSResponder?) -> Ghostty.SurfaceView? {
+        var current = responder
+        while let item = current {
+            if let surface = item as? Ghostty.SurfaceView {
+                return surface
+            }
+            current = item.nextResponder
+        }
+        return nil
+    }
+
     func start() {
         // Idempotent: launch can reach this from several paths.
         if let panel {
@@ -278,16 +364,6 @@ final class GaiWorkspaceManager {
                 self?.ui.isExpanded = true
             }
         }
-        // Reproduces the exact reported scenario end to end: focus pane B,
-        // synthesize a real mouse click (through NSApp's event queue, local
-        // monitors and all) on pane A's rename zone, so the inline editor
-        // must appear while B keeps focus.
-        if ProcessInfo.processInfo.environment["GAI_CLICKTEST"] != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-                self?.runRenameClickTest()
-            }
-        }
-
         if let autostage = ProcessInfo.processInfo.environment["GAI_AUTOSTAGE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 guard let self, let first = self.store.workspaces.first else { return }
@@ -306,213 +382,6 @@ final class GaiWorkspaceManager {
                 }
             }
         }
-    }
-
-    private func runRenameClickTest() {
-        guard let stagePanel,
-              let workspace = store.workspace(for: store.openWorkspaceID),
-              workspace.sessions.count >= 2,
-              let contentView = stagePanel.contentView
-        else {
-            NSLog("GAICLICKTEST preconditions failed")
-            return
-        }
-        let renameTarget = workspace.sessions[0]
-        let focusTarget = workspace.sessions[1]
-        NSLog("GAICLICKTEST focusing %@, will click title of %@",
-              focusTarget.name, renameTarget.name)
-        Ghostty.moveFocus(to: focusTarget.surfaceView)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self else { return }
-            // Pane A is top-left: its title block sits a few points into the
-            // header band. (Top-left origin → AppKit bottom-left origin.)
-            let topLeftPoint = CGPoint(
-                x: GaiStageMetrics.shadowMargin + 35,
-                y: GaiStageMetrics.shadowMargin + GaiStageMetrics.paneHeaderHeight / 2)
-            let windowPoint = NSPoint(
-                x: topLeftPoint.x,
-                y: contentView.bounds.height - topLeftPoint.y)
-            NSLog("GAICLICKTEST clicking title of %@ at window=%@",
-                  renameTarget.name, NSStringFromPoint(windowPoint))
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(
-                    with: type,
-                    location: windowPoint,
-                    modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: stagePanel.windowNumber,
-                    context: nil,
-                    eventNumber: 0,
-                    clickCount: 1,
-                    pressure: 1) {
-                    NSApp.postEvent(event, atStart: false)
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let editing = self.ui.renamingSession === renameTarget
-                NSLog("GAICLICKTEST test1 (title click opens rename): %@",
-                      editing ? "PASS" : "FAIL")
-                self.ui.renamingSession = nil
-                self.runTerminalClickTest(renameTarget: renameTarget)
-            }
-        }
-    }
-
-    /// Test 3: with 4 panes, a click in each quadrant must focus THAT pane,
-    /// deterministically. Also dumps the AppKit frames of every surface and
-    /// helper view to expose any overlap.
-    private func runQuadrantFocusTest() {
-        guard let stagePanel,
-              let contentView = stagePanel.contentView,
-              let workspace = store.workspace(for: store.openWorkspaceID)
-        else { return }
-
-        // Frame dump: who actually covers what, in window coordinates.
-        func dump(_ view: NSView) {
-            let cls = String(describing: type(of: view))
-            if cls.contains("SurfaceView") || cls.contains("AsserterView")
-                || cls.contains("CatcherView") {
-                NSLog("GAIDUMP %@ frame=%@", cls,
-                      NSStringFromRect(view.convert(view.bounds, to: nil)))
-            }
-            view.subviews.forEach(dump)
-        }
-        dump(contentView)
-
-        let bounds = contentView.bounds
-        let quadrants: [(String, NSPoint)] = [
-            ("top-left", NSPoint(x: bounds.width * 0.25, y: bounds.height * 0.70)),
-            ("top-right", NSPoint(x: bounds.width * 0.75, y: bounds.height * 0.70)),
-            ("bottom-left", NSPoint(x: bounds.width * 0.25, y: bounds.height * 0.30)),
-            ("bottom-right", NSPoint(x: bounds.width * 0.75, y: bounds.height * 0.30)),
-        ]
-
-        func sessionName(of responder: NSResponder?) -> String {
-            for session in workspace.sessions {
-                if responder === session.surfaceView { return session.name }
-                if let view = responder as? NSView,
-                   view.isDescendant(of: session.surfaceView) {
-                    return session.name
-                }
-            }
-            return String(describing: type(of: responder as Any))
-        }
-
-        func clickQuadrant(_ index: Int) {
-            guard index < quadrants.count else {
-                self.runTitleClickRetest()
-                return
-            }
-            let (label, point) = quadrants[index]
-            // Who would AppKit hit-testing give this click to?
-            if let frameView = contentView.superview {
-                let hit = frameView.hitTest(contentView.convert(point, to: frameView))
-                NSLog("GAICLICKTEST quadrant %@ hitTest -> %@ frame=%@",
-                      label,
-                      String(describing: type(of: hit as Any)),
-                      hit.map { NSStringFromRect($0.convert($0.bounds, to: nil)) } ?? "nil")
-            }
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(
-                    with: type, location: point, modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: stagePanel.windowNumber, context: nil,
-                    eventNumber: 0, clickCount: 1, pressure: 1) {
-                    NSApp.postEvent(event, atStart: false)
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                NSLog("GAICLICKTEST quadrant %@ (%@) -> focused %@",
-                      label, NSStringFromPoint(point),
-                      sessionName(of: stagePanel.firstResponder))
-                clickQuadrant(index + 1)
-            }
-        }
-        clickQuadrant(0)
-    }
-
-    /// Test 2: a click INSIDE terminal A must reach A and focus it.
-    private func runTerminalClickTest(renameTarget: GaiTerminalSession) {
-        guard let stagePanel else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard self != nil else { return }
-            // Aim at the actual center of A's surface, wherever the layout
-            // put it.
-            let frame = renameTarget.surfaceView.convert(
-                renameTarget.surfaceView.bounds, to: nil)
-            let windowPoint = NSPoint(x: frame.midX, y: frame.midY)
-            NSLog("GAICLICKTEST test2: clicking inside terminal A at %@",
-                  NSStringFromPoint(windowPoint))
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(
-                    with: type,
-                    location: windowPoint,
-                    modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: stagePanel.windowNumber,
-                    context: nil,
-                    eventNumber: 0,
-                    clickCount: 1,
-                    pressure: 1) {
-                    NSApp.postEvent(event, atStart: false)
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                let responder = stagePanel.firstResponder
-                let focusedA = (responder as? NSView)?
-                    .isDescendant(of: renameTarget.surfaceView) ?? false
-                    || responder === renameTarget.surfaceView
-                NSLog("GAICLICKTEST test2 (terminal click focuses A): %@",
-                      focusedA ? "PASS" : "FAIL")
-                self?.runQuadrantFocusTest()
-            }
-        }
-    }
-
-    /// Test 4: probe a matrix of points around the vanishing zone — the
-    /// title click at {55, H-32} never reaches the event monitor while
-    /// other points do. Map the dead zone.
-    private func runTitleClickRetest() {
-        guard let stagePanel,
-              let contentView = stagePanel.contentView
-        else { return }
-        let height = contentView.bounds.height
-        let probes: [(String, NSPoint)] = [
-            ("title-A", NSPoint(x: 55, y: height - 32.5)),
-            ("same-y-x100", NSPoint(x: 100, y: height - 32.5)),
-            ("same-y-x300", NSPoint(x: 300, y: height - 32.5)),
-            ("same-x-lower", NSPoint(x: 55, y: height - 60)),
-            ("title-D", NSPoint(x: 410, y: height - 32.5)),
-        ]
-        func probe(_ index: Int) {
-            guard index < probes.count else { return }
-            let (label, point) = probes[index]
-            NSLog("GAICLICKTEST probe %@ posting at %@", label, NSStringFromPoint(point))
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(
-                    with: type, location: point, modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: stagePanel.windowNumber, context: nil,
-                    eventNumber: 0, clickCount: 1, pressure: 1) {
-                    NSApp.postEvent(event, atStart: false)
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-                self?.ui.renamingSession = nil
-                probe(index + 1)
-            }
-        }
-        probe(0)
-    }
-
-    private func seedDemoWorkspacesIfNeeded() {
-        guard store.workspaces.isEmpty else { return }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        for name in ["Mapbox", "proj-api", "MCC", "BridgeBoard", "Mux", "Atlas", "Vela"] {
-            store.createWorkspace(name: name, defaultDirectory: home)
-        }
-        ui.selectedWorkspaceID = store.workspaces.first?.id
     }
 
     /// Every workspace shows at least one terminal *before* it is ever opened.
