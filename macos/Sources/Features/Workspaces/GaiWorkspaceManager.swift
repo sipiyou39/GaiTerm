@@ -272,6 +272,11 @@ final class GaiWorkspaceManager {
     }()
     private var panel: NSPanel?
     private var stagePanel: NSPanel?
+    private var localModifierMonitor: Any?
+    private var globalModifierMonitor: Any?
+    private var shortcutOptionIsDown = false
+    private var lastOptionTapTime: TimeInterval?
+    private let modifierDoubleTapInterval: TimeInterval = 0.28
     /// Height the drawer *window* is sized for. Kept separate from
     /// `ui.cardHeight` (the SwiftUI slab's animated height) so the editor can
     /// resize the transparent window invisibly while the visible glass slab
@@ -354,6 +359,18 @@ final class GaiWorkspaceManager {
     func focusSurface(_ surface: Ghostty.SurfaceView) {
         showStage()
         Ghostty.moveFocus(to: surface)
+    }
+
+    /// Global/local shortcut: double-tap Option quickly to open or close the
+    /// whole GaiTerm block. Option is preferred over Control because Control
+    /// may still be tied to Dictation/accessibility shortcuts on some macOS
+    /// setups, while Option-alone double tap is normally unused.
+    func toggleBlockFromModifierShortcut() {
+        if ui.isStageExpanded {
+            dismissBlock()
+        } else {
+            reveal()
+        }
     }
 
     func focusedSurface() -> Ghostty.SurfaceView? {
@@ -1030,6 +1047,7 @@ final class GaiWorkspaceManager {
     private func registerObservers() {
         guard !observersRegistered else { return }
         observersRegistered = true
+        installModifierShortcutMonitors()
 
         // The drawer has no pull tab: it mirrors the stage. Stage opens → drawer
         // opens; stage closes → drawer closes.
@@ -1116,6 +1134,54 @@ final class GaiWorkspaceManager {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.dismissBlock() }
             .store(in: &cancellables)
+    }
+
+    private func installModifierShortcutMonitors() {
+        localModifierMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) {
+            [weak self] event in
+            self?.handleModifierShortcut(event)
+            return event
+        }
+
+        globalModifierMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) {
+            [weak self] event in
+            DispatchQueue.main.async {
+                self?.handleModifierShortcut(event)
+            }
+        }
+    }
+
+    private func handleModifierShortcut(_ event: NSEvent) {
+        let leftOptionKey: UInt16 = 0x3A
+        let rightOptionKey: UInt16 = 0x3D
+        guard event.keyCode == leftOptionKey || event.keyCode == rightOptionKey else { return }
+
+        let flags = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        let optionIsDown = flags.contains(.option)
+
+        guard optionIsDown else {
+            shortcutOptionIsDown = false
+            return
+        }
+
+        guard !shortcutOptionIsDown else { return }
+        shortcutOptionIsDown = true
+
+        // Require Option alone. Option+another modifier is normal shortcut
+        // input and should not count toward the double tap.
+        guard flags.subtracting(.option).isEmpty else {
+            lastOptionTapTime = nil
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = lastOptionTapTime,
+           now - last <= modifierDoubleTapInterval {
+            lastOptionTapTime = nil
+            toggleBlockFromModifierShortcut()
+        } else {
+            lastOptionTapTime = now
+        }
     }
 
     private func refreshGeometry() {
