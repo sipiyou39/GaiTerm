@@ -25,7 +25,7 @@ BUILD="$(date +%Y%m%d%H%M)"           # monotonic build number for Sparkle
 ZIP="GaiTerm-$VERSION.zip"
 URL="https://github.com/$REPO/releases/download/$TAG/$ZIP"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/macos/build/Debug/GaiTerm.app"
+APP="$ROOT/macos/build/ReleaseLocal/GaiTerm.app"
 OUT="$ROOT/build/release"
 
 cd "$ROOT"
@@ -35,7 +35,7 @@ SIGN_UPDATE="$(find "$HOME/Library/Developer/Xcode/DerivedData" \
 [ -x "$SIGN_UPDATE" ] || { echo "✗ sign_update not found (open the project in Xcode once)"; exit 1; }
 
 echo "▸ Building GaiTerm…"
-zig build >/dev/null
+zig build -Doptimize=ReleaseFast >/dev/null
 [ -d "$APP" ] || { echo "✗ build product missing: $APP"; exit 1; }
 
 echo "▸ Stamping version $VERSION (build $BUILD)…"
