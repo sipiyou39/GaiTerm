@@ -57,6 +57,10 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// Whether the stage currently shows the editor (true) or the terminals
     /// (false). The drawer's mode toggle flips this.
     @Published var stageShowsEditor: Bool = false
+    /// Immediate focus source for terminal pane tone. This is intentionally
+    /// separate from SwiftUI focus values and renderer messages so one pane
+    /// turns off in the same UI update where the next one turns on.
+    @Published var focusedTerminalSurfaceID: ObjectIdentifier?
 
     /// The user's saved accent colors ("RRGGBB" hex), built by hand from the
     /// picker — there are no presets. Persisted across launches; shared by every
@@ -119,6 +123,28 @@ private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     required init(rootView: Content) { super.init(rootView: rootView) }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+}
+
+struct GaiTerminalPaneRGB: Equatable {
+    let r: UInt8
+    let g: UInt8
+    let b: UInt8
+
+    init(_ color: Color) {
+        let nsColor = NSColor(color).usingColorSpace(.sRGB)
+            ?? NSColor(red: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 1)
+        func byte(_ value: CGFloat) -> UInt8 {
+            UInt8(clamping: Int((value * 255).rounded()))
+        }
+        self.r = byte(nsColor.redComponent)
+        self.g = byte(nsColor.greenComponent)
+        self.b = byte(nsColor.blueComponent)
+    }
+}
+
+extension Notification.Name {
+    static let gaiSurfaceDidRequestImmediateFocus =
+        Notification.Name("com.sipiyou.gaiterm.surfaceDidRequestImmediateFocus")
 }
 
 /// Stage hosting view: takes over hit-testing at the root so header controls
@@ -236,6 +262,7 @@ final class GaiWorkspaceManager {
         controller.onTreeDidEmpty = { [weak self] workspace in
             if self?.store.openWorkspaceID == workspace.id {
                 self?.store.openWorkspaceID = nil
+                self?.syncWorkspaceSelection()
             }
         }
         controller.onTopologyDidChange = { [weak self] in
@@ -251,6 +278,8 @@ final class GaiWorkspaceManager {
     /// springs to its new height — see `updateWorkspaceEditor`.
     private var panelContentHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
     private var cancellables: Set<AnyCancellable> = []
+    private var observersRegistered = false
+    private var terminalBackgrounds: [ObjectIdentifier: GaiTerminalPaneRGB] = [:]
 
     /// Transparent margins around the slab in the open frame so the glass can
     /// cast its light and shadow without being clipped at the window edge.
@@ -262,6 +291,12 @@ final class GaiWorkspaceManager {
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
         self.store = GaiWorkspaceStore(ghostty: ghostty)
+        NotificationCenter.default.publisher(for: .gaiSurfaceDidRequestImmediateFocus)
+            .sink { [weak self] notification in
+                guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+                self?.applyImmediateFocus(to: surface)
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: Lifecycle
@@ -374,12 +409,9 @@ final class GaiWorkspaceManager {
         // No demo seeding — a fresh install opens to the empty state.
         let restore = UserDefaults.standard.object(forKey: GaiPreferenceKey.restoreWorkspaces) as? Bool ?? true
         if restore { store.loadPersisted() }
-        // Open the first workspace at launch (its terminals + accent color on
-        // stage). The default scratch terminal / neutral gray show only when there
-        // are no workspaces at all. Deliberately don't pre-select a row: the gray
-        // highlight should mean "you clicked this", so nothing is highlighted until
-        // the user actually selects a workspace.
-        store.openWorkspaceID = store.workspaces.first?.id
+        // If workspaces exist, one of them is always the active workspace. The
+        // default scratch terminal is only for the truly empty-workspace state.
+        syncWorkspaceSelection()
         warmFirstSurfaces()
         recomputeCardHeight()
         ensurePanel()
@@ -448,7 +480,21 @@ final class GaiWorkspaceManager {
             []
         }
         let visibleIDs = Set(visibleViews.map { ObjectIdentifier($0) })
+        let focusToneEnabled = visibleViews.count > 1
         let appFocused = enclosingSurface(in: stagePanel?.firstResponder)
+        let renderFocused = if let appFocused,
+                               visibleIDs.contains(ObjectIdentifier(appFocused)) {
+            appFocused
+        } else {
+            visibleViews.first(where: { $0.focused }) ?? visibleViews.first
+        }
+        let renderFocusedID = renderFocused.map { ObjectIdentifier($0) }
+        if ui.focusedTerminalSurfaceID != renderFocusedID {
+            ui.focusedTerminalSurfaceID = renderFocusedID
+        }
+        let tintPanels = UserDefaults.standard.bool(
+            forKey: GaiPreferenceKey.tintGlassWithWorkspaceAccent)
+        let accent = store.stageWorkspace.accentColor
 
         for workspace in allWorkspaces {
             for view in workspace.surfaceTree {
@@ -457,11 +503,71 @@ final class GaiWorkspaceManager {
 
                 ghostty_surface_set_occlusion(surface, isVisible)
 
-                if !isVisible || view !== appFocused {
-                    view.focusDidChange(false)
-                }
+                let isRenderFocused = isVisible && view === renderFocused
+                view.focusDidChange(isRenderFocused)
+                updateTerminalBackground(
+                    for: view,
+                    accent: accent,
+                    tinted: tintPanels,
+                    active: focusToneEnabled && isRenderFocused)
             }
         }
+        pruneTerminalBackgroundCache()
+    }
+
+    private func applyImmediateFocus(to target: Ghostty.SurfaceView) {
+        guard splits.workspace(containing: target) != nil else { return }
+
+        let visibleViews = visibleTerminalSurfaces(in: store.stageWorkspace)
+        let visibleIDs = Set(visibleViews.map { ObjectIdentifier($0) })
+        let focusToneEnabled = visibleViews.count > 1
+        let tintPanels = UserDefaults.standard.bool(
+            forKey: GaiPreferenceKey.tintGlassWithWorkspaceAccent)
+        let accent = store.stageWorkspace.accentColor
+        let views = allWorkspaces.flatMap { Array($0.surfaceTree) }
+        let isTargetVisible = visibleIDs.contains(ObjectIdentifier(target))
+
+        ui.focusedTerminalSurfaceID = isTargetVisible ? ObjectIdentifier(target) : nil
+
+        for view in views where view !== target {
+            view.focusDidChange(false)
+            updateTerminalBackground(
+                for: view,
+                accent: accent,
+                tinted: tintPanels,
+                active: false)
+        }
+
+        target.focusDidChange(isTargetVisible)
+        updateTerminalBackground(
+            for: target,
+            accent: accent,
+            tinted: tintPanels,
+            active: focusToneEnabled && isTargetVisible)
+    }
+
+    private func updateTerminalBackground(
+        for view: Ghostty.SurfaceView,
+        accent: Color,
+        tinted: Bool,
+        active _: Bool
+    ) {
+        let rgb = GaiTerminalPaneRGB(
+            Color.gaiTerminalPaneColor(
+                accent: accent,
+                tinted: tinted,
+                active: false))
+        let id = ObjectIdentifier(view)
+        guard let surface = view.surface else { return }
+        guard terminalBackgrounds[id] != rgb else { return }
+
+        ghostty_surface_set_background_rgb(surface, rgb.r, rgb.g, rgb.b)
+        terminalBackgrounds[id] = rgb
+    }
+
+    private func pruneTerminalBackgroundCache() {
+        let live = Set(terminalSurfaces.map { ObjectIdentifier($0) })
+        terminalBackgrounds = terminalBackgrounds.filter { live.contains($0.key) }
     }
 
     private func visibleTerminalSurfaces(in workspace: GaiWorkspace) -> [Ghostty.SurfaceView] {
@@ -583,7 +689,8 @@ final class GaiWorkspaceManager {
             splits: splits,
             onClose: { [weak self] in self?.store.openWorkspaceID = nil },
             onWillExpand: { [weak self] in self?.snapStagePanel(open: true) },
-            onDidCollapse: { [weak self] in self?.snapStagePanel(open: false) })
+            onDidCollapse: { [weak self] in self?.snapStagePanel(open: false) },
+            onFocusChanged: { [weak self] in self?.updateSurfacePerformanceState() })
         let host = StageHostingView(rootView: stage)
         host.surfacesProvider = { [weak self] in
             guard let self else { return [] }
@@ -921,7 +1028,8 @@ final class GaiWorkspaceManager {
     // MARK: Observers
 
     private func registerObservers() {
-        guard cancellables.isEmpty else { return }
+        guard !observersRegistered else { return }
+        observersRegistered = true
 
         // The drawer has no pull tab: it mirrors the stage. Stage opens → drawer
         // opens; stage closes → drawer closes.
@@ -977,6 +1085,7 @@ final class GaiWorkspaceManager {
             .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
+                self?.syncWorkspaceSelection()
                 self?.refreshGeometry()
                 self?.warmFirstSurfaces()
                 self?.updateSurfacePerformanceState()
@@ -988,7 +1097,10 @@ final class GaiWorkspaceManager {
         store.$openWorkspaceID
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.showStage() }
+            .sink { [weak self] _ in
+                self?.syncWorkspaceSelection()
+                self?.showStage()
+            }
             .store(in: &cancellables)
 
         NotificationCenter.default
@@ -1013,6 +1125,31 @@ final class GaiWorkspaceManager {
         if stagePanel?.isVisible == true {
             snapStagePanel(open: ui.isStageExpanded)
         }
+    }
+
+    /// Keep drawer selection and stage workspace coherent. When real
+    /// workspaces exist, GaiTerm should never sit on an unselected scratch
+    /// workspace; scratch is reserved for an actually empty workspace list.
+    @discardableResult
+    private func syncWorkspaceSelection() -> GaiWorkspace.ID? {
+        guard let first = store.workspaces.first else {
+            if store.openWorkspaceID != nil { store.openWorkspaceID = nil }
+            if ui.selectedWorkspaceID != nil { ui.selectedWorkspaceID = nil }
+            return nil
+        }
+
+        let target =
+            store.workspace(for: store.openWorkspaceID)?.id
+            ?? store.workspace(for: ui.selectedWorkspaceID)?.id
+            ?? first.id
+
+        if store.openWorkspaceID != target {
+            store.openWorkspaceID = target
+        }
+        if ui.selectedWorkspaceID != target {
+            ui.selectedWorkspaceID = target
+        }
+        return target
     }
 }
 #endif

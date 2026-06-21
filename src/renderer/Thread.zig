@@ -462,6 +462,8 @@ fn drainMailbox(self: *Thread) !void {
                 self.syncDrawTimer();
             },
 
+            .gaiterm_background => |rgb| self.renderer.setGaiTermBackgroundColor(rgb),
+
             .search_viewport_matches => |v| {
                 // Note we don't free the new value because we expect our
                 // allocators to match.

@@ -1815,6 +1815,31 @@ pub fn updateConfig(
     );
 }
 
+/// Set the rendered terminal background without reloading the whole surface
+/// configuration. GaiTerm uses this for pane focus tinting, where the color can
+/// change often and must update the already-rendered grid immediately.
+pub fn setGaiTermBackgroundColor(
+    self: *Surface,
+    rgb: terminal.color.RGB,
+) void {
+    self.renderer_state.mutex.lock();
+    {
+        defer self.renderer_state.mutex.unlock();
+        self.io.terminal.colors.background.default = rgb;
+        self.io.terminal.colors.background.set(rgb);
+        self.io.terminal.flags.dirty.palette = true;
+    }
+
+    _ = self.renderer_thread.mailbox.push(
+        .{ .gaiterm_background = rgb },
+        .{ .forever = {} },
+    );
+
+    self.queueRender() catch |err| {
+        log.warn("failed to notify renderer of GaiTerm background change err={}", .{err});
+    };
+}
+
 const InitialSizeError = error{
     ContentScaleUnavailable,
     AppActionFailed,

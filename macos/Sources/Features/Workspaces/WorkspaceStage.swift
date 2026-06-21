@@ -16,20 +16,21 @@ enum GaiStageMetrics {
     /// Height of each pane's header band.
     static let paneHeaderHeight: CGFloat = 30
     /// Clearance between the drawer's pull tab and the stage's pull tab when
-    /// both are out — wide enough that the open spring's overshoot can't make
-    /// the stage tab swing over the drawer tab.
+    /// both are out.
     static let tabClearance: CGFloat = 22
+    /// Keep terminal rendering paused until the fast slide is visually
+    /// complete. The focus ring stays in the pane hierarchy and moves with the
+    /// slab; only the heavy terminal surfaces wait for this.
+    static let slideSettleDelay: TimeInterval = 0.18
 }
 
 // MARK: - Animations
 
 extension Animation {
-    /// Stage slide-out. The stage travels far more than the drawer, so a
-    /// gentler spring keeps the *absolute* overshoot small — a big bounce here
-    /// swings the tab over the drawer's tab.
-    static let gaiStageOpen = Animation.spring(response: 0.5, dampingFraction: 0.84)
-    /// Stage tuck-in: settles without bounce.
-    static let gaiStageClose = Animation.spring(response: 0.4, dampingFraction: 0.9)
+    /// Stage slide-out: short, no overshoot, optimized for daily terminal use.
+    static let gaiStageOpen = Animation.easeOut(duration: 0.16)
+    /// Stage tuck-in: even shorter because it ends hidden.
+    static let gaiStageClose = Animation.easeIn(duration: 0.12)
 }
 
 // MARK: - Stage view
@@ -49,6 +50,8 @@ struct WorkspaceStageView: View {
     let onWillExpand: () -> Void
     /// Snaps the panel to its resting tucked frame once the tuck-in settles.
     let onDidCollapse: () -> Void
+    /// Reapplies renderer focus/color policy when keyboard focus changes.
+    let onFocusChanged: () -> Void
 
     /// Slab offset: 0 = out; +stageCardWidth = tucked (panel still at its open
     /// frame). The mirror of the drawer's negative slide.
@@ -89,7 +92,12 @@ struct WorkspaceStageView: View {
             // Terminal content covers the card region only (trailing bleed).
             // The off-screen bleed stays the flat panel gray — so the open
             // spring's overshoot reveals a strip of that same gray, no seam.
-            StageCard(workspace: workspace, ui: ui, splits: splits, onClose: onClose)
+            StageCard(
+                workspace: workspace,
+                ui: ui,
+                splits: splits,
+                onClose: onClose,
+                onFocusChanged: onFocusChanged)
                 .clipped()
                 .padding(.leading, D.tabWidth)
                 .padding(.trailing, D.bleed)
@@ -123,7 +131,7 @@ struct WorkspaceStageView: View {
             .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
             .rotationEffect(.degrees(visualOpen ? 180 : 0))
             .scaleEffect(tabPressed ? 0.8 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.55), value: tabPressed)
+            .animation(.easeOut(duration: 0.08), value: tabPressed)
             .frame(width: D.tabWidth)
     }
 
@@ -153,11 +161,11 @@ struct WorkspaceStageView: View {
             if panelIsOut {
                 runSlide(.gaiStageOpen, { slide = 0; visualOpen = true })
             } else {
-                onWillExpand()
-                panelIsOut = true
                 var snap = Transaction()
                 snap.disablesAnimations = true
                 withTransaction(snap) { slide = ui.stageCardWidth }
+                onWillExpand()
+                panelIsOut = true
                 DispatchQueue.main.async {
                     guard gen == generation, ui.isStageExpanded else { return }
                     runSlide(.gaiStageOpen, { slide = 0; visualOpen = true })
@@ -172,30 +180,27 @@ struct WorkspaceStageView: View {
     }
 
     /// Runs a slab slide, flagging `isSliding` for its whole duration so the
-    /// manager can pause terminal rendering while the panel moves. Bridges the
-    /// macOS 14 completion API and the timer fallback so both clear the flag.
+    /// manager can pause heavy terminal rendering while the panel moves.
     private func runSlide(
         _ animation: Animation,
         _ changes: @escaping () -> Void,
         then completion: @escaping () -> Void = {}
     ) {
         ui.beginSlide()
-        let done = { completion(); ui.endSlide() }
-        if #available(macOS 14.0, *) {
-            withAnimation(animation, completionCriteria: .logicallyComplete, changes, completion: done)
-        } else {
-            withAnimation(animation, changes)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: done)
+        withAnimation(animation, changes)
+        DispatchQueue.main.asyncAfter(deadline: .now() + GaiStageMetrics.slideSettleDelay) {
+            completion()
+            ui.endSlide()
         }
     }
 
     private func finishCollapse(_ gen: Int) {
         guard gen == generation, !ui.isStageExpanded, panelIsOut else { return }
         panelIsOut = false
+        onDidCollapse()
         var snap = Transaction()
         snap.disablesAnimations = true
         withTransaction(snap) { slide = 0 }
-        onDidCollapse()
     }
 }
 
@@ -204,6 +209,7 @@ private struct StageCard: View {
     @ObservedObject var ui: GaiWorkspaceUIModel
     let splits: GaiSplitController
     let onClose: () -> Void
+    let onFocusChanged: () -> Void
 
     /// One editor model per open file, so unsaved edits survive tab switches.
     @State private var models: [String: GaiEditorModel] = [:]
@@ -230,7 +236,7 @@ private struct StageCard: View {
                 terminalArea
             }
         }
-        .background(Color.gaiInteriorColor(accent: accent, tinted: tintPanels))
+        .background(stageBackgroundColor)
         .onAppear {
             syncModels()
             if !ui.stageShowsEditor { splits.ensureFirstSurface(in: workspace) }
@@ -241,7 +247,14 @@ private struct StageCard: View {
         }
         .onChange(of: focusedSurface) { newValue in
             if newValue != nil { lastFocusedSurface = .init(newValue) }
+            onFocusChanged()
         }
+    }
+
+    private var stageBackgroundColor: Color {
+        showsEditor
+            ? Color.gaiInteriorColor(accent: accent, tinted: tintPanels)
+            : Color.gaiTerminalPaneColor(accent: accent, tinted: tintPanels, active: false)
     }
 
     private var terminalArea: some View {
@@ -479,7 +492,6 @@ private struct GaiSplitSubtree: View {
                 ui: ui,
                 splits: splits,
                 accent: accent,
-                isFocused: focusedSurface === surfaceView,
                 isSplit: isSplitTree,
                 isZoomed: zoomedNode == node,
                 onToggleZoom: { onToggleZoom(surfaceView) },
@@ -548,15 +560,15 @@ private struct GaiSplitSubtree: View {
 // MARK: - Pane
 
 /// One terminal pane: a slim header (editable codename · git branch · zoom)
-/// above the surface, ringed with the workspace accent when focused.
+/// above the surface. Focus is shown by a pane-local stroke on the terminal
+/// region only, so it moves exactly with the stage slab.
 private struct GaiPaneView: View {
     @ObservedObject var surfaceView: Ghostty.SurfaceView
     let session: GaiTerminalSession?
-    let ui: GaiWorkspaceUIModel
+    @ObservedObject var ui: GaiWorkspaceUIModel
     let splits: GaiSplitController
     let accent: Color
     @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
-    let isFocused: Bool
     let isSplit: Bool
     let isZoomed: Bool
     let onToggleZoom: () -> Void
@@ -569,21 +581,50 @@ private struct GaiPaneView: View {
     var body: some View {
         VStack(spacing: 0) {
             paneHeader
-            // Flat pane, no card: the terminal stays bare; the pane-level
-            // focus marker is a non-interactive overlay below.
+            // Flat pane, no card: the terminal keeps the same fill; focus is a
+            // stroke drawn inside this pane so it cannot detach from the stage.
             GaiFastSurfaceWrapper(surfaceView: surfaceView)
+                .background(paneBaseColor)
                 .background(GaiSurfaceLayerAsserter(
                     surfaceView: surfaceView,
-                    backdrop: NSColor(Color.gaiInteriorColor(accent: accent, tinted: tintPanels)).cgColor))
+                    backdrop: NSColor(paneBaseColor).cgColor))
                 // Ghostty's scroll view sets `contentView.clipsToBounds = false`,
                 // so on an elastic overscroll the surface can draw past its top
                 // edge — up over the fixed header. Clip the terminal to its own
                 // frame so the header always stays put.
                 .clipped()
-                .overlay(GaiPaneFocusRing(isFocused: isFocused, accent: accent))
+                .overlay { paneFocusStroke }
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
         }
         .onAppear(perform: refreshBranch)
         .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
+    }
+
+    private var paneIsActive: Bool {
+        isSplit && ui.focusedTerminalSurfaceID == ObjectIdentifier(surfaceView)
+    }
+
+    private var paneBaseColor: Color {
+        Color.gaiTerminalPaneColor(
+            accent: accent,
+            tinted: tintPanels,
+            active: false)
+    }
+
+    @ViewBuilder
+    private var paneFocusStroke: some View {
+        if paneIsActive {
+            Rectangle()
+                .strokeBorder(accent.opacity(0.9), lineWidth: 1)
+                .overlay {
+                    Rectangle()
+                        .inset(by: 1)
+                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                }
+                .allowsHitTesting(false)
+        }
     }
 
     private var paneHeader: some View {
@@ -725,26 +766,6 @@ private struct GaiPaneHeaderLayout {
 
     var branchMaxWidth: CGFloat {
         width < 540 ? 68 : 120
-    }
-}
-
-/// A cheap, non-interactive focus marker. It stays inside the pane bounds so
-/// split dividers and adjacent panes never shift or re-layout.
-private struct GaiPaneFocusRing: View {
-    let isFocused: Bool
-    let accent: Color
-
-    var body: some View {
-        if isFocused {
-            Rectangle()
-                .strokeBorder(accent.opacity(0.92), lineWidth: 1)
-                .overlay {
-                    Rectangle()
-                        .inset(by: 1)
-                        .strokeBorder(.white.opacity(0.22), lineWidth: 1)
-                }
-                .allowsHitTesting(false)
-        }
     }
 }
 

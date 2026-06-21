@@ -575,6 +575,12 @@ pub const Surface = struct {
             config.@"wait-after-command" = true;
         }
 
+        // GaiTerm owns the panel chrome and keeps terminal panes opaque for
+        // performance. Ghostty's macOS glass blur path makes the renderer emit a
+        // transparent background; with our opaque Metal layers that presents as
+        // black instead of the app gray pane color.
+        applyGaiTermSurfaceChromePolicy(&config);
+
         // Initialize our surface right away. We're given a view that is
         // ready to use.
         try self.core_surface.init(
@@ -988,6 +994,13 @@ pub const Surface = struct {
         return .{ .x = pos.x * scale.x, .y = pos.y * scale.y };
     }
 };
+
+fn applyGaiTermSurfaceChromePolicy(config: *Config) void {
+    config.background = .{ .r = 28, .g = 28, .b = 30 };
+    config.@"background-image" = null;
+    config.@"background-blur" = .false;
+    config.@"background-opacity" = 1.0;
+}
 
 /// Inspector is the state required for the terminal inspector. A terminal
 /// inspector is 1:1 with a Surface.
@@ -1502,7 +1515,14 @@ pub const CAPI = struct {
         v: *App,
         config: *const Config,
     ) void {
-        v.core_app.updateConfig(v, config) catch |err| {
+        var gai_config = config.clone(v.core_app.alloc) catch |err| {
+            log.err("error cloning app config for GaiTerm surface policy err={}", .{err});
+            return;
+        };
+        defer gai_config.deinit();
+        applyGaiTermSurfaceChromePolicy(&gai_config);
+
+        v.core_app.updateConfig(v, &gai_config) catch |err| {
             log.err("error updating config err={}", .{err});
             return;
         };
@@ -1584,10 +1604,31 @@ pub const CAPI = struct {
         surface: *Surface,
         config: *const Config,
     ) void {
-        surface.core_surface.updateConfig(config) catch |err| {
+        var gai_config = config.clone(surface.app.core_app.alloc) catch |err| {
+            log.err("error cloning config for GaiTerm surface policy err={}", .{err});
+            return;
+        };
+        defer gai_config.deinit();
+        applyGaiTermSurfaceChromePolicy(&gai_config);
+
+        surface.core_surface.updateConfig(&gai_config) catch |err| {
             log.err("error updating config err={}", .{err});
             return;
         };
+    }
+
+    /// Update only the rendered terminal background for this surface.
+    export fn ghostty_surface_set_background_rgb(
+        surface: *Surface,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) void {
+        surface.core_surface.setGaiTermBackgroundColor(.{
+            .r = r,
+            .g = g,
+            .b = b,
+        });
     }
 
     /// Returns true if the surface needs to confirm quitting.

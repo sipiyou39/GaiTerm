@@ -1,6 +1,20 @@
 import AppKit
 import Cocoa
+import Darwin
 import GhosttyKit
+
+private func sanitizeGaiTermLaunchEnvironment() {
+    // GaiTerm is a terminal host: it must not inherit presentation/CI flags
+    // from whichever terminal or agent happened to launch the app.
+    for key in ["NO_COLOR", "CODEX_CI", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"] {
+        unsetenv(key)
+    }
+
+    setenv("COLORTERM", "truecolor", 0)
+    setenv("CLICOLOR", "1", 0)
+}
+
+sanitizeGaiTermLaunchEnvironment()
 
 // Initialize Ghostty global state. We do this once right away because the
 // CLI APIs require it and it lets us ensure it is done immediately for the

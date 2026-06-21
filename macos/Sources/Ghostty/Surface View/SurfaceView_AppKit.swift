@@ -166,7 +166,7 @@ extension Ghostty {
         var notificationIdentifiers: Set<String> = []
 
         private var markedText: NSMutableAttributedString
-        private(set) var focused: Bool = true
+        @Published private(set) var focused: Bool = true
         private var prevPressureStage: Int = 0
         private var appearanceObserver: NSKeyValueObservation?
 
@@ -351,6 +351,7 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
+            ghostty_surface_set_background_rgb(surface, 28, 28, 30)
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
@@ -627,6 +628,9 @@ extension Ghostty {
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
             suppressNextLeftMouseUp = false
+            NotificationCenter.default.post(
+                name: .gaiSurfaceDidRequestImmediateFocus,
+                object: self)
 
             // If we're already the first responder then no focus transfer is
             // happening, so the click should continue as normal.

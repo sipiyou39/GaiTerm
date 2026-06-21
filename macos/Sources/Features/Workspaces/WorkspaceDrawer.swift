@@ -8,8 +8,8 @@ import SwiftUI
 /// so they live in one place.
 enum GaiDrawerMetrics {
     /// How far the card bleeds past the screen edge (off-screen to the left).
-    /// The open spring's overshoot dips into this bleed instead of revealing
-    /// a gap between the card and the edge.
+    /// The drawer still keeps a small off-screen bleed so fast slides never
+    /// reveal a gap between the card and the edge.
     static let bleed: CGFloat = 40
 
     /// Visible width of the workspaces card when the drawer is open.
@@ -68,11 +68,10 @@ enum GaiDrawerMetrics {
 // MARK: - Animations
 
 extension Animation {
-    /// Drawer pull-out: a fluid spring with a hint of overshoot (the card's
-    /// off-screen bleed absorbs it, so no gap ever opens at the edge).
-    static let gaiDrawerOpen = Animation.spring(response: 0.5, dampingFraction: 0.78)
-    /// Drawer tuck-in: slightly quicker, settles without bounce.
-    static let gaiDrawerClose = Animation.spring(response: 0.4, dampingFraction: 0.9)
+    /// Drawer pull-out: exactly matches the stage slide, no overshoot.
+    static let gaiDrawerOpen = Animation.gaiStageOpen
+    /// Drawer tuck-in: exactly matches the stage tuck, no overshoot.
+    static let gaiDrawerClose = Animation.gaiStageClose
     /// The card breathing taller/shorter for the workspace editor — organic,
     /// a hair of overshoot so it feels alive without jiggling.
     static let gaiCardResize = Animation.spring(response: 0.46, dampingFraction: 0.84)
@@ -85,18 +84,18 @@ extension Animation {
 ///
 /// Animation strategy: the panel itself never animates. It only *snaps*
 /// between its two frames at moments when the rendered pixels are identical
-/// before and after; the visible slide is a GPU-composited SwiftUI spring on
-/// the slab's offset. Opening: snap the panel out first, then spring the slab
-/// in from the edge. Closing: spring the slab out, then snap the panel back.
+/// before and after; the visible slide is a GPU-composited SwiftUI offset on
+/// the slab's offset. Opening: snap the panel out first, then slide the slab
+/// in from the edge. Closing: slide the slab out, then snap the panel back.
 struct WorkspaceDrawerView: View {
     @ObservedObject var store: GaiWorkspaceStore
     @ObservedObject var ui: GaiWorkspaceUIModel
 
     /// Snaps the panel to its open frame. Called synchronously right before
-    /// the open spring starts.
+    /// the fast slide starts.
     let onWillOpen: () -> Void
     /// Snaps the panel to its resting closed frame. Called once the close
-    /// spring has settled.
+    /// slide has settled.
     let onDidClose: () -> Void
 
     /// Slab offset: 0 = open appearance; -cardWidth = closed appearance
@@ -104,7 +103,7 @@ struct WorkspaceDrawerView: View {
     @State private var slide: CGFloat = 0
     /// Whether the panel is currently at its open frame.
     @State private var panelIsOut = false
-    /// Drives the chevron flip inside the same springs as `slide`.
+    /// Drives the chevron flip inside the same animations as `slide`.
     @State private var visualOpen = false
     /// Invalidates stale animation-completion callbacks after interruptions.
     @State private var generation = 0
@@ -139,46 +138,36 @@ struct WorkspaceDrawerView: View {
         let gen = generation
         if expanded {
             if panelIsOut {
-                // Interrupting a close mid-flight: retarget the spring; it
-                // keeps its velocity.
-                withAnimation(.gaiDrawerOpen) {
-                    slide = 0
-                    visualOpen = true
-                }
+                runSlide(.gaiDrawerOpen, { slide = 0; visualOpen = true })
             } else {
-                // At rest. Move the panel to its open frame while re-offsetting
-                // the slab by the same amount (pixel-identical), then spring in.
-                onWillOpen()
-                panelIsOut = true
+                // At rest. Re-offset the slab first (pixel-identical), move the
+                // panel to its open frame, then slide in.
                 var snap = Transaction()
                 snap.disablesAnimations = true
                 withTransaction(snap) { slide = -M.cardWidth }
+                onWillOpen()
+                panelIsOut = true
                 DispatchQueue.main.async {
                     guard gen == generation, ui.isExpanded else { return }
-                    withAnimation(.gaiDrawerOpen) {
-                        slide = 0
-                        visualOpen = true
-                    }
+                    runSlide(.gaiDrawerOpen, { slide = 0; visualOpen = true })
                 }
             }
         } else {
             guard panelIsOut else { return }
-            if #available(macOS 14.0, *) {
-                withAnimation(.gaiDrawerClose, completionCriteria: .logicallyComplete) {
-                    slide = -M.cardWidth
-                    visualOpen = false
-                } completion: {
-                    finishClose(gen)
-                }
-            } else {
-                withAnimation(.gaiDrawerClose) {
-                    slide = -M.cardWidth
-                    visualOpen = false
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-                    finishClose(gen)
-                }
+            runSlide(.gaiDrawerClose, { slide = -M.cardWidth; visualOpen = false }) {
+                finishClose(gen)
             }
+        }
+    }
+
+    private func runSlide(
+        _ animation: Animation,
+        _ changes: @escaping () -> Void,
+        then completion: @escaping () -> Void = {}
+    ) {
+        withAnimation(animation, changes)
+        DispatchQueue.main.asyncAfter(deadline: .now() + GaiStageMetrics.slideSettleDelay) {
+            completion()
         }
     }
 
@@ -393,11 +382,12 @@ struct WorkspaceDrawerView: View {
     }
 
     private var workspaceRows: some View {
-        VStack(alignment: .leading, spacing: M.rowSpacing) {
+        let activeWorkspaceID = store.openWorkspaceID ?? ui.selectedWorkspaceID
+        return VStack(alignment: .leading, spacing: M.rowSpacing) {
             ForEach(store.workspaces) { workspace in
                 GaiWorkspaceRow(
                     workspace: workspace,
-                    isSelected: workspace.id == ui.selectedWorkspaceID,
+                    isSelected: workspace.id == activeWorkspaceID,
                     onSelect: {
                         ui.selectedWorkspaceID = workspace.id
                         ui.stageShowsEditor = false
@@ -412,7 +402,14 @@ struct WorkspaceDrawerView: View {
                         ui.editingWorkspaceID = workspace.id
                     },
                     onDuplicate: { store.duplicateWorkspace(workspace.id) },
-                    onDelete: { store.removeWorkspace(workspace.id) })
+                    onDelete: {
+                        store.removeWorkspace(workspace.id)
+                        let fallback = store.openWorkspaceID ?? store.workspaces.first?.id
+                        ui.selectedWorkspaceID = fallback
+                        if store.openWorkspaceID == nil {
+                            store.openWorkspaceID = fallback
+                        }
+                    })
                 .frame(height: M.rowHeight)
             }
             GaiAddWorkspaceRow(action: createNewWorkspace)
@@ -449,7 +446,7 @@ struct WorkspaceDrawerView: View {
             .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
             .rotationEffect(.degrees(visualOpen ? 180 : 0))
             .scaleEffect(tabPressed ? 0.8 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.55), value: tabPressed)
+            .animation(.easeOut(duration: 0.08), value: tabPressed)
             .frame(width: M.tabWidth)
     }
 
@@ -671,20 +668,21 @@ extension Color {
                      blue: mix(30 / 255, a.blueComponent))
     }
 
-    /// The terminal interior fill: the light interior gray, kept gray, with just
-    /// a *faint* wash of the workspace accent when tinting is on — enough to
-    /// sense the workspace color without losing the neutral gray. Much lighter a
-    /// tint than `gaiPanelColor` (the header), on purpose.
-    static func gaiInteriorColor(accent: Color, tinted: Bool) -> Color {
-        // The base elevated gray used behind the surfaces (matches WorkspaceStage).
+    /// Content interior fill. It deliberately does not use workspace tint:
+    /// the tint belongs to drawer/header chrome, not terminal/editor surfaces.
+    static func gaiInteriorColor(accent _: Color, tinted _: Bool) -> Color {
         let base = (r: 0.110, g: 0.110, b: 0.118)
-        guard tinted else { return Color(red: base.r, green: base.g, blue: base.b) }
-        let a = NSColor(accent).usingColorSpace(.sRGB) ?? .gray
-        let f: CGFloat = 0.06
-        func mix(_ b: CGFloat, _ c: CGFloat) -> CGFloat { b * (1 - f) + c * f }
-        return Color(red: mix(base.r, a.redComponent),
-                     green: mix(base.g, a.greenComponent),
-                     blue: mix(base.b, a.blueComponent))
+        return Color(red: base.r, green: base.g, blue: base.b)
+    }
+
+    /// Terminal pane color. Panes match the header exactly; focus is shown by
+    /// a stroke in `GaiPaneView`, never by changing terminal luminance.
+    static func gaiTerminalPaneColor(
+        accent: Color,
+        tinted: Bool,
+        active _: Bool
+    ) -> Color {
+        gaiInteriorColor(accent: accent, tinted: tinted)
     }
 
     /// Deterministic accent color derived from a workspace name.

@@ -155,6 +155,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
+        /// GaiTerm-owned terminal pane background. When set, this wins over
+        /// OSC 11 / shell theme background changes every frame.
+        gaiterm_background: ?terminal.color.RGB,
+
         /// Custom shader uniform values.
         custom_shader_uniforms: shadertoy.Uniforms,
 
@@ -715,6 +719,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Render state
                 .cells = .{},
+                .gaiterm_background = null,
                 .uniforms = .{
                     .projection_matrix = undefined,
                     .cell_size = undefined,
@@ -1202,6 +1207,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update our terminal state
                 try self.terminal_state.update(self.alloc, state.terminal);
 
+                if (self.gaiterm_background) |rgb| {
+                    if (!self.terminal_state.colors.background.eql(rgb)) {
+                        self.terminal_state.colors.background = rgb;
+                        self.terminal_state.dirty = .full;
+                    }
+                }
+
                 // If our terminal state is dirty at all we need to redo
                 // the viewport search.
                 if (self.terminal_state.dirty != .false) {
@@ -1385,24 +1397,32 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar_dirty = true;
                 }
 
-                // Update our background color
+                // Update our background color. GaiTerm owns pane chrome and
+                // must keep terminal backgrounds opaque, regardless of OSC 11
+                // or Ghostty glass/opacity settings.
+                const bg_color = self.gaiterm_background orelse
+                    self.terminal_state.colors.background;
                 self.uniforms.bg_color = .{
-                    self.terminal_state.colors.background.r,
-                    self.terminal_state.colors.background.g,
-                    self.terminal_state.colors.background.b,
-                    @intFromFloat(@round(self.config.background_opacity * 255.0)),
+                    bg_color.r,
+                    bg_color.g,
+                    bg_color.b,
+                    if (self.gaiterm_background != null)
+                        255
+                    else
+                        @intFromFloat(@round(self.config.background_opacity * 255.0)),
                 };
-
                 // If we're on macOS and have glass styles, we remove
                 // the background opacity because the glass effect handles
                 // it.
-                if (comptime builtin.os.tag == .macos) switch (self.config.background_blur) {
-                    .@"macos-glass-regular",
-                    .@"macos-glass-clear",
-                    => self.uniforms.bg_color[3] = 0,
+                if (self.gaiterm_background == null) {
+                    if (comptime builtin.os.tag == .macos) switch (self.config.background_blur) {
+                        .@"macos-glass-regular",
+                        .@"macos-glass-clear",
+                        => self.uniforms.bg_color[3] = 0,
 
-                    else => {},
-                };
+                        else => {},
+                    };
+                }
 
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
@@ -1595,7 +1615,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .{ .texture = state.back_texture }
                     else
                         .{ .target = frame.target },
-                    .clear_color = .{ 0.0, 0.0, 0.0, 0.0 },
+                    .clear_color = .{
+                        @as(f64, @floatFromInt(self.uniforms.bg_color[0])) / 255.0,
+                        @as(f64, @floatFromInt(self.uniforms.bg_color[1])) / 255.0,
+                        @as(f64, @floatFromInt(self.uniforms.bg_color[2])) / 255.0,
+                        @as(f64, @floatFromInt(self.uniforms.bg_color[3])) / 255.0,
+                    },
                 }});
                 defer pass.complete();
 
@@ -1609,16 +1634,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 //       would require us to do color space conversion on the
                 //       CPU-side. In the future when we have utilities for
                 //       that we should remove this step and use clear_color.
-                if (self.bg_image) |img| switch (img) {
-                    .ready => |texture| pass.step(.{
-                        .pipeline = self.shaders.pipelines.bg_image,
-                        .uniforms = frame.uniforms.buffer,
-                        .buffers = &.{frame.bg_image_buffer.buffer},
-                        .textures = &.{texture},
-                        .draw = .{ .type = .triangle, .vertex_count = 3 },
-                    }),
-                    else => {},
-                } else {
+                const drew_bg_image = if (self.bg_image) |img| draw: {
+                    switch (img) {
+                        .ready => |texture| {
+                            pass.step(.{
+                                .pipeline = self.shaders.pipelines.bg_image,
+                                .uniforms = frame.uniforms.buffer,
+                                .buffers = &.{frame.bg_image_buffer.buffer},
+                                .textures = &.{texture},
+                                .draw = .{ .type = .triangle, .vertex_count = 3 },
+                            });
+                            break :draw true;
+                        },
+                        else => break :draw false,
+                    }
+                } else false;
+
+                if (!drew_bg_image) {
                     pass.step(.{
                         .pipeline = self.shaders.pipelines.bg_color,
                         .uniforms = frame.uniforms.buffer,
@@ -1913,6 +1945,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (custom_shaders_changed) {
                 self.reinitialize_shaders = true;
             }
+        }
+
+        /// GaiTerm updates pane focus tone without a full config reload.
+        pub fn setGaiTermBackgroundColor(self: *Self, rgb: terminal.color.RGB) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+
+            self.config.background = rgb;
+            self.config.background_opacity = 1.0;
+            self.config.background_blur = .false;
+            self.gaiterm_background = rgb;
+            self.terminal_state.colors.background = rgb;
+            self.terminal_state.dirty = .full;
+            self.uniforms.bg_color = .{ rgb.r, rgb.g, rgb.b, 255 };
         }
 
         /// Resize the screen.

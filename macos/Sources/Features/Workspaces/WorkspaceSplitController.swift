@@ -106,8 +106,28 @@ final class GaiSplitController {
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         store.attachSession(for: view, in: workspace)
         applyPerformanceLayerPolicy(view)
+        applyTerminalBackground(view, in: workspace, active: false)
         parkSurface(view)
         return view
+    }
+
+    /// Set the engine-rendered terminal background immediately after surface
+    /// creation. The SwiftUI backing color alone sits behind Metal; Ghostty's
+    /// renderer must receive the same color or the grid stays black.
+    private func applyTerminalBackground(
+        _ view: Ghostty.SurfaceView,
+        in workspace: GaiWorkspace,
+        active: Bool
+    ) {
+        guard let surface = view.surface else { return }
+        let tinted = UserDefaults.standard.bool(
+            forKey: GaiPreferenceKey.tintGlassWithWorkspaceAccent)
+        let rgb = GaiTerminalPaneRGB(
+            Color.gaiTerminalPaneColor(
+                accent: workspace.accentColor,
+                tinted: tinted,
+                active: active))
+        ghostty_surface_set_background_rgb(surface, rgb.r, rgb.g, rgb.b)
     }
 
     /// New panes start cheap: no compositing filters, opaque layer hints.
