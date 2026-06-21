@@ -90,10 +90,7 @@ struct WorkspaceStageView: View {
             // The off-screen bleed stays the flat panel gray — so the open
             // spring's overshoot reveals a strip of that same gray, no seam.
             StageCard(workspace: workspace, ui: ui, splits: splits, onClose: onClose)
-                .clipShape(UnevenRoundedRectangle(
-                    topLeadingRadius: D.cardCornerRadius,
-                    bottomLeadingRadius: D.cardCornerRadius,
-                    style: .continuous))
+                .clipped()
                 .padding(.leading, D.tabWidth)
                 .padding(.trailing, D.bleed)
                 .id(workspace.id)
@@ -583,41 +580,72 @@ private struct GaiPaneView: View {
                 // edge — up over the fixed header. Clip the terminal to its own
                 // frame so the header always stays put.
                 .clipped()
+                .overlay(GaiPaneFocusRing(isFocused: isFocused, accent: accent))
         }
-        .overlay(GaiPaneFocusRing(isFocused: isFocused, accent: accent))
         .onAppear(perform: refreshBranch)
         .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
     }
 
     private var paneHeader: some View {
-        HStack(spacing: 7) {
-            GaiPaneTitle(
-                surfaceView: surfaceView,
-                session: session,
-                ui: ui,
-                splits: splits)
-            Spacer(minLength: 6)
-            GaiDirectoryPicker(path: surfaceView.pwd, accent: accent, onPick: onChangeFolder)
-            Spacer(minLength: 6)
-            if let branch {
+        GeometryReader { geo in
+            paneHeaderContent(width: geo.size.width)
+                .frame(
+                    width: geo.size.width,
+                    height: GaiStageMetrics.paneHeaderHeight,
+                    alignment: .leading)
+        }
+        .frame(height: GaiStageMetrics.paneHeaderHeight)
+        .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
+        .clipped()
+        // Deliberately no tap handling on the header itself: it is app
+        // chrome, outside the terminal focus system. Focus moves by
+        // clicking inside a terminal.
+    }
+
+    private func paneHeaderContent(width: CGFloat) -> some View {
+        let layout = GaiPaneHeaderLayout(width: width)
+        return HStack(spacing: layout.spacing) {
+            if layout.showsTitle {
+                GaiPaneTitle(
+                    surfaceView: surfaceView,
+                    session: session,
+                    ui: ui,
+                    splits: splits)
+                .frame(maxWidth: layout.titleMaxWidth, alignment: .leading)
+                .clipped()
+            }
+            Spacer(minLength: 0)
+            if layout.showsDirectory {
+                GaiDirectoryPicker(path: surfaceView.pwd, accent: accent, onPick: onChangeFolder)
+                    .frame(maxWidth: layout.directoryMaxWidth, alignment: .leading)
+                    .clipped()
+                    .layoutPriority(-2)
+            }
+            if layout.showsBranch, let branch {
                 HStack(spacing: 3.5) {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 8.5, weight: .semibold))
                     Text(branch)
                         .font(.system(size: 10, weight: .medium))
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
                 .foregroundStyle(.white.opacity(0.55))
+                .frame(maxWidth: layout.branchMaxWidth, alignment: .trailing)
+                .clipped()
+                .layoutPriority(-3)
             }
             // Always visible and therefore always hittable: a control that
             // only mounts on hover can miss the very click it exists for.
-            GaiPaneIconButton(
-                symbol: "rectangle.split.2x1",
-                help: "Split right (⌘D)") { onSplit(.right) }
-            GaiPaneIconButton(
-                symbol: "rectangle.split.1x2",
-                help: "Split down (⇧⌘D)") { onSplit(.down) }
-            if isSplit {
+            if layout.showsSplitControls {
+                GaiPaneIconButton(
+                    symbol: "rectangle.split.2x1",
+                    help: "Split right (⌘D)") { onSplit(.right) }
+                GaiPaneIconButton(
+                    symbol: "rectangle.split.1x2",
+                    help: "Split down (⇧⌘D)") { onSplit(.down) }
+            }
+            if layout.showsZoom, isSplit {
                 GaiPaneIconButton(
                     symbol: isZoomed
                         ? "arrow.down.right.and.arrow.up.left"
@@ -627,13 +655,10 @@ private struct GaiPaneView: View {
                     action: onToggleZoom)
             }
             GaiPaneIconButton(symbol: "xmark", help: "Close terminal", action: onClose)
+                .layoutPriority(100)
         }
-        .padding(.horizontal, 9)
-        .frame(height: GaiStageMetrics.paneHeaderHeight)
-        .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
-        // Deliberately no tap handling on the header itself: it is app
-        // chrome, outside the terminal focus system. Focus moves by
-        // clicking inside a terminal.
+        .padding(.leading, layout.edgePadding)
+        .padding(.trailing, layout.edgePadding)
     }
 
     private func refreshBranch() {
@@ -644,6 +669,40 @@ private struct GaiPaneView: View {
                 if value != branch { branch = value }
             }
         }
+    }
+}
+
+private struct GaiPaneHeaderLayout {
+    let width: CGFloat
+
+    var edgePadding: CGFloat {
+        if width < 150 { return 4 }
+        if width < 260 { return 6 }
+        return 9
+    }
+
+    var spacing: CGFloat {
+        width < 260 ? 4 : 7
+    }
+
+    var showsTitle: Bool { width >= 74 }
+    var showsDirectory: Bool { width >= 300 }
+    var showsBranch: Bool { width >= 440 }
+    var showsSplitControls: Bool { width >= 250 }
+    var showsZoom: Bool { width >= 190 }
+
+    var titleMaxWidth: CGFloat? {
+        if width < 140 { return max(0, width - 34) }
+        if width < 250 { return max(0, width - 52) }
+        return nil
+    }
+
+    var directoryMaxWidth: CGFloat {
+        width < 380 ? 46 : 96
+    }
+
+    var branchMaxWidth: CGFloat {
+        width < 540 ? 68 : 120
     }
 }
 
