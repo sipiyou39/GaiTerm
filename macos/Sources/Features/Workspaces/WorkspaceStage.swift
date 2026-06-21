@@ -252,7 +252,7 @@ private struct StageCard: View {
             workspace: workspace,
             ui: ui,
             accent: accent,
-            focusedSurface: focusedSurface,
+            focusedSurface: focusedSurface ?? lastFocusedSurface?.value,
             splits: splits)
         .ghosttyLastFocusedSurface(lastFocusedSurface)
     }
@@ -572,8 +572,8 @@ private struct GaiPaneView: View {
     var body: some View {
         VStack(spacing: 0) {
             paneHeader
-            // Flat pane, no card: the focus ring wraps the terminal zone
-            // only (the header is app chrome, outside the focus system).
+            // Flat pane, no card: the terminal stays bare; the pane-level
+            // focus marker is a non-interactive overlay below.
             GaiFastSurfaceWrapper(surfaceView: surfaceView)
                 .background(GaiSurfaceLayerAsserter(
                     surfaceView: surfaceView,
@@ -584,6 +584,7 @@ private struct GaiPaneView: View {
                 // frame so the header always stays put.
                 .clipped()
         }
+        .overlay(GaiPaneFocusRing(isFocused: isFocused, accent: accent))
         .onAppear(perform: refreshBranch)
         .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
     }
@@ -642,6 +643,26 @@ private struct GaiPaneView: View {
             DispatchQueue.main.async {
                 if value != branch { branch = value }
             }
+        }
+    }
+}
+
+/// A cheap, non-interactive focus marker. It stays inside the pane bounds so
+/// split dividers and adjacent panes never shift or re-layout.
+private struct GaiPaneFocusRing: View {
+    let isFocused: Bool
+    let accent: Color
+
+    var body: some View {
+        if isFocused {
+            Rectangle()
+                .strokeBorder(accent.opacity(0.92), lineWidth: 1)
+                .overlay {
+                    Rectangle()
+                        .inset(by: 1)
+                        .strokeBorder(.white.opacity(0.22), lineWidth: 1)
+                }
+                .allowsHitTesting(false)
         }
     }
 }
@@ -776,15 +797,12 @@ private struct GaiPaneIconButton: View {
     var emphasized: Bool = false
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: 8.5, weight: .bold))
-            .foregroundStyle(.white.opacity(hovering || emphasized ? 0.95 : 0.55))
+            .foregroundStyle(.white.opacity(emphasized ? 0.95 : 0.62))
             .frame(width: 18, height: 18)
-            .background(Circle().fill(Color.white.opacity(hovering ? 0.16 : 0)))
-            .onHover { hovering = $0 }
+            .background(Circle().fill(Color.white.opacity(emphasized ? 0.14 : 0)))
             .overlay(GaiClickCatcher(action: action))
             .help(help)
     }
@@ -806,7 +824,6 @@ private struct GaiPaneTitle: View {
     let splits: GaiSplitController
 
     @State private var draft = ""
-    @State private var hovering = false
     @FocusState private var fieldFocused: Bool
 
     private var isEditing: Bool {
@@ -840,15 +857,13 @@ private struct GaiPaneTitle: View {
                 GaiSessionNameText(session: session, fallback: surfaceView.title)
                 Image(systemName: "pencil")
                     .font(.system(size: 8.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(hovering ? 0.95 : 0.55))
+                    .foregroundStyle(.white.opacity(0.58))
                     .padding(.trailing, 2)
             }
         }
         .padding(.horizontal, 5)
         .frame(height: 19)
-        .background(
-            Capsule().fill(Color.white.opacity(hovering && !isEditing ? 0.12 : 0)))
-        .onHover { hovering = $0 }
+        .background(Capsule().fill(Color.clear))
         .overlay {
             if !isEditing {
                 // The window-level monitor finds this catcher's AppKit view

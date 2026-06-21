@@ -124,14 +124,13 @@ private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 /// Stage hosting view: takes over hit-testing at the root so header controls
 /// and terminal surfaces are routed deterministically:
 ///
-/// 1. header controls (a `GaiClickCatcher.CatcherView`, smallest match wins),
-/// 2. terminal surfaces, resolved via AppKit's native hit-testing
-///    (`super.hitTest`) walked up to the enclosing `SurfaceView` — the same
-///    pipeline Ghostty's own terminal windows use, reliable now that each
-///    split leaf carries a stable `.id()`,
+/// 1. terminal surfaces by their rendered layer rect, avoiding SwiftUI's deep
+///    hit-test/hover responder walk on the hot terminal area,
+/// 2. header controls (a `GaiClickCatcher.CatcherView`, smallest match wins),
 /// 3. everything else falls back to the normal pipeline.
 ///
-/// One synchronous path, no event monitors, no re-posting.
+/// One synchronous path, no event monitors, no re-posting. The final fallback
+/// keeps the native path available if a surface is mid-reparent/layout.
 private final class StageHostingView<Content: View>: FirstMouseHostingView<Content> {
     var surfacesProvider: () -> [Ghostty.SurfaceView] = { [] }
 
@@ -140,6 +139,26 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
     private func renderedRect(of view: NSView) -> CGRect? {
         guard let viewLayer = view.layer, let hostLayer = self.layer else { return nil }
         return viewLayer.convert(viewLayer.bounds, to: hostLayer)
+    }
+
+    /// Fast terminal hit path. Returning the `SurfaceView` directly lets
+    /// Ghostty receive mouse events without asking SwiftUI to hit-test every
+    /// pane and hover responder on each cursor/tracking update.
+    private func renderedSurface(at local: NSPoint) -> Ghostty.SurfaceView? {
+        var best: (surface: Ghostty.SurfaceView, area: CGFloat)?
+        for surface in surfacesProvider() {
+            guard surface.window === window,
+                  !surface.isHidden,
+                  let rect = renderedRect(of: surface),
+                  rect.contains(local)
+            else { continue }
+
+            let area = rect.width * rect.height
+            if best == nil || area < best!.area {
+                best = (surface, area)
+            }
+        }
+        return best?.surface
     }
 
     /// Walk up from an AppKit hit to the terminal surface that contains it.
@@ -158,7 +177,13 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
         // space `renderedRect` reports in.
         let local = convert(point, from: superview)
 
-        // 1. Header controls: smallest rendered match wins.
+        // 1. Terminal surface hot path: bypass SwiftUI's responder walk for
+        // the area users interact with most during multi-pane CLI runs.
+        if let surface = renderedSurface(at: local) {
+            return surface
+        }
+
+        // 2. Header controls: smallest rendered match wins.
         var bestCatcher: (view: NSView, area: CGFloat)?
         func walk(_ view: NSView) {
             if let catcher = view as? GaiClickCatcher.CatcherView,
@@ -178,14 +203,9 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
             return bestCatcher.view
         }
 
-        // 2. Terminal surfaces: defer to AppKit's native hit-testing and
-        // resolve the enclosing surface. Now that each split leaf carries a
-        // stable `.id()`, SwiftUI no longer recycles one pane's platform
-        // container for a different surface, so AppKit routes the click to
-        // the pane actually under the cursor — the same pipeline Ghostty's
-        // own terminal windows rely on. The previous hand-rolled layer-rect
-        // math measured rendered frames itself and misrouted clicks across
-        // re-renders ("casino" selection).
+        // 3. Fallback: defer to AppKit's native hit-testing and resolve the
+        // enclosing surface. This handles rare mid-layout/reparent cases where
+        // the fast layer rect path does not yet have a settled surface frame.
         let native = super.hitTest(point)
         if let surface = enclosingSurface(of: native) { return surface }
         return native
