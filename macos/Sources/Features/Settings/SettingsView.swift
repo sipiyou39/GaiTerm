@@ -25,6 +25,10 @@ private enum S {
     static let accent = Color(red: 0.42, green: 0.64, blue: 0.96)
 }
 
+private extension NSWindow.Level {
+    static let gaiSettings = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+}
+
 // MARK: - Window
 
 /// Presents the settings window (App menu → Settings…). One window for the
@@ -45,11 +49,15 @@ final class GaiSettingsWindowController {
             window.isMovableByWindowBackground = true
             window.backgroundColor = NSColor(S.bg)
             window.appearance = NSAppearance(named: .darkAqua)
+            window.level = .gaiSettings
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.isReleasedWhenClosed = false
             window.center()
             self.window = window
         }
+        window?.level = .gaiSettings
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 }

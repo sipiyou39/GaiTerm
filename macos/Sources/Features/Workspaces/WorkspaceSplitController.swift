@@ -285,6 +285,8 @@ final class GaiSplitController {
                 view: newView, at: at, direction: direction)
         } catch {
             Ghostty.logger.warning("failed to insert split: \(error, privacy: .public)")
+            store.detachSession(for: newView, in: workspace)
+            newView.gaiReleaseTerminalSurface()
             return nil
         }
         onTopologyDidChange?()
@@ -387,7 +389,7 @@ final class GaiSplitController {
         let newTree = workspace.surfaceTree.removing(node)
         workspace.surfaceTree = newTree
         store.detachSession(for: surface, in: workspace)
-        parkSurface(surface)
+        surface.gaiReleaseTerminalSurface()
         onTopologyDidChange?()
 
         if let next = newTree.root?.leftmostLeaf() {
@@ -422,10 +424,11 @@ final class GaiSplitController {
         } catch {
             Ghostty.logger.warning("failed to reopen pane: \(error, privacy: .public)")
             store.detachSession(for: newView, in: workspace)
+            newView.gaiReleaseTerminalSurface()
             return nil
         }
         store.detachSession(for: oldView, in: workspace)
-        parkSurface(oldView)
+        oldView.gaiReleaseTerminalSurface()
         onTopologyDidChange?()
         focus(newView)
         return newView

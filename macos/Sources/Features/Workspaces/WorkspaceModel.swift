@@ -352,9 +352,20 @@ final class GaiWorkspaceStore: ObservableObject {
     }
 
     func removeWorkspace(_ id: GaiWorkspace.ID) {
+        if let workspace = workspaces.first(where: { $0.id == id }) {
+            releaseAllTerminalSurfaces(in: workspace)
+        }
         workspaces.removeAll { $0.id == id }
         if openWorkspaceID == id { openWorkspaceID = nil }
         save()
+    }
+
+    private func releaseAllTerminalSurfaces(in workspace: GaiWorkspace) {
+        for view in workspace.surfaceTree {
+            view.gaiReleaseTerminalSurface()
+        }
+        workspace.surfaceTree = .init()
+        workspace.sessions.removeAll()
     }
 
     func workspace(for id: GaiWorkspace.ID?) -> GaiWorkspace? {

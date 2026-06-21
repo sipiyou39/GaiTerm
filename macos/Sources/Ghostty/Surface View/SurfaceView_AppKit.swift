@@ -360,6 +360,23 @@ extension Ghostty {
             registerForDraggedTypes(Array(Self.dropTypes))
         }
 
+        /// Immediately release the embedded Ghostty surface used by a GaiTerm
+        /// pane. Removing the pane from SwiftUI is not enough: as long as this
+        /// wrapper owns `surfaceModel`, the PTY and child process can keep
+        /// running. Dropping the model runs `ghostty_surface_free`.
+        func gaiReleaseTerminalSurface() {
+            guard surfaceModel != nil else { return }
+
+            if let surface {
+                ghostty_surface_set_focus(surface, false)
+                ghostty_surface_set_occlusion(surface, false)
+            }
+            focused = false
+            suppressNextLeftMouseUp = false
+            SecureInput.shared.removeScoped(ObjectIdentifier(self))
+            surfaceModel = nil
+        }
+
         required init?(coder: NSCoder) {
             fatalError("init(coder:) is not supported for this view")
         }
