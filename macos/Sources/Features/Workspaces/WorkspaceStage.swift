@@ -613,6 +613,7 @@ private struct GaiPaneView: View {
                     splits: splits)
                 .frame(maxWidth: layout.titleMaxWidth, alignment: .leading)
                 .clipped()
+                .layoutPriority(-4)
             }
             Spacer(minLength: 0)
             if layout.showsDirectory {
@@ -637,24 +638,32 @@ private struct GaiPaneView: View {
             }
             // Always visible and therefore always hittable: a control that
             // only mounts on hover can miss the very click it exists for.
-            if layout.showsSplitControls {
+            HStack(spacing: layout.controlSpacing) {
                 GaiPaneIconButton(
                     symbol: "rectangle.split.2x1",
-                    help: "Split right (⌘D)") { onSplit(.right) }
+                    help: "Split right (⌘D)",
+                    size: layout.controlSize) { onSplit(.right) }
                 GaiPaneIconButton(
                     symbol: "rectangle.split.1x2",
-                    help: "Split down (⇧⌘D)") { onSplit(.down) }
-            }
-            if layout.showsZoom, isSplit {
+                    help: "Split down (⇧⌘D)",
+                    size: layout.controlSize) { onSplit(.down) }
+                if isSplit {
+                    GaiPaneIconButton(
+                        symbol: isZoomed
+                            ? "arrow.down.right.and.arrow.up.left"
+                            : "arrow.up.left.and.arrow.down.right",
+                        help: isZoomed ? "Restore size" : "Fill the card",
+                        emphasized: isZoomed,
+                        size: layout.controlSize,
+                        action: onToggleZoom)
+                }
                 GaiPaneIconButton(
-                    symbol: isZoomed
-                        ? "arrow.down.right.and.arrow.up.left"
-                        : "arrow.up.left.and.arrow.down.right",
-                    help: isZoomed ? "Restore size" : "Fill the card",
-                    emphasized: isZoomed,
-                    action: onToggleZoom)
+                    symbol: "xmark",
+                    help: "Close terminal",
+                    size: layout.controlSize,
+                    action: onClose)
             }
-            GaiPaneIconButton(symbol: "xmark", help: "Close terminal", action: onClose)
+            .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(100)
         }
         .padding(.leading, layout.edgePadding)
@@ -676,6 +685,7 @@ private struct GaiPaneHeaderLayout {
     let width: CGFloat
 
     var edgePadding: CGFloat {
+        if width < 120 { return 2 }
         if width < 150 { return 4 }
         if width < 260 { return 6 }
         return 9
@@ -685,16 +695,28 @@ private struct GaiPaneHeaderLayout {
         width < 260 ? 4 : 7
     }
 
-    var showsTitle: Bool { width >= 74 }
-    var showsDirectory: Bool { width >= 300 }
-    var showsBranch: Bool { width >= 440 }
-    var showsSplitControls: Bool { width >= 250 }
-    var showsZoom: Bool { width >= 190 }
+    var controlSpacing: CGFloat {
+        if width < 120 { return 2 }
+        if width < 180 { return 3 }
+        return 4
+    }
+
+    var controlSize: CGFloat {
+        if width < 100 { return 13 }
+        if width < 140 { return 15 }
+        return 18
+    }
+
+    var showsTitle: Bool { width >= 118 }
+    var showsDirectory: Bool { width >= 360 }
+    var showsBranch: Bool { width >= 520 }
 
     var titleMaxWidth: CGFloat? {
-        if width < 140 { return max(0, width - 34) }
-        if width < 250 { return max(0, width - 52) }
-        return nil
+        let reservedControls = controlSize * 4 + controlSpacing * 3 + edgePadding * 2
+        let available = max(0, width - reservedControls - spacing)
+        if width < 180 { return available }
+        if width < 300 { return min(available, 90) }
+        return min(available, 140)
     }
 
     var directoryMaxWidth: CGFloat {
@@ -854,13 +876,14 @@ private struct GaiPaneIconButton: View {
     let symbol: String
     let help: String
     var emphasized: Bool = false
+    var size: CGFloat = 18
     let action: () -> Void
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: 8.5, weight: .bold))
+            .font(.system(size: max(7, size * 0.47), weight: .bold))
             .foregroundStyle(.white.opacity(emphasized ? 0.95 : 0.62))
-            .frame(width: 18, height: 18)
+            .frame(width: size, height: size)
             .background(Circle().fill(Color.white.opacity(emphasized ? 0.14 : 0)))
             .overlay(GaiClickCatcher(action: action))
             .help(help)
