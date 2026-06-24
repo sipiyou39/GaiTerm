@@ -53,7 +53,7 @@
 			<string>GaiTerm Notification</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>gaiterm</string>
+				<string>$(GAITERM_NOTIFY_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>

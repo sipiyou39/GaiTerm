@@ -722,6 +722,7 @@
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within GaiTerm would like to use speech recognition.";
 				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within GaiTerm requires elevated privileges.";
 				INFOPLIST_PREPROCESS = YES;
+				GAITERM_NOTIFY_URL_SCHEME = gaiterm;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -1119,6 +1120,7 @@
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within GaiTerm would like to use speech recognition.";
 				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within GaiTerm requires elevated privileges.";
 				INFOPLIST_PREPROCESS = YES;
+				GAITERM_NOTIFY_URL_SCHEME = "gaiterm-debug";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -1174,6 +1176,7 @@
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within GaiTerm would like to use speech recognition.";
 				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within GaiTerm requires elevated privileges.";
 				INFOPLIST_PREPROCESS = YES;
+				GAITERM_NOTIFY_URL_SCHEME = gaiterm;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

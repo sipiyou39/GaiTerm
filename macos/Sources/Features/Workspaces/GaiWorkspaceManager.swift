@@ -1551,13 +1551,19 @@ enum GaiAgentHookInstaller {
     private static let codexStopCommand =
         "/bin/sh -c ': \(codexHookMarker); cat >/dev/null 2>&1 || true; " +
         "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
-        "/usr/bin/open -g \"gaiterm://notify?surface=$surface&title=Codex&body=Turn%20complete\" " +
+        "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+        "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+        "url=\"$scheme://notify?surface=$surface&title=Codex&body=Turn%20complete\"; " +
+        "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
         ">/dev/null 2>&1 || true; fi; printf \"{}\\n\"'"
 
     private static let claudeStopCommand =
         "/bin/sh -c ': \(claudeHookMarker); cat >/dev/null 2>&1 || true; " +
         "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
-        "/usr/bin/open -g \"gaiterm://notify?surface=$surface&title=Claude%20Code&body=Turn%20complete\" " +
+        "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+        "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+        "url=\"$scheme://notify?surface=$surface&title=Claude%20Code&body=Turn%20complete\"; " +
+        "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
         ">/dev/null 2>&1 || true; fi'"
 
     static func installIfNeeded() {

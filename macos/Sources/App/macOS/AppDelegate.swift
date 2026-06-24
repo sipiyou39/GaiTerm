@@ -467,7 +467,9 @@ class AppDelegate: NSObject,
 
     @discardableResult
     private func handleGaiTermURL(_ url: URL) -> Bool {
-        guard url.scheme == "gaiterm", url.host == "notify" else { return false }
+        let expectedScheme =
+            Bundle.main.bundleIdentifier == "com.sipiyou.gaiterm.debug" ? "gaiterm-debug" : "gaiterm"
+        guard url.scheme == expectedScheme, url.host == "notify" else { return false }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return true }
         let items = components.queryItems ?? []
 
