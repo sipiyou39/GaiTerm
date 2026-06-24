@@ -10,6 +10,7 @@ private struct GaiUpdateReleaseNotes {
     static let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1"
 
     static let today: [String] = [
+        "Hotfix 1.0.7 : les notifications Codex et Claude ciblent maintenant explicitement l'app qui a lance le terminal, pour eviter qu'une build Debug s'ouvre a la place de la Release sur les machines de developpement.",
         "Les panes Codex et Claude peuvent maintenant notifier quand ils ont fini et attendent ton input.",
         "Rouge signifie qu'une CLI a repondu et que la reponse n'a pas encore ete lue.",
         "Orange signifie que la CLI attend toujours ton input. L'orange reste visible apres ouverture de la notification, puis disparait quand tu renvoies un travail avec Entree.",
