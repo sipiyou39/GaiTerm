@@ -518,9 +518,15 @@ private struct GaiWorkspaceRow: View {
 
     private var accent: Color { workspace.accentColor }
 
-    /// How many CLIs in this workspace are waiting for the user (the bell).
+    /// Unread CLI notifications in this workspace.
+    private var unreadCount: Int {
+        workspace.unreadNotificationCount
+    }
+
+    /// Panes known to be waiting for user input, even if their notification was
+    /// already opened/read or muted.
     private var waitingCount: Int {
-        workspace.sessions.filter { $0.attention == .needsInput }.count
+        workspace.waitingSessionCount
     }
 
     var body: some View {
@@ -547,15 +553,28 @@ private struct GaiWorkspaceRow: View {
                 .lineLimit(1)
             Spacer(minLength: 0)
 
-            // The ONLY thing allowed on a row besides its identity: a red badge
-            // counting CLIs waiting for input in this workspace.
-            if waitingCount > 0 {
-                Text("\(waitingCount)")
+            // The ONLY thing allowed on a row besides its identity: a compact
+            // attention badge for CLI notifications / idle agents.
+            if unreadCount > 0 {
+                Text("\(unreadCount)")
                     .font(.system(size: 10.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 5)
                     .frame(minWidth: 18, minHeight: 18)
                     .background(Capsule().fill(Color(red: 1, green: 0.27, blue: 0.27)))
+            } else if waitingCount > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark")
+                        .font(.system(size: 8, weight: .black, design: .rounded))
+                    if waitingCount > 1 {
+                        Text("\(waitingCount)")
+                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    }
+                }
+                .foregroundStyle(.black.opacity(0.75))
+                .padding(.horizontal, 5)
+                .frame(minWidth: 18, minHeight: 18)
+                .background(Capsule().fill(Color(red: 1, green: 0.68, blue: 0.22)))
             }
         }
         .padding(.leading, 6)

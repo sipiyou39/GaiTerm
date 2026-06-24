@@ -1,6 +1,8 @@
 import AppKit
+import ApplicationServices
 import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 /// UserDefaults keys for GaiTerm's GUI settings. Shared between the settings UI
 /// and the features that consume them.
@@ -15,6 +17,14 @@ enum GaiPreferenceKey {
     static let editorWrapLines = "GaiEditorWrapLines"
     /// Restore saved workspaces on launch (vs. start empty).
     static let restoreWorkspaces = "GaiRestoreWorkspaces"
+    /// Show macOS banners for CLI notifications.
+    static let agentDesktopNotifications = "GaiAgentDesktopNotifications"
+    /// Play an app sound when a CLI notification arrives.
+    static let agentNotificationSoundEnabled = "GaiAgentNotificationSoundEnabled"
+    /// Selected bundled notification sound identifier.
+    static let agentNotificationSoundName = "GaiAgentNotificationSoundName"
+    /// Selected notification sound volume, 0...1.
+    static let agentNotificationSoundVolume = "GaiAgentNotificationSoundVolume"
 }
 
 /// Settings design tokens (dark, flat — matches the drawer/stage).
@@ -67,6 +77,7 @@ final class GaiSettingsWindowController {
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case appearance = "Appearance"
+    case notifications = "Notifications"
     case editor = "Editor"
     case permissions = "Permissions"
     case updates = "Updates"
@@ -76,6 +87,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .appearance: return "paintbrush"
+        case .notifications: return "bell.badge"
         case .editor: return "chevron.left.forwardslash.chevron.right"
         case .permissions: return "lock.shield"
         case .updates: return "arrow.down.circle"
@@ -162,6 +174,7 @@ struct SettingsView: View {
         switch category {
         case .general: GeneralSettings()
         case .appearance: AppearanceSettings()
+        case .notifications: NotificationsSettings()
         case .editor: EditorSettings()
         case .permissions: PermissionsSettings()
         case .updates: UpdatesSettings()
@@ -236,6 +249,108 @@ private struct SettingsToggle: View {
     }
 }
 
+// MARK: - Notification sounds
+
+struct GaiNotificationSoundChoice: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let fileName: String
+}
+
+enum GaiNotificationSoundLibrary {
+    static let defaultID = "gaiterm-notify-01"
+    static let defaultVolume = 0.72
+
+    static let sounds: [GaiNotificationSoundChoice] = [
+        .init(id: "gaiterm-notify-01", displayName: "Signal 1", fileName: "gaiterm-notify-01"),
+        .init(id: "gaiterm-notify-02", displayName: "Signal 2", fileName: "gaiterm-notify-02"),
+        .init(id: "gaiterm-notify-03", displayName: "Signal 3", fileName: "gaiterm-notify-03"),
+        .init(id: "gaiterm-notify-04", displayName: "Signal 4", fileName: "gaiterm-notify-04"),
+        .init(id: "gaiterm-notify-05", displayName: "Signal 5", fileName: "gaiterm-notify-05"),
+        .init(id: "gaiterm-notify-06", displayName: "Signal 6", fileName: "gaiterm-notify-06"),
+        .init(id: "gaiterm-notify-07", displayName: "Signal 7", fileName: "gaiterm-notify-07"),
+        .init(id: "gaiterm-notify-08", displayName: "Signal 8", fileName: "gaiterm-notify-08"),
+        .init(id: "gaiterm-notify-09", displayName: "Signal 9", fileName: "gaiterm-notify-09"),
+    ]
+
+    static func sound(for id: String) -> GaiNotificationSoundChoice {
+        sounds.first { $0.id == id } ?? sounds[0]
+    }
+
+    static func soundURL(for id: String) -> URL? {
+        let choice = sound(for: id)
+        return Bundle.main.url(
+            forResource: choice.fileName,
+            withExtension: "caf",
+            subdirectory: "Sounds")
+    }
+
+    static func desktopNotificationsEnabled() -> Bool {
+        boolValue(for: GaiPreferenceKey.agentDesktopNotifications, defaultValue: true)
+    }
+
+    static func soundEnabled() -> Bool {
+        boolValue(for: GaiPreferenceKey.agentNotificationSoundEnabled, defaultValue: true)
+    }
+
+    static func selectedSoundID() -> String {
+        let raw = UserDefaults.standard.string(forKey: GaiPreferenceKey.agentNotificationSoundName)
+        guard let raw, sounds.contains(where: { $0.id == raw }) else { return defaultID }
+        return raw
+    }
+
+    static func selectedVolume() -> Double {
+        guard let number = UserDefaults.standard.object(
+            forKey: GaiPreferenceKey.agentNotificationSoundVolume) as? NSNumber
+        else { return defaultVolume }
+        return min(1, max(0, number.doubleValue))
+    }
+
+    private static func boolValue(for key: String, defaultValue: Bool) -> Bool {
+        guard let number = UserDefaults.standard.object(forKey: key) as? NSNumber else {
+            return defaultValue
+        }
+        return number.boolValue
+    }
+}
+
+final class GaiNotificationSoundPlayer: NSObject, NSSoundDelegate {
+    static let shared = GaiNotificationSoundPlayer()
+
+    private var currentSound: NSSound?
+
+    func playSelectedNotificationSound() {
+        guard GaiNotificationSoundLibrary.soundEnabled() else { return }
+        play(
+            id: GaiNotificationSoundLibrary.selectedSoundID(),
+            volume: GaiNotificationSoundLibrary.selectedVolume())
+    }
+
+    func preview(id: String, volume: Double) {
+        play(id: id, volume: volume)
+    }
+
+    private func play(id: String, volume: Double) {
+        DispatchQueue.main.async {
+            guard let url = GaiNotificationSoundLibrary.soundURL(for: id),
+                  let sound = NSSound(contentsOf: url, byReference: false)
+            else { return }
+
+            self.currentSound?.stop()
+            sound.volume = Float(min(1, max(0, volume)))
+            sound.delegate = self
+            self.currentSound = sound
+            sound.play()
+        }
+    }
+
+    func sound(_ sound: NSSound, didFinishPlaying finishedPlaying: Bool) {
+        if currentSound === sound {
+            currentSound = nil
+        }
+    }
+}
+
 // MARK: - General
 
 private struct GeneralSettings: View {
@@ -288,6 +403,66 @@ private struct AppearanceSettings: View {
     }
 }
 
+// MARK: - Notifications
+
+private struct NotificationsSettings: View {
+    @AppStorage(GaiPreferenceKey.agentDesktopNotifications) private var desktopNotifications = true
+    @AppStorage(GaiPreferenceKey.agentNotificationSoundEnabled) private var soundEnabled = true
+    @AppStorage(GaiPreferenceKey.agentNotificationSoundName) private var soundID = GaiNotificationSoundLibrary.defaultID
+    @AppStorage(GaiPreferenceKey.agentNotificationSoundVolume) private var volume = GaiNotificationSoundLibrary.defaultVolume
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection(title: "Notifications") {
+                SettingsToggle(
+                    title: "Desktop notifications",
+                    subtitle: "Show a macOS banner when Codex or Claude finishes in a background pane.",
+                    first: true,
+                    isOn: $desktopNotifications)
+            }
+
+            SettingsSection(title: "Sounds") {
+                SettingsToggle(
+                    title: "Play notification sound",
+                    subtitle: "Use the selected GaiTerm sound for CLI completion notifications.",
+                    first: true,
+                    isOn: $soundEnabled)
+                SettingsRow(title: "Sound", subtitle: "Choose the bundled completion sound.") {
+                    Picker("", selection: $soundID) {
+                        ForEach(GaiNotificationSoundLibrary.sounds) { sound in
+                            Text(sound.displayName).tag(sound.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+                SettingsRow(title: "Volume", subtitle: "Preview the exact notification volume.") {
+                    HStack(spacing: 10) {
+                        Slider(value: $volume, in: 0...1)
+                            .frame(width: 126)
+                        Text("\(Int((volume * 100).rounded()))%")
+                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .frame(width: 38, alignment: .trailing)
+                        Button {
+                            GaiNotificationSoundPlayer.shared.preview(id: soundID, volume: volume)
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 26, height: 24)
+                                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(S.accent.opacity(0.85)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Test sound")
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Editor
 
 private struct EditorSettings: View {
@@ -331,15 +506,75 @@ private struct EditorSettings: View {
 
 private struct PermissionsSettings: View {
     @State private var fullDisk = false
+    @State private var accessibilityTrusted = false
+    @State private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    @State private var notificationAlertSetting: UNNotificationSetting = .notSupported
+    @State private var notificationBadgeSetting: UNNotificationSetting = .notSupported
+    @State private var notificationSoundSetting: UNNotificationSetting = .notSupported
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            SettingsSection(title: "Notifications") {
+                SettingsRow(
+                    title: "macOS notifications",
+                    subtitle: "Required for desktop banners when Codex or Claude finishes in a background pane.",
+                    first: true) {
+                    notificationStatusBadge
+                }
+                SettingsRow(
+                    title: "Activate notifications",
+                    subtitle: notificationActionSubtitle) {
+                    actionButton(notificationActionTitle, action: activateNotifications)
+                }
+                SettingsRow(
+                    title: "Banners",
+                    subtitle: "Allows the top-right macOS notification banner.") {
+                    PermissionStatusBadge(
+                        title: notificationAlertSetting == .enabled ? "Ready" : "Off",
+                        state: notificationAlertSetting == .enabled ? .granted : .blocked)
+                }
+                SettingsRow(
+                    title: "Dock badge",
+                    subtitle: "Allows macOS notification badge support; GaiTerm also updates its Dock count directly.") {
+                    PermissionStatusBadge(
+                        title: notificationBadgeSetting == .enabled ? "Ready" : "Off",
+                        state: notificationBadgeSetting == .enabled ? .granted : .blocked)
+                }
+                SettingsRow(
+                    title: "Notification sound",
+                    subtitle: "Allows sound on macOS notifications. GaiTerm custom sounds are controlled in Notifications → Sounds.") {
+                    PermissionStatusBadge(
+                        title: notificationSoundSetting == .enabled ? "Ready" : "Off",
+                        state: notificationSoundSetting == .enabled ? .granted : .blocked)
+                }
+            }
+
+            SettingsSection(title: "Keyboard shortcut") {
+                SettingsRow(
+                    title: "Global double Option",
+                    subtitle: "Required for opening and closing GaiTerm with a fast double Option tap while another app is active.",
+                    first: true) {
+                    PermissionStatusBadge(
+                        title: accessibilityTrusted ? "Granted" : "Not granted",
+                        state: accessibilityTrusted ? .granted : .blocked)
+                }
+                SettingsRow(
+                    title: "Activate keyboard access",
+                    subtitle: "macOS requires Accessibility approval for global keyboard monitoring.") {
+                    actionButton(
+                        accessibilityTrusted ? "Open Accessibility Settings" : "Allow Accessibility",
+                        action: activateAccessibility)
+                }
+            }
+
             SettingsSection(title: "File access") {
                 SettingsRow(
                     title: "Full Disk Access",
                     subtitle: "Grant this once and macOS stops asking for your Documents, Desktop and other folders every time the file explorer or a terminal touches them.",
                     first: true) {
-                    statusBadge
+                    PermissionStatusBadge(
+                        title: fullDisk ? "Granted" : "Not granted",
+                        state: fullDisk ? .granted : .blocked)
                 }
                 SettingsRow(
                     title: "Open System Settings",
@@ -359,18 +594,33 @@ private struct PermissionsSettings: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 2)
         }
-        .onAppear { fullDisk = Self.hasFullDiskAccess() }
+        .onAppear { refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionStatus()
+        }
     }
 
-    private var statusBadge: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(fullDisk ? Color(red: 0.35, green: 0.8, blue: 0.45) : Color(red: 0.95, green: 0.65, blue: 0.3))
-                .frame(width: 7, height: 7)
-            Text(fullDisk ? "Granted" : "Not granted")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
+    private var notificationStatusBadge: some View {
+        switch notificationAuthorization {
+        case .authorized, .provisional, .ephemeral:
+            PermissionStatusBadge(title: "Granted", state: .granted)
+        case .denied:
+            PermissionStatusBadge(title: "Denied", state: .blocked)
+        case .notDetermined:
+            PermissionStatusBadge(title: "Not requested", state: .pending)
+        @unknown default:
+            PermissionStatusBadge(title: "Unknown", state: .pending)
         }
+    }
+
+    private var notificationActionTitle: String {
+        notificationAuthorization == .notDetermined ? "Allow Notifications" : "Open Notifications Settings"
+    }
+
+    private var notificationActionSubtitle: String {
+        notificationAuthorization == .notDetermined
+            ? "Ask macOS for banners, sounds and badge permission now."
+            : "Change banners, sounds and badges in macOS Settings."
     }
 
     private func actionButton(_ title: String, filled: Bool = true, action: @escaping () -> Void) -> some View {
@@ -384,9 +634,62 @@ private struct PermissionsSettings: View {
                 .fill(filled ? S.accent.opacity(0.85) : Color.white.opacity(0.1)))
     }
 
+    private func activateNotifications() {
+        let center = UNUserNotificationCenter.current()
+        if notificationAuthorization == .notDetermined {
+            center.requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in
+                refreshNotificationStatus()
+            }
+        } else {
+            openNotificationSettings()
+        }
+    }
+
+    private func openNotificationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+        }
+    }
+
+    private func activateAccessibility() {
+        if !accessibilityTrusted {
+            let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString: true]
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+        openAccessibilitySettings()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            refreshPermissionStatus()
+        }
+    }
+
+    private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func openFullDiskAccess() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func refreshPermissionStatus() {
+        fullDisk = Self.hasFullDiskAccess()
+        accessibilityTrusted = AXIsProcessTrusted()
+        refreshNotificationStatus()
+    }
+
+    private func refreshNotificationStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                notificationAuthorization = settings.authorizationStatus
+                notificationAlertSetting = settings.alertSetting
+                notificationBadgeSetting = settings.badgeSetting
+                notificationSoundSetting = settings.soundSetting
+            }
         }
     }
 
@@ -401,6 +704,39 @@ private struct PermissionsSettings: View {
         }
         try? handle.close()
         return true
+    }
+}
+
+private enum PermissionBadgeState {
+    case granted
+    case pending
+    case blocked
+
+    var color: Color {
+        switch self {
+        case .granted:
+            return Color(red: 0.35, green: 0.8, blue: 0.45)
+        case .pending:
+            return Color(red: 0.95, green: 0.65, blue: 0.3)
+        case .blocked:
+            return Color(red: 1, green: 0.27, blue: 0.27)
+        }
+    }
+}
+
+private struct PermissionStatusBadge: View {
+    let title: String
+    let state: PermissionBadgeState
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: state == .granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(state.color)
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+        }
     }
 }
 

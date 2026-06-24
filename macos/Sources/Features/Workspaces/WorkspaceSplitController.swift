@@ -103,7 +103,12 @@ final class GaiSplitController {
         if config.workingDirectory == nil {
             config.workingDirectory = workspace.defaultDirectory?.path
         }
-        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        let surfaceID = UUID()
+        config.environmentVariables["GAITERM_WORKSPACE_ID"] = workspace.id.uuidString
+        config.environmentVariables["GAITERM_SURFACE_ID"] = surfaceID.uuidString
+        config.environmentVariables["GAITERM_NOTIFY_URL_SCHEME"] = "gaiterm"
+
+        let view = Ghostty.SurfaceView(app, baseConfig: config, uuid: surfaceID)
         store.attachSession(for: view, in: workspace)
         applyPerformanceLayerPolicy(view)
         applyTerminalBackground(view, in: workspace, active: false)

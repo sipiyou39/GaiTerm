@@ -38,9 +38,21 @@ class UpdateDriver: NSObject, SPUUserDriver {
     func showUpdateFound(with appcastItem: SUAppcastItem,
                          state: SPUUserUpdateState,
                          reply: @escaping @Sendable (SPUUserUpdateChoice) -> Void) {
-        viewModel.state = .updateAvailable(.init(appcastItem: appcastItem, reply: reply))
-        if !hasUnobtrusiveTarget {
-            standard.showUpdateFound(with: appcastItem, state: state, reply: reply)
+        _ = state
+        let update = UpdateState.UpdateAvailable(
+            appcastItem: appcastItem,
+            reply: { [weak viewModel] choice in
+                if choice != .install {
+                    viewModel?.state = .idle
+                }
+                reply(choice)
+            })
+        viewModel.state = .updateAvailable(update)
+        DispatchQueue.main.async {
+            GaiUpdateWindowController.shared.showUpdateAvailable(
+                appcastItem: appcastItem,
+                install: { update.reply(.install) },
+                remindLater: { update.reply(.dismiss) })
         }
     }
 
@@ -164,7 +176,10 @@ class UpdateDriver: NSObject, SPUUserDriver {
     }
 
     func showUpdateInstalledAndRelaunched(_ relaunched: Bool, acknowledgement: @escaping () -> Void) {
-        standard.showUpdateInstalledAndRelaunched(relaunched, acknowledgement: acknowledgement)
+        DispatchQueue.main.async {
+            GaiUpdateWindowController.shared.showReleaseNotes()
+        }
+        acknowledgement()
         viewModel.state = .idle
     }
 

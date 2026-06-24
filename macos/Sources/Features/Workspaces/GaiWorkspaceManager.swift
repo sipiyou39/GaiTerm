@@ -1,8 +1,11 @@
 #if os(macOS)
 import AppKit
 import Combine
+import CryptoKit
+import Darwin
 import GhosttyKit
 import SwiftUI
+import UserNotifications
 
 /// Transient UI state for the floating workspaces system.
 final class GaiWorkspaceUIModel: ObservableObject {
@@ -145,6 +148,8 @@ struct GaiTerminalPaneRGB: Equatable {
 extension Notification.Name {
     static let gaiSurfaceDidRequestImmediateFocus =
         Notification.Name("com.sipiyou.gaiterm.surfaceDidRequestImmediateFocus")
+    static let gaiSurfaceDidReceiveUserInput =
+        Notification.Name("com.sipiyou.gaiterm.surfaceDidReceiveUserInput")
 }
 
 /// Stage hosting view: takes over hit-testing at the root so header controls
@@ -285,6 +290,7 @@ final class GaiWorkspaceManager {
     private var cancellables: Set<AnyCancellable> = []
     private var observersRegistered = false
     private var terminalBackgrounds: [ObjectIdentifier: GaiTerminalPaneRGB] = [:]
+    private var pendingGenericExternalNotifications: [ObjectIdentifier: DispatchWorkItem] = [:]
 
     /// Transparent margins around the slab in the open frame so the glass can
     /// cast its light and shadow without being clipped at the window edge.
@@ -300,6 +306,12 @@ final class GaiWorkspaceManager {
             .sink { [weak self] notification in
                 guard let surface = notification.object as? Ghostty.SurfaceView else { return }
                 self?.applyImmediateFocus(to: surface)
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: .gaiSurfaceDidReceiveUserInput)
+            .sink { [weak self] notification in
+                guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+                self?.store.markUserReturnedToWork(for: surface)
             }
             .store(in: &cancellables)
     }
@@ -357,8 +369,18 @@ final class GaiWorkspaceManager {
     }
 
     func focusSurface(_ surface: Ghostty.SurfaceView) {
+        let workspace = splits.workspace(containing: surface)
+        if let workspace {
+            store.openWorkspaceID = workspace.id
+            ui.selectedWorkspaceID = workspace.id
+        }
+        if ui.stageShowsEditor { ui.stageShowsEditor = false }
         showStage()
-        Ghostty.moveFocus(to: surface)
+        DispatchQueue.main.async { [weak self, weak surface] in
+            guard let self, let surface else { return }
+            Ghostty.moveFocus(to: surface)
+            self.applyImmediateFocus(to: surface)
+        }
     }
 
     /// Global/local shortcut: double-tap Option quickly to open or close the
@@ -397,6 +419,44 @@ final class GaiWorkspaceManager {
         for surface in terminalSurfaces {
             closeSurface(surface)
         }
+    }
+
+    @discardableResult
+    func recordExternalNotification(
+        surfaceID: UUID,
+        title: String,
+        body: String
+    ) -> Bool {
+        guard let surface = surface(for: surfaceID) else { return false }
+        guard !isSurfaceCurrentlyViewed(surface) else { return true }
+        let workspace = splits.workspace(containing: surface)
+        let session = workspace?.session(for: surface)
+        let notificationTitle = title.isEmpty ? (session?.name ?? "Terminal") : title
+        let recorded = store.recordNotification(
+            for: surface,
+            title: notificationTitle,
+            body: body,
+            attention: .needsInput)
+        handleAutoFocusNotification(surface, workspace: workspace, session: session)
+        let shouldInterrupt = recorded && (session?.notificationsEnabled ?? true)
+
+        if isGenericTurnComplete(title: notificationTitle, body: body) {
+            scheduleGenericNotificationFallback(
+                surface,
+                workspace: workspace,
+                title: notificationTitle,
+                body: body,
+                shouldInterrupt: shouldInterrupt)
+        } else if shouldInterrupt {
+            cancelGenericNotificationFallback(for: surface)
+            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
+            deliverSystemNotification(
+                surface,
+                workspace: workspace,
+                title: notificationTitle,
+                body: body)
+        }
+        return recorded
     }
 
     private var allWorkspaces: [GaiWorkspace] {
@@ -529,6 +589,9 @@ final class GaiWorkspaceManager {
                     active: focusToneEnabled && isRenderFocused)
             }
         }
+        if let renderFocused, canRenderStage {
+            store.markNotificationsRead(for: renderFocused)
+        }
         pruneTerminalBackgroundCache()
     }
 
@@ -561,6 +624,9 @@ final class GaiWorkspaceManager {
             accent: accent,
             tinted: tintPanels,
             active: focusToneEnabled && isTargetVisible)
+        if isTargetVisible {
+            store.markNotificationsRead(for: target)
+        }
     }
 
     private func updateTerminalBackground(
@@ -1097,6 +1163,30 @@ final class GaiWorkspaceManager {
             .sink { [weak self] _ in self?.updateSurfacePerformanceState() }
             .store(in: &cancellables)
 
+        NotificationCenter.default
+            .publisher(for: .gaiTerminalNotificationDidArrive)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                self?.handleTerminalNotification(notification)
+            }
+            .store(in: &cancellables)
+
+        store.$unreadNotificationCount
+            .receive(on: RunLoop.main)
+            .sink { [weak self] count in
+                self?.updateDockNotificationBadge(count)
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default
+            .publisher(for: .ghosttyBellDidRing)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+                self?.handleTerminalBell(surface)
+            }
+            .store(in: &cancellables)
+
         // Resize if the workspace count changes, and give any freshly created
         // workspace its terminal right away (so opening it never jumps).
         store.$workspaces
@@ -1184,6 +1274,232 @@ final class GaiWorkspaceManager {
         }
     }
 
+    private func handleTerminalNotification(_ notification: Notification) {
+        guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+        guard !isSurfaceCurrentlyViewed(surface) else { return }
+
+        let title = notification.userInfo?[Notification.Name.GaiTerminalNotificationTitleKey] as? String
+        let body = notification.userInfo?[Notification.Name.GaiTerminalNotificationBodyKey] as? String
+        let workspace = splits.workspace(containing: surface)
+        let session = workspace?.session(for: surface)
+        let notificationTitle = if let title, !title.isEmpty {
+            title
+        } else {
+            session?.name ?? "Terminal"
+        }
+
+        let notificationBody = body ?? ""
+        let recorded = store.recordNotification(
+            for: surface,
+            title: notificationTitle,
+            body: notificationBody,
+            attention: .needsInput)
+        handleAutoFocusNotification(surface, workspace: workspace, session: session)
+        let shouldInterrupt = recorded && (session?.notificationsEnabled ?? true)
+
+        if isGenericTurnComplete(title: notificationTitle, body: notificationBody) {
+            scheduleGenericNotificationFallback(
+                surface,
+                workspace: workspace,
+                title: notificationTitle,
+                body: notificationBody,
+                shouldInterrupt: shouldInterrupt)
+            return
+        }
+
+        cancelGenericNotificationFallback(for: surface)
+        if shouldInterrupt {
+            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
+            deliverSystemNotification(
+                surface,
+                workspace: workspace,
+                title: notificationTitle,
+                body: notificationBody)
+        }
+    }
+
+    private func handleTerminalBell(_ surface: Ghostty.SurfaceView) {
+        guard !isSurfaceCurrentlyViewed(surface) else { return }
+        store.recordBell(for: surface)
+    }
+
+    private func isSurfaceCurrentlyViewed(_ surface: Ghostty.SurfaceView) -> Bool {
+        guard NSApp.isActive,
+              stagePanel?.isVisible == true,
+              ui.isStageExpanded,
+              ui.terminalRenderingAllowed,
+              !ui.isSliding,
+              !ui.stageShowsEditor
+        else { return false }
+
+        let visibleViews = visibleTerminalSurfaces(in: store.stageWorkspace)
+        guard visibleViews.contains(where: { $0 === surface }) else { return false }
+        return focusedSurface() === surface
+    }
+
+    private func deliverSystemNotification(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        title: String,
+        body: String
+    ) {
+        guard GaiNotificationSoundLibrary.desktopNotificationsEnabled() else { return }
+
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                self.scheduleSystemNotification(surface, workspace: workspace, title: title, body: body)
+
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
+                    if let error {
+                        Ghostty.logger.error("Error while requesting notification authorization: \(error, privacy: .public)")
+                    }
+                    guard granted else { return }
+                    self.scheduleSystemNotification(surface, workspace: workspace, title: title, body: body)
+                }
+
+            default:
+                return
+            }
+        }
+    }
+
+    private func scheduleSystemNotification(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        title: String,
+        body: String
+    ) {
+        let displayTitle = systemNotificationTitle(surface: surface, workspace: workspace, fallbackTitle: title)
+        DispatchQueue.main.async {
+            surface.showUserNotification(
+                title: displayTitle,
+                body: body,
+                subtitle: "",
+                requireFocus: false,
+                sound: nil)
+        }
+    }
+
+    private func scheduleGenericNotificationFallback(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        title: String,
+        body: String,
+        shouldInterrupt: Bool
+    ) {
+        guard shouldInterrupt else {
+            cancelGenericNotificationFallback(for: surface)
+            return
+        }
+
+        let key = ObjectIdentifier(surface)
+        pendingGenericExternalNotifications[key]?.cancel()
+
+        let work = DispatchWorkItem { [weak self, weak surface, weak workspace] in
+            guard let self, let surface else { return }
+            self.pendingGenericExternalNotifications[ObjectIdentifier(surface)] = nil
+            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
+            self.deliverSystemNotification(
+                surface,
+                workspace: workspace,
+                title: title,
+                body: body)
+        }
+        pendingGenericExternalNotifications[key] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+    }
+
+    private func handleAutoFocusNotification(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        session: GaiTerminalSession?
+    ) {
+        guard session?.autoFocusOnNotification == true else { return }
+        DispatchQueue.main.async { [weak self, weak surface, weak workspace] in
+            guard let self, let surface else { return }
+            self.focusSurfaceForAutoNotification(surface, workspace: workspace)
+        }
+    }
+
+    private func focusSurfaceForAutoNotification(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?
+    ) {
+        start()
+        if let workspace {
+            store.openWorkspaceID = workspace.id
+            ui.selectedWorkspaceID = workspace.id
+        }
+        if ui.stageShowsEditor { ui.stageShowsEditor = false }
+        showStage()
+        DispatchQueue.main.async { [weak self, weak surface] in
+            guard let self, let surface else { return }
+            Ghostty.moveFocus(to: surface)
+            self.applyImmediateFocus(to: surface)
+        }
+    }
+
+    private func cancelGenericNotificationFallback(for surface: Ghostty.SurfaceView) {
+        let key = ObjectIdentifier(surface)
+        pendingGenericExternalNotifications[key]?.cancel()
+        pendingGenericExternalNotifications[key] = nil
+    }
+
+    private func isGenericTurnComplete(title: String, body: String) -> Bool {
+        normalizedNotificationText(body) == "turn complete"
+            || normalizedNotificationText(title) == "turn complete"
+    }
+
+    private func normalizedNotificationText(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!"))
+            .lowercased()
+    }
+
+    private func systemNotificationTitle(
+        surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        fallbackTitle: String
+    ) -> String {
+        let cleanFallback = fallbackTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let workspace else { return cleanFallback.isEmpty ? "GaiTerm" : cleanFallback }
+        let workspaceName = workspace.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folderName = systemNotificationFolderName(surface: surface, workspace: workspace)
+
+        switch (workspaceName.isEmpty, folderName.isEmpty) {
+        case (false, false):
+            return "\(workspaceName) - \(folderName)"
+        case (false, true):
+            return workspaceName
+        case (true, false):
+            return folderName
+        case (true, true):
+            return cleanFallback.isEmpty ? "GaiTerm" : cleanFallback
+        }
+    }
+
+    private func systemNotificationFolderName(
+        surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace
+    ) -> String {
+        let path = surface.pwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? workspace.defaultDirectory?.path
+            ?? ""
+        guard !path.isEmpty else { return "" }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path == home { return "~" }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private func updateDockNotificationBadge(_ count: Int) {
+        NSApp.dockTile.badgeLabel = count > 0 ? "\(min(count, 99))" : nil
+        NSApp.dockTile.display()
+    }
+
     private func refreshGeometry() {
         recomputeCardHeight()
         snapPanel(open: ui.isExpanded)
@@ -1216,6 +1532,379 @@ final class GaiWorkspaceManager {
             ui.selectedWorkspaceID = target
         }
         return target
+    }
+}
+
+// MARK: - Agent notification hooks
+
+/// Installs the minimal CLI hooks GaiTerm needs to know when hosted agents are
+/// done and waiting for the user again. The commands no-op outside GaiTerm panes.
+enum GaiAgentHookInstaller {
+    private static let codexHookMarker = "gaiterm-codex-stop-notify"
+    private static let claudeHookMarker = "gaiterm-claude-stop-notify"
+
+    private static let codexFeatureBegin = "# gaiterm-codex-hooks-feature begin"
+    private static let codexFeatureEnd = "# gaiterm-codex-hooks-feature end"
+    private static let codexTrustBegin = "# gaiterm-codex-hook-trust begin"
+    private static let codexTrustEnd = "# gaiterm-codex-hook-trust end"
+
+    private static let codexStopCommand =
+        "/bin/sh -c ': \(codexHookMarker); cat >/dev/null 2>&1 || true; " +
+        "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
+        "/usr/bin/open -g \"gaiterm://notify?surface=$surface&title=Codex&body=Turn%20complete\" " +
+        ">/dev/null 2>&1 || true; fi; printf \"{}\\n\"'"
+
+    private static let claudeStopCommand =
+        "/bin/sh -c ': \(claudeHookMarker); cat >/dev/null 2>&1 || true; " +
+        "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
+        "/usr/bin/open -g \"gaiterm://notify?surface=$surface&title=Claude%20Code&body=Turn%20complete\" " +
+        ">/dev/null 2>&1 || true; fi'"
+
+    static func installIfNeeded() {
+        DispatchQueue.global(qos: .utility).async {
+            install("Codex") {
+                try installCodexStopHook()
+            }
+            install("Claude") {
+                try installClaudeStopHook()
+            }
+        }
+    }
+
+    private static func install(_ name: String, _ work: () throws -> Void) {
+        do {
+            try work()
+        } catch {
+            Ghostty.logger.error("Failed to install \(name, privacy: .public) notification hook: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func installCodexStopHook() throws {
+        let home = codexHome()
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        let hooksURL = home.appendingPathComponent("hooks.json", isDirectory: false)
+        var root = try readJSONObject(at: hooksURL)
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        var stopGroups = hooks["Stop"] as? [[String: Any]] ?? []
+        stopGroups = removingHookMarker(codexHookMarker, from: stopGroups)
+        stopGroups.append([
+            "hooks": [[
+                "type": "command",
+                "command": codexStopCommand,
+                "timeout": 5,
+            ]],
+        ])
+        hooks["Stop"] = stopGroups
+        root["hooks"] = hooks
+        try writeJSONObjectIfChanged(root, to: hooksURL)
+
+        let hookIndex = max(stopGroups.count - 1, 0)
+        let trustKey = "\(normalizedHookSourcePath(hooksURL.path)):stop:\(hookIndex):0"
+        let trustedHash = codexCommandHookHash(
+            eventLabel: "stop",
+            matcher: nil,
+            command: codexStopCommand,
+            timeout: 5,
+            statusMessage: nil)
+        try installCodexTrust(
+            in: home.appendingPathComponent("config.toml", isDirectory: false),
+            key: trustKey,
+            trustedHash: trustedHash)
+    }
+
+    private static func installClaudeStopHook() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        let settingsURL = home.appendingPathComponent("settings.local.json", isDirectory: false)
+        var root = try readJSONObject(at: settingsURL)
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        var stopGroups = hooks["Stop"] as? [[String: Any]] ?? []
+        stopGroups = removingHookMarker(claudeHookMarker, from: stopGroups)
+        stopGroups.append([
+            "matcher": "",
+            "hooks": [[
+                "type": "command",
+                "command": claudeStopCommand,
+            ]],
+        ])
+        hooks["Stop"] = stopGroups
+        root["hooks"] = hooks
+        try writeJSONObjectIfChanged(root, to: settingsURL)
+    }
+
+    private static func codexHome() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CODEX_HOME"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+    }
+
+    private static func readJSONObject(at url: URL) throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty else { return [:] }
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dictionary = object as? [String: Any] else { return [:] }
+        return dictionary
+    }
+
+    private static func writeJSONObjectIfChanged(_ object: [String: Any], to url: URL) throws {
+        var data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        data.append(0x0A)
+        try writeDataIfChanged(data, to: url)
+    }
+
+    private static func removingHookMarker(
+        _ marker: String,
+        from groups: [[String: Any]]
+    ) -> [[String: Any]] {
+        groups.compactMap { group in
+            var updated = group
+            guard var hookList = updated["hooks"] as? [[String: Any]] else { return updated }
+            hookList.removeAll { hook in
+                (hook["command"] as? String)?.contains(marker) == true
+            }
+            guard !hookList.isEmpty else { return nil }
+            updated["hooks"] = hookList
+            return updated
+        }
+    }
+
+    private static func installCodexTrust(in url: URL, key: String, trustedHash: String) throws {
+        let existing: String
+        if FileManager.default.fileExists(atPath: url.path) {
+            existing = try String(contentsOf: url, encoding: .utf8)
+        } else {
+            existing = ""
+        }
+
+        var lines = tomlLines(existing)
+        removeMarkedBlock(begin: codexFeatureBegin, end: codexFeatureEnd, from: &lines)
+        removeMarkedBlock(begin: codexTrustBegin, end: codexTrustEnd, from: &lines)
+        removeCodexTrustTable(forEscapedKey: tomlBasicStringContent(key), from: &lines)
+        installCodexHooksFeature(in: &lines)
+
+        if !lines.isEmpty, lines.last?.isEmpty == false {
+            lines.append("")
+        }
+        lines.append(codexTrustBegin)
+        lines.append("[hooks.state.\"\(tomlBasicStringContent(key))\"]")
+        lines.append("trusted_hash = \"\(tomlBasicStringContent(trustedHash))\"")
+        lines.append(codexTrustEnd)
+
+        let content = tomlContent(lines)
+        try writeDataIfChanged(Data(content.utf8), to: url)
+    }
+
+    private static func installCodexHooksFeature(in lines: inout [String]) {
+        let block = [codexFeatureBegin, "hooks = true", codexFeatureEnd]
+        let dottedBlock = [codexFeatureBegin, "features.hooks = true", codexFeatureEnd]
+
+        if let featuresStart = lines.firstIndex(where: { tomlLineIsTable("features", line: $0) }) {
+            let featuresEnd = tomlTableEndIndex(in: lines, after: featuresStart)
+            if let hooksIndex = (featuresStart + 1..<featuresEnd)
+                .first(where: { tomlLineDefinesKey("hooks", line: lines[$0]) }) {
+                if !tomlLineDefinesTrueKey("hooks", line: lines[hooksIndex]) {
+                    lines.replaceSubrange(hooksIndex...hooksIndex, with: block)
+                }
+            } else {
+                lines.insert(contentsOf: block, at: featuresStart + 1)
+            }
+            return
+        }
+
+        if let dottedIndex = lines.firstIndex(where: { tomlLineDefinesKey("features.hooks", line: $0) }) {
+            if !tomlLineDefinesTrueKey("features.hooks", line: lines[dottedIndex]) {
+                lines.replaceSubrange(dottedIndex...dottedIndex, with: dottedBlock)
+            }
+            return
+        }
+
+        if !lines.isEmpty, lines.last?.isEmpty == false {
+            lines.append("")
+        }
+        lines.append("[features]")
+        lines.append(contentsOf: block)
+    }
+
+    private static func removeMarkedBlock(begin: String, end: String, from lines: inout [String]) {
+        while let start = lines.firstIndex(of: begin) {
+            guard let stop = lines[start...].firstIndex(of: end) else {
+                lines.remove(at: start)
+                continue
+            }
+            lines.removeSubrange(start...stop)
+        }
+    }
+
+    private static func removeCodexTrustTable(forEscapedKey escapedKey: String, from lines: inout [String]) {
+        let header = "[hooks.state.\"\(escapedKey)\"]"
+        var index = 0
+        while index < lines.count {
+            guard lines[index].trimmingCharacters(in: .whitespacesAndNewlines) == header else {
+                index += 1
+                continue
+            }
+            let tableEnd = tomlTableEndIndex(in: lines, after: index)
+            lines.removeSubrange(index..<tableEnd)
+        }
+    }
+
+    private static func tomlLines(_ content: String) -> [String] {
+        content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    private static func tomlContent(_ lines: [String]) -> String {
+        var content = lines.joined(separator: "\n")
+        if !content.hasSuffix("\n") { content.append("\n") }
+        return content
+    }
+
+    private static func tomlTableEndIndex(in lines: [String], after start: Int) -> Int {
+        guard start + 1 < lines.count else { return lines.count }
+        for index in (start + 1)..<lines.count where tomlLineStartsTable(lines[index]) {
+            return index
+        }
+        return lines.count
+    }
+
+    private static func tomlLineStartsTable(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("[") && !trimmed.hasPrefix("#")
+    }
+
+    private static func tomlLineIsTable(_ table: String, line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespacesAndNewlines) == "[\(table)]"
+    }
+
+    private static func tomlLineDefinesKey(_ key: String, line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.hasPrefix("#") else { return false }
+        let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let rawKey = parts.first else { return false }
+        return rawKey.trimmingCharacters(in: .whitespacesAndNewlines) == key
+    }
+
+    private static func tomlLineDefinesTrueKey(_ key: String, line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0].trimmingCharacters(in: .whitespacesAndNewlines) == key else { return false }
+        return parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"
+    }
+
+    private static func codexCommandHookHash(
+        eventLabel: String,
+        matcher: String?,
+        command: String,
+        timeout: Int,
+        statusMessage: String?
+    ) -> String {
+        var handler: [String: Any] = [
+            "async": false,
+            "command": command,
+            "timeout": max(timeout, 1),
+            "type": "command",
+        ]
+        if let statusMessage {
+            handler["statusMessage"] = statusMessage
+        }
+        var identity: [String: Any] = [
+            "event_name": eventLabel,
+            "hooks": [handler],
+        ]
+        if let matcher {
+            identity["matcher"] = matcher
+        }
+
+        let data = (try? JSONSerialization.data(
+            withJSONObject: identity,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )) ?? Data()
+        return "sha256:" + SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func normalizedHookSourcePath(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        if let resolved = realPath(url.path) { return resolved }
+
+        let parent = url.deletingLastPathComponent()
+        if let resolvedParent = realPath(parent.path) {
+            return URL(fileURLWithPath: resolvedParent, isDirectory: true)
+                .appendingPathComponent(url.lastPathComponent)
+                .path
+        }
+        return url.path
+    }
+
+    private static func realPath(_ path: String) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        return path.withCString { pointer in
+            guard realpath(pointer, &buffer) != nil else { return nil }
+            return String(cString: buffer)
+        }
+    }
+
+    private static func tomlBasicStringContent(_ value: String) -> String {
+        var escaped = ""
+        escaped.reserveCapacity(value.count)
+
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x08:
+                escaped += "\\b"
+            case 0x09:
+                escaped += "\\t"
+            case 0x0A:
+                escaped += "\\n"
+            case 0x0C:
+                escaped += "\\f"
+            case 0x0D:
+                escaped += "\\r"
+            case 0x22:
+                escaped += "\\\""
+            case 0x5C:
+                escaped += "\\\\"
+            case 0x00...0x1F, 0x7F...0x9F:
+                if scalar.value <= 0xFFFF {
+                    escaped += String(format: "\\u%04X", scalar.value)
+                } else {
+                    escaped += String(format: "\\U%08X", scalar.value)
+                }
+            default:
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
+
+        return escaped
+    }
+
+    private static func writeDataIfChanged(_ data: Data, to url: URL) throws {
+        if let existing = try? Data(contentsOf: url), existing == data { return }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try backupIfExists(url)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private static func backupIfExists(_ url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = formatter.string(from: Date())
+        let backup = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent).gaiterm-backup-\(timestamp)", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: backup.path) {
+            try FileManager.default.copyItem(at: url, to: backup)
+        }
     }
 }
 #endif

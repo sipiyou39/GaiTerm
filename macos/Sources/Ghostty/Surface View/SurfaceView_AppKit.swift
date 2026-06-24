@@ -1069,8 +1069,14 @@ extension Ghostty {
                 return
             }
 
-            // On any keyDown event we unset our bell state
+            // On Enter, the user has handed work back to the CLI. Clear the
+            // "waiting for input" attention only at that point.
             bell = false
+            if event.keyCode == 36 || event.keyCode == 76 {
+                NotificationCenter.default.post(
+                    name: .gaiSurfaceDidReceiveUserInput,
+                    object: self)
+            }
 
             // We need to translate the mods (maybe) to handle configs such as option-as-alt
             let translationModsGhostty = Ghostty.eventModifierFlags(
@@ -1753,12 +1759,18 @@ extension Ghostty {
         }
 
         /// Show a user notification and associate it with this surface
-        func showUserNotification(title: String, body: String, requireFocus: Bool = true) {
+        func showUserNotification(
+            title: String,
+            body: String,
+            subtitle: String? = nil,
+            requireFocus: Bool = true,
+            sound: UNNotificationSound? = .default
+        ) {
             let content = UNMutableNotificationContent()
             content.title = title
-            content.subtitle = self.title
+            content.subtitle = subtitle ?? self.title
             content.body = body
-            content.sound = UNNotificationSound.default
+            content.sound = sound
             content.categoryIdentifier = Ghostty.userNotificationCategory
             content.userInfo = [
                 "surface": self.id.uuidString,

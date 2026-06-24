@@ -348,6 +348,15 @@ extension Notification.Name {
     /// Ring the bell
     static let ghosttyBellDidRing = Notification.Name("com.sipiyou.gaiterm.ghosttyBellDidRing")
 
+    /// A terminal surface emitted a desktop notification (OSC 9 / OSC 777, or
+    /// Ghostty command-finished notification). Object is the `SurfaceView`.
+    static let gaiTerminalNotificationDidArrive =
+        Notification.Name("com.sipiyou.gaiterm.terminalNotificationDidArrive")
+    static let GaiTerminalNotificationTitleKey =
+        "com.sipiyou.gaiterm.terminalNotification.title"
+    static let GaiTerminalNotificationBodyKey =
+        "com.sipiyou.gaiterm.terminalNotification.body"
+
     /// The active selection changed
     static let ghosttySelectionDidChange = Notification.Name("com.sipiyou.gaiterm.ghosttySelectionDidChange")
 

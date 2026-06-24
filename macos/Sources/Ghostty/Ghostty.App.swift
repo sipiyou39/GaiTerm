@@ -1288,8 +1288,8 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let title = String(cString: n.title!, encoding: .utf8) else { return }
-                guard let body = String(cString: n.body!, encoding: .utf8) else { return }
+                let title = n.title.flatMap { String(cString: $0, encoding: .utf8) } ?? ""
+                let body = n.body.flatMap { String(cString: $0, encoding: .utf8) } ?? ""
                 showDesktopNotification(surfaceView, title: title, body: body)
 
             default:
@@ -1302,21 +1302,14 @@ extension Ghostty {
             title: String,
             body: String,
             requireFocus: Bool = true) {
-            let center = UNUserNotificationCenter.current()
-            center.requestAuthorization(options: [.alert, .sound]) { _, error in
-                if let error = error {
-                    Ghostty.logger.error("Error while requesting notification authorization: \(error, privacy: .public)")
-                }
-            }
-
-            center.getNotificationSettings { settings in
-                guard settings.authorizationStatus == .authorized else { return }
-                surfaceView.showUserNotification(
-                    title: title,
-                    body: body,
-                    requireFocus: requireFocus
-                )
-            }
+            _ = requireFocus
+            NotificationCenter.default.post(
+                name: .gaiTerminalNotificationDidArrive,
+                object: surfaceView,
+                userInfo: [
+                    SwiftUI.Notification.Name.GaiTerminalNotificationTitleKey: title,
+                    SwiftUI.Notification.Name.GaiTerminalNotificationBodyKey: body,
+                ])
         }
 
         private static func commandFinished(

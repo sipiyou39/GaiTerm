@@ -66,7 +66,6 @@ struct WorkspaceStageView: View {
     private typealias D = GaiDrawerMetrics
 
     private var slabWidth: CGFloat { ui.stageCardWidth + D.tabWidth + D.bleed }
-
     var body: some View {
         ZStack(alignment: .trailing) {
             Color.clear
@@ -97,7 +96,13 @@ struct WorkspaceStageView: View {
                 ui: ui,
                 splits: splits,
                 onClose: onClose,
-                onFocusChanged: onFocusChanged)
+                onFocusChanged: onFocusChanged,
+                onToggleNotifications: { surface in
+                    store.toggleNotifications(for: surface)
+                },
+                onToggleAutoFocus: { surface in
+                    store.toggleAutoFocusOnNotification(for: surface)
+                })
                 .clipped()
                 .padding(.leading, D.tabWidth)
                 .padding(.trailing, D.bleed)
@@ -132,7 +137,7 @@ struct WorkspaceStageView: View {
             .rotationEffect(.degrees(visualOpen ? 180 : 0))
             .scaleEffect(tabPressed ? 0.8 : 1)
             .animation(.easeOut(duration: 0.08), value: tabPressed)
-            .frame(width: D.tabWidth)
+        .frame(width: D.tabWidth, height: D.tabExtent)
     }
 
     private var tabHitArea: some View {
@@ -210,6 +215,8 @@ private struct StageCard: View {
     let splits: GaiSplitController
     let onClose: () -> Void
     let onFocusChanged: () -> Void
+    let onToggleNotifications: (Ghostty.SurfaceView) -> Void
+    let onToggleAutoFocus: (Ghostty.SurfaceView) -> Void
 
     /// One editor model per open file, so unsaved edits survive tab switches.
     @State private var models: [String: GaiEditorModel] = [:]
@@ -263,7 +270,9 @@ private struct StageCard: View {
             ui: ui,
             accent: accent,
             focusedSurface: focusedSurface ?? lastFocusedSurface?.value,
-            splits: splits)
+            splits: splits,
+            onToggleNotifications: onToggleNotifications,
+            onToggleAutoFocus: onToggleAutoFocus)
         .ghosttyLastFocusedSurface(lastFocusedSurface)
     }
 
@@ -424,6 +433,8 @@ private struct GaiSplitTreeView: View {
     let accent: Color
     let focusedSurface: Ghostty.SurfaceView?
     let splits: GaiSplitController
+    let onToggleNotifications: (Ghostty.SurfaceView) -> Void
+    let onToggleAutoFocus: (Ghostty.SurfaceView) -> Void
 
     var body: some View {
         let tree = workspace.surfaceTree
@@ -451,6 +462,8 @@ private struct GaiSplitTreeView: View {
                     guard let workspace else { return }
                     splits.newSplit(in: workspace, at: surface, direction: direction)
                 },
+                onToggleNotifications: onToggleNotifications,
+                onToggleAutoFocus: onToggleAutoFocus,
                 onClosePane: { [weak workspace] surface in
                     guard let workspace else { return }
                     splits.closePane(in: workspace, surface: surface)
@@ -480,6 +493,8 @@ private struct GaiSplitSubtree: View {
     let action: (GaiSplitOperation) -> Void
     let onToggleZoom: (Ghostty.SurfaceView) -> Void
     let onSplit: (Ghostty.SurfaceView, SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
+    let onToggleNotifications: (Ghostty.SurfaceView) -> Void
+    let onToggleAutoFocus: (Ghostty.SurfaceView) -> Void
     let onClosePane: (Ghostty.SurfaceView) -> Void
     let onChangeFolder: (Ghostty.SurfaceView, String) -> Void
 
@@ -496,6 +511,8 @@ private struct GaiSplitSubtree: View {
                 isZoomed: zoomedNode == node,
                 onToggleZoom: { onToggleZoom(surfaceView) },
                 onSplit: { onSplit(surfaceView, $0) },
+                onToggleNotifications: { onToggleNotifications(surfaceView) },
+                onToggleAutoFocus: { onToggleAutoFocus(surfaceView) },
                 onClose: { onClosePane(surfaceView) },
                 onChangeFolder: { onChangeFolder(surfaceView, $0) })
             // Explicit identity per leaf: without it SwiftUI may reuse one
@@ -530,6 +547,8 @@ private struct GaiSplitSubtree: View {
                         action: action,
                         onToggleZoom: onToggleZoom,
                         onSplit: onSplit,
+                        onToggleNotifications: onToggleNotifications,
+                        onToggleAutoFocus: onToggleAutoFocus,
                         onClosePane: onClosePane,
                         onChangeFolder: onChangeFolder)
                 },
@@ -546,6 +565,8 @@ private struct GaiSplitSubtree: View {
                         action: action,
                         onToggleZoom: onToggleZoom,
                         onSplit: onSplit,
+                        onToggleNotifications: onToggleNotifications,
+                        onToggleAutoFocus: onToggleAutoFocus,
                         onClosePane: onClosePane,
                         onChangeFolder: onChangeFolder)
                 },
@@ -573,6 +594,8 @@ private struct GaiPaneView: View {
     let isZoomed: Bool
     let onToggleZoom: () -> Void
     let onSplit: (SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
+    let onToggleNotifications: () -> Void
+    let onToggleAutoFocus: () -> Void
     let onClose: () -> Void
     let onChangeFolder: (String) -> Void
 
@@ -654,7 +677,7 @@ private struct GaiPaneView: View {
                     splits: splits)
                 .frame(maxWidth: layout.titleMaxWidth, alignment: .leading)
                 .clipped()
-                .layoutPriority(-4)
+                .layoutPriority(8)
             }
             Spacer(minLength: 0)
             if layout.showsDirectory {
@@ -673,13 +696,25 @@ private struct GaiPaneView: View {
                         .truncationMode(.tail)
                 }
                 .foregroundStyle(.white.opacity(0.55))
-                .frame(maxWidth: layout.branchMaxWidth, alignment: .trailing)
+                .frame(maxWidth: layout.branchMaxWidth, alignment: .leading)
                 .clipped()
                 .layoutPriority(-3)
+            }
+            Spacer(minLength: 0)
+            if layout.showsNotificationBadge, let session {
+                GaiPaneAttentionBadge(session: session, accent: accent)
+                    .layoutPriority(20)
             }
             // Always visible and therefore always hittable: a control that
             // only mounts on hover can miss the very click it exists for.
             HStack(spacing: layout.controlSpacing) {
+                if let session {
+                    GaiPaneNotificationControls(
+                        session: session,
+                        size: layout.controlSize,
+                        onToggleNotifications: onToggleNotifications,
+                        onToggleAutoFocus: onToggleAutoFocus)
+                }
                 GaiPaneIconButton(
                     symbol: "rectangle.split.2x1",
                     help: "Split right (⌘D)",
@@ -749,11 +784,12 @@ private struct GaiPaneHeaderLayout {
     }
 
     var showsTitle: Bool { width >= 118 }
+    var showsNotificationBadge: Bool { width >= 150 }
     var showsDirectory: Bool { width >= 360 }
     var showsBranch: Bool { width >= 520 }
 
     var titleMaxWidth: CGFloat? {
-        let reservedControls = controlSize * 4 + controlSpacing * 3 + edgePadding * 2
+        let reservedControls = controlSize * 6 + controlSpacing * 5 + edgePadding * 2
         let available = max(0, width - reservedControls - spacing)
         if width < 180 { return available }
         if width < 300 { return min(available, 90) }
@@ -766,6 +802,85 @@ private struct GaiPaneHeaderLayout {
 
     var branchMaxWidth: CGFloat {
         width < 540 ? 68 : 120
+    }
+}
+
+private struct GaiPaneAttentionBadge: View {
+    @ObservedObject var session: GaiTerminalSession
+    let accent: Color
+
+    private var count: Int { session.unreadNotificationCount }
+    private var isWaiting: Bool { session.attention == .needsInput }
+
+    private var badgeColor: Color {
+        count > 0 ? Color(red: 1, green: 0.27, blue: 0.27) : Color(red: 1, green: 0.68, blue: 0.22)
+    }
+
+    private var helpText: String {
+        guard let latest = session.latestNotification else { return "Unread notification" }
+        if latest.body.isEmpty { return latest.title }
+        return "\(latest.title): \(latest.body)"
+    }
+
+    var body: some View {
+        if count > 0 {
+            Text(count > 9 ? "9+" : "\(count)")
+                .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .frame(minWidth: 16, minHeight: 16)
+                .background(Capsule().fill(badgeColor))
+                .shadow(color: badgeColor.opacity(0.35), radius: 2)
+                .help(helpText)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+        } else if isWaiting {
+            Image(systemName: "exclamationmark")
+                .font(.system(size: 8.5, weight: .black, design: .rounded))
+                .foregroundStyle(.black.opacity(0.75))
+                .frame(width: 16, height: 16)
+                .background(Circle().fill(badgeColor))
+                .shadow(color: badgeColor.opacity(0.35), radius: 2)
+                .help(helpText)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+        }
+    }
+}
+
+private struct GaiPaneNotificationControls: View {
+    @ObservedObject var session: GaiTerminalSession
+    let size: CGFloat
+    let onToggleNotifications: () -> Void
+    let onToggleAutoFocus: () -> Void
+
+    private var muteColor: Color { Color(red: 1, green: 0.62, blue: 0.28) }
+    private var focusColor: Color { Color(red: 1, green: 0.82, blue: 0.24) }
+
+    var body: some View {
+        HStack(spacing: max(2, size * 0.16)) {
+            GaiPaneIconButton(
+                symbol: session.notificationsEnabled ? "bell" : "bell.slash.fill",
+                help: session.notificationsEnabled
+                    ? "Mute pane notifications"
+                    : "Unmute pane notifications",
+                emphasized: !session.notificationsEnabled,
+                foreground: session.notificationsEnabled ? .white : muteColor,
+                size: size,
+                action: onToggleNotifications)
+            GaiPaneIconButton(
+                symbol: session.autoFocusOnNotification ? "bolt.fill" : "bolt",
+                help: session.autoFocusOnNotification
+                    ? "Disable auto-focus on completion"
+                    : "Auto-focus this pane when it needs input",
+                emphasized: session.autoFocusOnNotification,
+                foreground: session.autoFocusOnNotification ? focusColor : .white,
+                size: size,
+                action: onToggleAutoFocus)
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -897,15 +1012,16 @@ private struct GaiPaneIconButton: View {
     let symbol: String
     let help: String
     var emphasized: Bool = false
+    var foreground: Color = .white
     var size: CGFloat = 18
     let action: () -> Void
 
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: max(7, size * 0.47), weight: .bold))
-            .foregroundStyle(.white.opacity(emphasized ? 0.95 : 0.62))
+            .foregroundStyle(foreground.opacity(emphasized ? 0.95 : 0.62))
             .frame(width: size, height: size)
-            .background(Circle().fill(Color.white.opacity(emphasized ? 0.14 : 0)))
+            .background(Circle().fill(foreground.opacity(emphasized ? 0.16 : 0)))
             .overlay(GaiClickCatcher(action: action))
             .help(help)
     }

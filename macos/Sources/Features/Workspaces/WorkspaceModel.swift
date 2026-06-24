@@ -29,6 +29,15 @@ enum GaiAttention: Int, Comparable, Codable {
     var pulses: Bool { self == .needsInput }
 }
 
+// MARK: - Notifications
+
+struct GaiTerminalNotification: Identifiable {
+    let id = UUID()
+    let title: String
+    let body: String
+    let createdAt: Date
+}
+
 // MARK: - Session
 
 /// A single terminal inside a workspace.
@@ -49,9 +58,27 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
     /// Current attention state, maintained by the attention engine.
     @Published var attention: GaiAttention = .idle
 
+    /// Whether this pane is allowed to emit disruptive notifications: unread
+    /// badges, sounds, and macOS banners. The attention state still updates
+    /// when muted so an idle agent remains visible without interrupting work.
+    @Published private(set) var notificationsEnabled = true
+
+    /// When enabled, a completed agent jumps GaiTerm straight to this pane.
+    @Published private(set) var autoFocusOnNotification = false
+
+    /// Unread terminal notifications for this pane. Kept tiny and pane-local so
+    /// the drawer can aggregate counts without observing terminal output.
+    @Published private(set) var unreadNotificationCount = 0
+
+    /// Latest unread payload, used for tooltips and future notification popovers.
+    @Published private(set) var latestNotification: GaiTerminalNotification?
+
     /// Most recent moment this session was staged / interacted with, used for
     /// MRU ordering (filmstrip, Aperçu, auto-stage-on-exit).
     var lastActiveAt: Date
+
+    private var lastNotificationFingerprint: String?
+    private var lastNotificationAt: Date?
 
     init(name: String, surfaceView: Ghostty.SurfaceView) {
         self.name = name
@@ -62,6 +89,57 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
     /// Mark this session as just-used (bumps it to the front of MRU ordering).
     func touch() {
         lastActiveAt = Date()
+    }
+
+    @discardableResult
+    func recordNotification(
+        title: String,
+        body: String,
+        attention newAttention: GaiAttention
+    ) -> Bool {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fingerprint = "\(cleanTitle)\n\(cleanBody)\n\(newAttention.rawValue)"
+        let now = Date()
+        if fingerprint == lastNotificationFingerprint,
+           let lastNotificationAt,
+           now.timeIntervalSince(lastNotificationAt) < 0.75 {
+            return false
+        }
+
+        lastNotificationFingerprint = fingerprint
+        lastNotificationAt = now
+        latestNotification = GaiTerminalNotification(
+            title: cleanTitle.isEmpty ? name : cleanTitle,
+            body: cleanBody,
+            createdAt: now)
+        attention = max(attention, newAttention)
+        guard notificationsEnabled else { return false }
+        guard unreadNotificationCount == 0 else { return false }
+        unreadNotificationCount = 1
+        return true
+    }
+
+    func markNotificationsRead() {
+        guard unreadNotificationCount > 0 else { return }
+        unreadNotificationCount = 0
+    }
+
+    func markUserReturnedToWork() {
+        guard unreadNotificationCount > 0 || attention != .idle else { return }
+        unreadNotificationCount = 0
+        attention = .idle
+    }
+
+    func toggleNotificationsEnabled() {
+        notificationsEnabled.toggle()
+        if !notificationsEnabled {
+            unreadNotificationCount = 0
+        }
+    }
+
+    func toggleAutoFocusOnNotification() {
+        autoFocusOnNotification.toggle()
     }
 }
 
@@ -137,6 +215,15 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// Ordered sessions in this workspace.
     @Published var sessions: [GaiTerminalSession] = []
 
+    /// Aggregated unread count, updated by `GaiWorkspaceStore`. This keeps the
+    /// drawer row reactive without subscribing every row to every pane.
+    @Published private(set) var unreadNotificationCount = 0
+
+    /// Panes that are known to be waiting for the user. This intentionally
+    /// stays separate from unread notifications: opening a notification marks it
+    /// read, but the pane is still idle until the user types in it.
+    @Published private(set) var waitingSessionCount = 0
+
     /// The workspace's terminal area: one Ghostty split tree. The Scène
     /// renders it with the native split machinery — ⌘D & friends split it,
     /// dividers resize it — exactly like a Ghostty window.
@@ -191,6 +278,17 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// The session wrapping the given pane's surface, if any.
     func session(for view: Ghostty.SurfaceView) -> GaiTerminalSession? {
         sessions.first { $0.surfaceView === view }
+    }
+
+    func refreshNotificationSummary() {
+        let value = sessions.reduce(0) { $0 + ($1.unreadNotificationCount > 0 ? 1 : 0) }
+        if unreadNotificationCount != value {
+            unreadNotificationCount = value
+        }
+        let waiting = sessions.reduce(0) { $0 + ($1.attention == .needsInput ? 1 : 0) }
+        if waitingSessionCount != waiting {
+            waitingSessionCount = waiting
+        }
     }
 
     /// Aggregate attention to show on the handle.
@@ -272,6 +370,9 @@ final class GaiWorkspaceStore: ObservableObject {
 
     /// The workspace whose Scène is currently open, if any. `nil` = at rest.
     @Published var openWorkspaceID: GaiWorkspace.ID?
+
+    /// Total unread CLI notifications across all live panes.
+    @Published private(set) var unreadNotificationCount = 0
 
     /// The Ghostty app used to spawn surfaces. Owned by the AppDelegate.
     private let ghostty: Ghostty.App
@@ -357,6 +458,7 @@ final class GaiWorkspaceStore: ObservableObject {
         }
         workspaces.removeAll { $0.id == id }
         if openWorkspaceID == id { openWorkspaceID = nil }
+        refreshUnreadNotificationCount()
         save()
     }
 
@@ -408,6 +510,96 @@ final class GaiWorkspaceStore: ObservableObject {
     /// Drop the session bookkeeping for a closed pane.
     func detachSession(for view: Ghostty.SurfaceView, in workspace: GaiWorkspace) {
         workspace.sessions.removeAll { $0.surfaceView === view }
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
+    @discardableResult
+    func recordNotification(
+        for view: Ghostty.SurfaceView,
+        title: String,
+        body: String,
+        attention: GaiAttention = .needsInput
+    ) -> Bool {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            let session = workspace.session(for: view)
+        else { return false }
+
+        let recorded = session.recordNotification(
+            title: title,
+            body: body,
+            attention: attention)
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+        return recorded
+    }
+
+    func recordBell(for view: Ghostty.SurfaceView) {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            workspace.notifyOnInput,
+            let session = workspace.session(for: view)
+        else { return }
+
+        _ = session.recordNotification(
+            title: session.name,
+            body: "Terminal is waiting for input",
+            attention: .needsInput)
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
+    func markNotificationsRead(for view: Ghostty.SurfaceView) {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            let session = workspace.session(for: view)
+        else { return }
+
+        session.markNotificationsRead()
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
+    func markUserReturnedToWork(for view: Ghostty.SurfaceView) {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            let session = workspace.session(for: view)
+        else { return }
+
+        session.markUserReturnedToWork()
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
+    func toggleNotifications(for view: Ghostty.SurfaceView) {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            let session = workspace.session(for: view)
+        else { return }
+
+        session.toggleNotificationsEnabled()
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
+    func toggleAutoFocusOnNotification(for view: Ghostty.SurfaceView) {
+        guard let workspace = (workspaces + [defaultWorkspace])
+            .first(where: { $0.surfaceTree.root?.node(view: view) != nil }),
+            let session = workspace.session(for: view)
+        else { return }
+
+        session.toggleAutoFocusOnNotification()
+        workspace.refreshNotificationSummary()
+    }
+
+    private func refreshUnreadNotificationCount() {
+        let value = (workspaces + [defaultWorkspace]).reduce(0) {
+            $0 + $1.unreadNotificationCount
+        }
+        if unreadNotificationCount != value {
+            unreadNotificationCount = value
+        }
     }
 
     // MARK: Naming

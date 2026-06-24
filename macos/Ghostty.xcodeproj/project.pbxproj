@@ -14,6 +14,7 @@
 		819324642F24FF2100A9ED8F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
+		00429441D6B8C74D277450B8 /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = B99100C2BC2E286ECF2A7C08 /* Sounds */; };
 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
 		A53D0C952B53B4D800305CE6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
@@ -89,6 +90,7 @@
 		A5B30531299BEAAA0047F10C /* GaiTerm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GaiTerm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A5B30538299BEAAB0047F10C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A5B3053D299BEAAB0047F10C /* Ghostty.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Ghostty.entitlements; sourceTree = "<group>"; };
+		B99100C2BC2E286ECF2A7C08 /* Sounds */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Sounds; sourceTree = "<group>"; };
 		A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Ghostty-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = GhosttyKit.xcframework; sourceTree = "<group>"; };
 		FC5218F92D10FFC7004C93E0 /* zsh */ = {isa = PBXFileReference; lastKnownFileType = folder; name = zsh; path = "../zig-out/share/zsh"; sourceTree = "<group>"; };
@@ -286,6 +288,7 @@
 				A571AB1C2A206FC600248498 /* Ghostty-Info.plist */,
 				8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */,
 				A5B30538299BEAAB0047F10C /* Assets.xcassets */,
+				B99100C2BC2E286ECF2A7C08 /* Sounds */,
 				A553F4122E06EB1600257779 /* Ghostty.icon */,
 				A5B3053D299BEAAB0047F10C /* Ghostty.entitlements */,
 				A51BFC282B30F26D00E92F16 /* GhosttyDebug.entitlements */,
@@ -528,6 +531,7 @@
 				A5A1F8852A489D6800D1E8BC /* terminfo in Resources */,
 				552964E62B34A9B400030505 /* vim in Resources */,
 				FC5218FA2D10FFCE004C93E0 /* zsh in Resources */,
+				00429441D6B8C74D277450B8 /* Sounds in Resources */,
 				A5B30539299BEAAB0047F10C /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -5,6 +5,10 @@ import OSLog
 import Sparkle
 import GhosttyKit
 
+private extension NSWindow.Level {
+    static let gaiCriticalDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
+}
+
 class AppDelegate: NSObject,
                     ObservableObject,
                     NSApplicationDelegate,
@@ -187,6 +191,7 @@ class AppDelegate: NSObject,
         // activation) because an always-on-top overlay should appear on launch
         // regardless of whether we're the frontmost app.
         gaiWorkspaceManager.start()
+        GaiAgentHookInstaller.installIfNeeded()
 
         // Start our update checker.
         updateController.startUpdater()
@@ -451,6 +456,31 @@ class AppDelegate: NSObject,
 
         _ = gaiWorkspaceManager.openTerminal(baseConfig: config)
 
+        return true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            _ = handleGaiTermURL(url)
+        }
+    }
+
+    @discardableResult
+    private func handleGaiTermURL(_ url: URL) -> Bool {
+        guard url.scheme == "gaiterm", url.host == "notify" else { return false }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return true }
+        let items = components.queryItems ?? []
+
+        func value(_ name: String, maxLength: Int = 240) -> String {
+            let raw = items.first(where: { $0.name == name })?.value ?? ""
+            return String(raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxLength))
+        }
+
+        guard let surfaceID = UUID(uuidString: value("surface", maxLength: 64)) else { return true }
+        _ = gaiWorkspaceManager.recordExternalNotification(
+            surfaceID: surfaceID,
+            title: value("title", maxLength: 80),
+            body: value("body", maxLength: 240))
         return true
     }
 
@@ -1178,6 +1208,10 @@ extension AppDelegate {
         alert.addButton(withTitle: "Terminate")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
+        alert.window.level = .gaiCriticalDialog
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
