@@ -438,7 +438,8 @@ final class GaiWorkspaceManager {
             body: body,
             attention: .needsInput)
         handleAutoFocusNotification(surface, workspace: workspace, session: session)
-        let shouldInterrupt = recorded && (session?.notificationsEnabled ?? true)
+        let notificationsEnabled = session?.notificationsEnabled ?? true
+        let shouldDeliverSystemNotification = recorded && notificationsEnabled
 
         if isGenericTurnComplete(title: notificationTitle, body: body) {
             scheduleGenericNotificationFallback(
@@ -446,15 +447,22 @@ final class GaiWorkspaceManager {
                 workspace: workspace,
                 title: notificationTitle,
                 body: body,
-                shouldInterrupt: shouldInterrupt)
-        } else if shouldInterrupt {
+                shouldPlaySound: notificationsEnabled,
+                shouldDeliverSystemNotification: shouldDeliverSystemNotification)
+        } else if notificationsEnabled {
             cancelGenericNotificationFallback(for: surface)
-            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
-            deliverSystemNotification(
+            playAgentNotificationSoundIfNeeded(
                 surface,
                 workspace: workspace,
                 title: notificationTitle,
                 body: body)
+            if shouldDeliverSystemNotification {
+                deliverSystemNotification(
+                    surface,
+                    workspace: workspace,
+                    title: notificationTitle,
+                    body: body)
+            }
         }
         return recorded
     }
@@ -1295,7 +1303,8 @@ final class GaiWorkspaceManager {
             body: notificationBody,
             attention: .needsInput)
         handleAutoFocusNotification(surface, workspace: workspace, session: session)
-        let shouldInterrupt = recorded && (session?.notificationsEnabled ?? true)
+        let notificationsEnabled = session?.notificationsEnabled ?? true
+        let shouldDeliverSystemNotification = recorded && notificationsEnabled
 
         if isGenericTurnComplete(title: notificationTitle, body: notificationBody) {
             scheduleGenericNotificationFallback(
@@ -1303,13 +1312,20 @@ final class GaiWorkspaceManager {
                 workspace: workspace,
                 title: notificationTitle,
                 body: notificationBody,
-                shouldInterrupt: shouldInterrupt)
+                shouldPlaySound: notificationsEnabled,
+                shouldDeliverSystemNotification: shouldDeliverSystemNotification)
             return
         }
 
         cancelGenericNotificationFallback(for: surface)
-        if shouldInterrupt {
-            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
+        if notificationsEnabled {
+            playAgentNotificationSoundIfNeeded(
+                surface,
+                workspace: workspace,
+                title: notificationTitle,
+                body: notificationBody)
+        }
+        if shouldDeliverSystemNotification {
             deliverSystemNotification(
                 surface,
                 workspace: workspace,
@@ -1388,9 +1404,10 @@ final class GaiWorkspaceManager {
         workspace: GaiWorkspace?,
         title: String,
         body: String,
-        shouldInterrupt: Bool
+        shouldPlaySound: Bool,
+        shouldDeliverSystemNotification: Bool
     ) {
-        guard shouldInterrupt else {
+        guard shouldPlaySound || shouldDeliverSystemNotification else {
             cancelGenericNotificationFallback(for: surface)
             return
         }
@@ -1401,15 +1418,39 @@ final class GaiWorkspaceManager {
         let work = DispatchWorkItem { [weak self, weak surface, weak workspace] in
             guard let self, let surface else { return }
             self.pendingGenericExternalNotifications[ObjectIdentifier(surface)] = nil
-            GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
-            self.deliverSystemNotification(
-                surface,
-                workspace: workspace,
-                title: title,
-                body: body)
+            if shouldPlaySound {
+                self.playAgentNotificationSoundIfNeeded(
+                    surface,
+                    workspace: workspace,
+                    title: title,
+                    body: body)
+            }
+            if shouldDeliverSystemNotification {
+                self.deliverSystemNotification(
+                    surface,
+                    workspace: workspace,
+                    title: title,
+                    body: body)
+            }
         }
         pendingGenericExternalNotifications[key] = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+    }
+
+    private func playAgentNotificationSoundIfNeeded(
+        _ surface: Ghostty.SurfaceView,
+        workspace: GaiWorkspace?,
+        title: String,
+        body: String
+    ) {
+        let currentWorkspace = workspace ?? splits.workspace(containing: surface)
+        guard currentWorkspace?.session(for: surface)?.shouldPlayNotificationSound(
+            title: title,
+            body: body,
+            attention: .needsInput) ?? true
+        else { return }
+
+        GaiNotificationSoundPlayer.shared.playSelectedNotificationSound()
     }
 
     private func handleAutoFocusNotification(

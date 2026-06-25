@@ -317,7 +317,8 @@ enum GaiNotificationSoundLibrary {
 final class GaiNotificationSoundPlayer: NSObject, NSSoundDelegate {
     static let shared = GaiNotificationSoundPlayer()
 
-    private var currentSound: NSSound?
+    private var activeSounds: [NSSound] = []
+    private let maxConcurrentSounds = 4
 
     func playSelectedNotificationSound() {
         guard GaiNotificationSoundLibrary.soundEnabled() else { return }
@@ -336,18 +337,21 @@ final class GaiNotificationSoundPlayer: NSObject, NSSoundDelegate {
                   let sound = NSSound(contentsOf: url, byReference: false)
             else { return }
 
-            self.currentSound?.stop()
+            while self.activeSounds.count >= self.maxConcurrentSounds {
+                self.activeSounds.removeFirst().stop()
+            }
             sound.volume = Float(min(1, max(0, volume)))
             sound.delegate = self
-            self.currentSound = sound
-            sound.play()
+            self.activeSounds.append(sound)
+            if !sound.play() {
+                self.activeSounds.removeAll { $0 === sound }
+                NSSound.beep()
+            }
         }
     }
 
     func sound(_ sound: NSSound, didFinishPlaying finishedPlaying: Bool) {
-        if currentSound === sound {
-            currentSound = nil
-        }
+        activeSounds.removeAll { $0 === sound }
     }
 }
 

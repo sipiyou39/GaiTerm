@@ -79,6 +79,8 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
 
     private var lastNotificationFingerprint: String?
     private var lastNotificationAt: Date?
+    private var lastAudibleNotificationFingerprint: String?
+    private var lastAudibleNotificationAt: Date?
 
     init(name: String, surfaceView: Ghostty.SurfaceView) {
         self.name = name
@@ -117,6 +119,28 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
         guard notificationsEnabled else { return false }
         guard unreadNotificationCount == 0 else { return false }
         unreadNotificationCount = 1
+        return true
+    }
+
+    func shouldPlayNotificationSound(
+        title: String,
+        body: String,
+        attention newAttention: GaiAttention
+    ) -> Bool {
+        guard notificationsEnabled else { return false }
+
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fingerprint = "\(cleanTitle)\n\(cleanBody)\n\(newAttention.rawValue)"
+        let now = Date()
+        if fingerprint == lastAudibleNotificationFingerprint,
+           let lastAudibleNotificationAt,
+           now.timeIntervalSince(lastAudibleNotificationAt) < 0.9 {
+            return false
+        }
+
+        lastAudibleNotificationFingerprint = fingerprint
+        lastAudibleNotificationAt = now
         return true
     }
 
