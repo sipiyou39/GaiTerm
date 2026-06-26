@@ -125,7 +125,7 @@ struct WorkspaceStageView: View {
         .frame(maxHeight: .infinity)
         .overlay(alignment: .leading) { chevron }
         .overlay(alignment: .leading) { tabHitArea }
-        .overlay(alignment: .leading) { stageResizeHandle.offset(x: D.tabWidth - 17) }
+        .overlay(alignment: .leading) { stageResizeHandle.offset(x: D.tabWidth - 6) }
     }
 
     /// Flat panel gray instead of Liquid Glass — the glass re-rendered every
@@ -155,20 +155,23 @@ struct WorkspaceStageView: View {
     }
 
     private var tabHitArea: some View {
-        Rectangle()
-            .fill(Color.clear)
+        GaiStageTabInteraction(
+            pressed: $tabPressed,
+            onToggle: { ui.isStageExpanded.toggle() },
+            onResizeBegan: {
+                stageResizeStartWidth = ui.stageCardWidth
+                onResizeBegan()
+            },
+            onResizeChanged: { deltaX in
+                let start = stageResizeStartWidth ?? ui.stageCardWidth
+                onResizeWidth(start - deltaX)
+            },
+            onResizeEnded: {
+                stageResizeStartWidth = nil
+                onResizeEnded()
+            })
             .frame(width: D.tabWidth + D.filletRadius, height: D.tabExtent + 8)
             .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in tabPressed = true }
-                    .onEnded { _ in
-                        tabPressed = false
-                        ui.isStageExpanded.toggle()
-                    })
     }
 
     private var stageResizeHandle: some View {
@@ -186,7 +189,7 @@ struct WorkspaceStageView: View {
                 stageResizeStartWidth = nil
                 onResizeEnded()
             })
-        .frame(width: 34)
+        .frame(width: 12)
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
     }
@@ -1336,6 +1339,116 @@ struct GaiPanelResizeHandle: NSViewRepresentable {
         view.onBegan = onBegan
         view.onChanged = onChanged
         view.onEnded = onEnded
+    }
+}
+
+struct GaiStageTabInteraction: NSViewRepresentable {
+    @Binding var pressed: Bool
+    let onToggle: () -> Void
+    let onResizeBegan: () -> Void
+    let onResizeChanged: (CGFloat) -> Void
+    let onResizeEnded: () -> Void
+
+    final class TabView: NSView {
+        var setPressed: (Bool) -> Void = { _ in }
+        var onToggle: () -> Void = {}
+        var onResizeBegan: () -> Void = {}
+        var onResizeChanged: (CGFloat) -> Void = { _ in }
+        var onResizeEnded: () -> Void = {}
+        private var trackingAreaRef: NSTrackingArea?
+        private var dragStartScreenX: CGFloat?
+        private var resizing = false
+        private let resizeThreshold: CGFloat = 5
+
+        override var acceptsFirstResponder: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: resizing ? .resizeLeftRight : .pointingHand)
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            (resizing ? NSCursor.resizeLeftRight : NSCursor.pointingHand).set()
+        }
+
+        override func updateTrackingAreas() {
+            if let trackingAreaRef {
+                removeTrackingArea(trackingAreaRef)
+            }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate, .inVisibleRect],
+                owner: self,
+                userInfo: nil)
+            trackingAreaRef = area
+            addTrackingArea(area)
+            super.updateTrackingAreas()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            NSCursor.pointingHand.set()
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            if dragStartScreenX == nil {
+                NSCursor.arrow.set()
+            }
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragStartScreenX = NSEvent.mouseLocation.x
+            resizing = false
+            setPressed(true)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let dragStartScreenX else { return }
+            let deltaX = NSEvent.mouseLocation.x - dragStartScreenX
+            if !resizing, abs(deltaX) >= resizeThreshold {
+                resizing = true
+                onResizeBegan()
+                NSCursor.resizeLeftRight.set()
+                window?.invalidateCursorRects(for: self)
+            }
+            if resizing {
+                onResizeChanged(deltaX)
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            let didResize = resizing
+            dragStartScreenX = nil
+            resizing = false
+            setPressed(false)
+            if didResize {
+                onResizeEnded()
+            } else {
+                onToggle()
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> TabView {
+        let view = TabView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: TabView, context: Context) {
+        view.setPressed = { pressed = $0 }
+        view.onToggle = onToggle
+        view.onResizeBegan = onResizeBegan
+        view.onResizeChanged = onResizeChanged
+        view.onResizeEnded = onResizeEnded
     }
 }
 

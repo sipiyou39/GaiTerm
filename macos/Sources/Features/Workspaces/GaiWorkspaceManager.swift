@@ -179,6 +179,25 @@ private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
         return best?.view
     }
 
+    fileprivate func stageTabInteraction(at local: NSPoint) -> GaiStageTabInteraction.TabView? {
+        var best: (view: GaiStageTabInteraction.TabView, area: CGFloat)?
+        func walk(_ view: NSView) {
+            if let tab = view as? GaiStageTabInteraction.TabView,
+               !tab.isHidden,
+               tab.bounds.width <= 80,
+               let rect = convertedRect(of: tab),
+               rect.contains(local) {
+                let area = rect.width * rect.height
+                if best == nil || area < best!.area {
+                    best = (tab, area)
+                }
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(self)
+        return best?.view
+    }
+
     private func convertedRect(of view: NSView) -> CGRect? {
         guard view.window === window else { return nil }
         return view.convert(view.bounds, to: self)
@@ -300,6 +319,12 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
             return super.hitTest(point)
         }
 
+        // The stage tab is a special shape welded to the card edge. It wins
+        // over the resize strip inside its own height: hover/click acts like a
+        // tab, while a real drag from the tab can still resize.
+        if let tab = stageTabInteraction(at: local) {
+            return tab
+        }
         // Panel-width resize handles sit over terminal pixels; they must win
         // before Ghostty's fast terminal hit path, otherwise a drag becomes
         // terminal text selection.

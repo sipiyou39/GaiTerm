@@ -477,6 +477,7 @@ struct WorkspaceDrawerView: View {
             }
             GaiAddWorkspaceRow(action: createNewWorkspace)
                 .frame(height: M.rowHeight)
+                .padding(.trailing, 42)
         }
         .animation(.spring(response: 0.23, dampingFraction: 0.9), value: workspaceDragTargetIndex)
     }
@@ -642,7 +643,7 @@ private struct GaiAddWorkspaceRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white.opacity(hovering ? 0.8 : 0.45))
                     .frame(width: 20)
-                Text("New workspace")
+                Text("New")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(.white.opacity(hovering ? 0.75 : 0.45))
                 Spacer(minLength: 0)
