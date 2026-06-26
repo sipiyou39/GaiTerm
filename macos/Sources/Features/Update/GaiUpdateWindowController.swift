@@ -8,6 +8,7 @@ private extension NSWindow.Level {
 
 private struct GaiReleaseNoteSection: Identifiable {
     let id: String
+    let introducedVersion: String
     let icon: String
     let title: String
     let summary: String
@@ -34,6 +35,7 @@ private enum GaiUpdateReleaseNotes {
     static let sections: [GaiReleaseNoteSection] = [
         .init(
             id: "agent-resume",
+            introducedVersion: "1.0.9",
             icon: "clock.arrow.circlepath",
             title: "Reprise Codex et Claude",
             summary: "Tes conversations CLI peuvent repartir au bon endroit.",
@@ -45,7 +47,20 @@ private enum GaiUpdateReleaseNotes {
             ],
             color: Color(red: 0.58, green: 0.66, blue: 0.78)),
         .init(
+            id: "agent-resume-folders",
+            introducedVersion: "1.0.10",
+            icon: "folder.badge.gearshape",
+            title: "Reprise par dossier",
+            summary: "Chaque pane garde son identite agent meme si tu changes son dossier.",
+            points: [
+                "Changer le dossier d'un pane Codex ou Claude ne casse plus son lien avec la reprise de session.",
+                "Au redemarrage, GaiTerm peut matcher chaque conversation avec le dossier propre a son pane, pas seulement avec le dossier du workspace.",
+                "Le terminal est toujours rouvert proprement, mais l'identite Codex/Claude reste attachee au pane.",
+            ],
+            color: Color(red: 0.58, green: 0.78, blue: 1.0)),
+        .init(
             id: "workspace-order",
+            introducedVersion: "1.0.9",
             icon: "rectangle.stack.fill",
             title: "Workspaces reorganises",
             summary: "La liste de gauche devient vraiment pilotable.",
@@ -57,6 +72,7 @@ private enum GaiUpdateReleaseNotes {
             color: Color(red: 0.42, green: 0.66, blue: 1.0)),
         .init(
             id: "pane-drag",
+            introducedVersion: "1.0.9",
             icon: "square.split.2x2.fill",
             title: "Panes deplacables",
             summary: "La stage peut etre reorganisee sans reconstruire ton workspace.",
@@ -69,6 +85,7 @@ private enum GaiUpdateReleaseNotes {
             color: Color(red: 1.0, green: 0.45, blue: 0.76)),
         .init(
             id: "persistence",
+            introducedVersion: "1.0.9",
             icon: "externaldrive.fill",
             title: "Memoire de session",
             summary: "GaiTerm revient avec ton espace de travail au lieu de repartir a zero.",
@@ -81,6 +98,7 @@ private enum GaiUpdateReleaseNotes {
             color: Color(red: 0.96, green: 0.74, blue: 0.30)),
         .init(
             id: "panel-sizing",
+            introducedVersion: "1.0.9",
             icon: "arrow.left.and.right",
             title: "Largeurs ajustables",
             summary: "Drawer et stage s'adaptent a ton ecran et a tes noms de fichiers.",
@@ -92,6 +110,7 @@ private enum GaiUpdateReleaseNotes {
             color: Color(red: 0.48, green: 0.88, blue: 0.70)),
         .init(
             id: "notifications-update",
+            introducedVersion: "1.0.9",
             icon: "bell.badge.fill",
             title: "Notifications et mises a jour",
             summary: "Les alertes restent utiles sans polluer ton flux.",
@@ -103,6 +122,34 @@ private enum GaiUpdateReleaseNotes {
             ],
             color: Color(red: 1.0, green: 0.35, blue: 0.35)),
     ]
+
+    static func sectionsToShow(after previousVersion: String?, upTo currentVersion: String) -> [GaiReleaseNoteSection] {
+        sections.filter { section in
+            versionCompare(section.introducedVersion, currentVersion) <= 0
+                && (previousVersion == nil || versionCompare(section.introducedVersion, previousVersion!) > 0)
+        }
+    }
+
+    private static func versionCompare(_ lhs: String, _ rhs: String) -> Int {
+        let left = versionParts(lhs)
+        let right = versionParts(rhs)
+        let count = max(left.count, right.count)
+        for index in 0..<count {
+            let l = index < left.count ? left[index] : 0
+            let r = index < right.count ? right[index] : 0
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
+    }
+
+    private static func versionParts(_ version: String) -> [Int] {
+        version
+            .split(separator: ".")
+            .map { part in
+                let digits = part.prefix { $0.isNumber }
+                return Int(String(digits)) ?? 0
+            }
+    }
 }
 
 final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
@@ -167,7 +214,11 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
         #if DEBUG
         if ProcessInfo.processInfo.environment[GaiUpdateReleaseNotes.forceEnvironmentKey] != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                self.showReleaseNotes(version: GaiUpdateReleaseNotes.displayVersion)
+                self.showReleaseNotes(
+                    version: GaiUpdateReleaseNotes.displayVersion,
+                    sections: GaiUpdateReleaseNotes.sectionsToShow(
+                        after: nil,
+                        upTo: GaiUpdateReleaseNotes.displayVersion))
             }
             return
         }
@@ -181,21 +232,27 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
         guard defaults.string(forKey: GaiUpdateReleaseNotes.shownVersionKey) != version else {
             return
         }
-        guard force || (previousSeenVersion != nil && previousSeenVersion != version) else {
+        guard force || previousSeenVersion != version else {
             return
         }
 
+        let sections = GaiUpdateReleaseNotes.sectionsToShow(after: previousSeenVersion, upTo: version)
+        guard !sections.isEmpty else { return }
+
         defaults.set(version, forKey: GaiUpdateReleaseNotes.shownVersionKey)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.showReleaseNotes(version: version)
+            self.showReleaseNotes(version: version, sections: sections)
         }
     }
 
-    func showReleaseNotes(version: String = GaiUpdateReleaseNotes.displayVersion) {
+    private func showReleaseNotes(
+        version: String = GaiUpdateReleaseNotes.displayVersion,
+        sections: [GaiReleaseNoteSection] = GaiUpdateReleaseNotes.sections
+    ) {
         closeNotesWindow()
         let view = GaiReleaseNotesWindow(
             version: version,
-            sections: GaiUpdateReleaseNotes.sections,
+            sections: sections,
             close: { [weak self] in self?.closeNotesWindow() })
         let window = makeWindow(
             title: "GaiTerm Release Notes",
@@ -344,7 +401,7 @@ private struct GaiReleaseNotesWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack(spacing: 10) {
-                Text("Ces notes ne s'affichent qu'une fois apres installation.")
+                Text("Ces notes cumulent les changements depuis ta derniere version.")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.42))
                 Spacer()

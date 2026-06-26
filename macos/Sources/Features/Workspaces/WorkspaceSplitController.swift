@@ -531,8 +531,9 @@ final class GaiSplitController {
 
     /// Reopen a pane in a different folder: swap its surface for a fresh one
     /// rooted at `directory`, in place (same split slot & size). Used by the
-    /// folder selector in the pane header. The old shell/CLI is discarded — a
-    /// clean terminal opens in the chosen folder.
+    /// folder selector in the pane header. The old shell/CLI process is
+    /// discarded, but the pane's agent identity is preserved so restart-time
+    /// resume can still match Codex/Claude sessions by this pane's new folder.
     @discardableResult
     func reopenPane(
         in workspace: GaiWorkspace,
@@ -550,7 +551,7 @@ final class GaiSplitController {
             name: oldSession?.name,
             notificationsEnabled: oldSession?.notificationsEnabled ?? true,
             autoFocusOnNotification: oldSession?.autoFocusOnNotification ?? false,
-            launchCommand: command,
+            launchCommand: command ?? oldSession?.launchCommand,
             initialDirectoryPath: cfg.workingDirectory)
         guard let newView = makeSurface(for: workspace, baseConfig: cfg, seed: seed) else { return nil }
 
