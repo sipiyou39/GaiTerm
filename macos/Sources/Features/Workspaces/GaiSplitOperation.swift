@@ -1,6 +1,33 @@
 #if os(macOS)
 import SwiftUI
 
+enum GaiPaneDragCoordinator {
+    private static var activeUntil: TimeInterval = 0
+    private static var activePaneID: UUID?
+
+    static var isDraggingPane: Bool {
+        ProcessInfo.processInfo.systemUptime < activeUntil
+    }
+
+    static var paneID: UUID? {
+        isDraggingPane ? activePaneID : nil
+    }
+
+    static func begin(_ id: UUID) {
+        activePaneID = id
+        activeUntil = ProcessInfo.processInfo.systemUptime + 8
+    }
+
+    static func keepAlive() {
+        activeUntil = ProcessInfo.processInfo.systemUptime + 2
+    }
+
+    static func end() {
+        activeUntil = 0
+        activePaneID = nil
+    }
+}
+
 /// A mutable operation requested by the GaiTerm split view.
 enum GaiSplitOperation {
     case resize(Resize)
@@ -12,7 +39,7 @@ enum GaiSplitOperation {
     }
 
     struct Drop {
-        let payload: Ghostty.SurfaceView
+        let payloadID: UUID
         let destination: Ghostty.SurfaceView
         let zone: GaiSplitDropZone
     }
@@ -23,5 +50,6 @@ enum GaiSplitDropZone: String, Equatable {
     case bottom
     case left
     case right
+    case center
 }
 #endif

@@ -45,6 +45,10 @@ final class GaiSplitController {
             name: Ghostty.Notification.didToggleSplitZoom, object: nil)
     }
 
+    func persistWorkspaceState() {
+        store.save()
+    }
+
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
@@ -88,7 +92,8 @@ final class GaiSplitController {
     /// pwd etc.).
     private func makeSurface(
         for workspace: GaiWorkspace,
-        baseConfig: Ghostty.SurfaceConfiguration?
+        baseConfig: Ghostty.SurfaceConfiguration?,
+        seed: GaiPaneSessionSeed? = nil
     ) -> Ghostty.SurfaceView? {
         guard let app = ghostty.app else {
             Ghostty.logger.warning("cannot create surface: ghostty app not loaded")
@@ -100,9 +105,9 @@ final class GaiSplitController {
             config.command = workspace.defaultCommand
             return config
         }()
-        if config.workingDirectory == nil {
-            config.workingDirectory = workspace.defaultDirectory?.path
-        }
+        config.workingDirectory = seed?.initialDirectoryPath
+            ?? config.workingDirectory
+            ?? workspace.defaultDirectory?.path
         let surfaceID = UUID()
         config.environmentVariables["GAITERM_WORKSPACE_ID"] = workspace.id.uuidString
         config.environmentVariables["GAITERM_SURFACE_ID"] = surfaceID.uuidString
@@ -112,7 +117,12 @@ final class GaiSplitController {
             bundleIdentifier == "com.sipiyou.gaiterm.debug" ? "gaiterm-debug" : "gaiterm"
 
         let view = Ghostty.SurfaceView(app, baseConfig: config, uuid: surfaceID)
-        store.attachSession(for: view, in: workspace)
+        store.attachSession(
+            for: view,
+            in: workspace,
+            seed: seed ?? GaiPaneSessionSeed(
+                launchCommand: config.command,
+                initialDirectoryPath: config.workingDirectory))
         applyPerformanceLayerPolicy(view)
         applyTerminalBackground(view, in: workspace, active: false)
         parkSurface(view)
@@ -168,6 +178,14 @@ final class GaiSplitController {
     func ensureFirstSurface(in workspace: GaiWorkspace, focus shouldFocus: Bool = true) {
         guard workspace.surfaceTree.isEmpty else { return }
 
+        if let layout = workspace.restoredPaneLayout {
+            if restorePaneLayout(layout, in: workspace, focus: shouldFocus) {
+                workspace.restoredPaneLayout = nil
+                return
+            }
+            workspace.restoredPaneLayout = nil
+        }
+
         let plan = workspace.openPlan()
         // Don't warm up workspaces that auto-run a CLI — warming would spawn
         // every workspace's CLIs at launch. A plain-shell plan may still warm.
@@ -175,6 +193,63 @@ final class GaiSplitController {
         if hasCommands && !shouldFocus { return }
 
         openPlannedSurfaces(in: workspace, plan: plan, focus: shouldFocus)
+    }
+
+    private func restorePaneLayout(
+        _ layout: GaiPaneLayoutData,
+        in workspace: GaiWorkspace,
+        focus shouldFocus: Bool
+    ) -> Bool {
+        var launchQueue: [(command: String, view: Ghostty.SurfaceView)] = []
+        guard let root = makeNode(from: layout, in: workspace, launchQueue: &launchQueue) else {
+            return false
+        }
+        workspace.surfaceTree = SplitTree(root: root, zoomed: nil)
+        onTopologyDidChange?()
+
+        for item in launchQueue {
+            runCommand(item.command, in: item.view)
+        }
+        if shouldFocus, let first = workspace.surfaceTree.root?.leftmostLeaf() {
+            focus(first)
+        }
+        return true
+    }
+
+    private func makeNode(
+        from layout: GaiPaneLayoutData,
+        in workspace: GaiWorkspace,
+        launchQueue: inout [(command: String, view: Ghostty.SurfaceView)]
+    ) -> SplitTree<Ghostty.SurfaceView>.Node? {
+        switch layout {
+        case .pane(let pane):
+            var cfg = Ghostty.SurfaceConfiguration()
+            cfg.workingDirectory = pane.directoryPath ?? workspace.defaultDirectory?.path
+            let seed = GaiPaneSessionSeed(
+                id: pane.id,
+                name: pane.name,
+                notificationsEnabled: pane.notificationsEnabled,
+                autoFocusOnNotification: pane.autoFocusOnNotification,
+                launchCommand: pane.command,
+                initialDirectoryPath: cfg.workingDirectory)
+            guard let view = makeSurface(for: workspace, baseConfig: cfg, seed: seed) else {
+                return nil
+            }
+            if let command = pane.command {
+                launchQueue.append((command, view))
+            }
+            return .leaf(view: view)
+
+        case .split(let direction, let ratio, let leftLayout, let rightLayout):
+            guard let left = makeNode(from: leftLayout, in: workspace, launchQueue: &launchQueue),
+                  let right = makeNode(from: rightLayout, in: workspace, launchQueue: &launchQueue)
+            else { return nil }
+            return .split(.init(
+                direction: direction.splitDirection,
+                ratio: ratio,
+                left: left,
+                right: right))
+        }
     }
 
     /// Opens the first pane in an empty workspace using an optional inherited
@@ -187,7 +262,10 @@ final class GaiSplitController {
         focus shouldFocus: Bool = true
     ) -> Ghostty.SurfaceView? {
         guard workspace.surfaceTree.isEmpty else { return workspace.surfaceTree.root?.leftmostLeaf() }
-        guard let view = makeSurface(for: workspace, baseConfig: baseConfig) else { return nil }
+        let seed = GaiPaneSessionSeed(
+            launchCommand: baseConfig?.command,
+            initialDirectoryPath: baseConfig?.workingDirectory ?? workspace.defaultDirectory?.path)
+        guard let view = makeSurface(for: workspace, baseConfig: baseConfig, seed: seed) else { return nil }
         workspace.surfaceTree = SplitTree(view: view)
         onTopologyDidChange?()
         if shouldFocus { focus(view) }
@@ -226,7 +304,10 @@ final class GaiSplitController {
             return cfg
         }
 
-        guard let first = makeSurface(for: workspace, baseConfig: config(for: 0)) else { return }
+        let firstSeed = GaiPaneSessionSeed(
+            launchCommand: plan[0].command,
+            initialDirectoryPath: (plan[0].directory ?? workspace.defaultDirectory)?.path)
+        guard let first = makeSurface(for: workspace, baseConfig: config(for: 0), seed: firstSeed) else { return }
         workspace.surfaceTree = SplitTree(view: first)
 
         // The top pane of each column (created by splitting the previous top
@@ -235,7 +316,10 @@ final class GaiSplitController {
         for c in 1..<cols {
             guard let top = newSplit(
                 in: workspace, at: columnTops[c - 1], direction: .right,
-                baseConfig: config(for: columnStart[c])) else { break }
+                baseConfig: config(for: columnStart[c]),
+                seed: GaiPaneSessionSeed(
+                    launchCommand: plan[columnStart[c]].command,
+                    initialDirectoryPath: (plan[columnStart[c]].directory ?? workspace.defaultDirectory)?.path)) else { break }
             columnTops.append(top)
         }
 
@@ -249,7 +333,10 @@ final class GaiSplitController {
                 let idx = start + r
                 guard let view = newSplit(
                     in: workspace, at: last, direction: .down,
-                    baseConfig: config(for: idx)) else { break }
+                    baseConfig: config(for: idx),
+                    seed: GaiPaneSessionSeed(
+                        launchCommand: plan[idx].command,
+                        initialDirectoryPath: (plan[idx].directory ?? workspace.defaultDirectory)?.path)) else { break }
                 views[idx] = view
                 last = view
             }
@@ -284,10 +371,14 @@ final class GaiSplitController {
         in workspace: GaiWorkspace,
         at target: Ghostty.SurfaceView?,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
-        baseConfig: Ghostty.SurfaceConfiguration? = nil
+        baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        seed: GaiPaneSessionSeed? = nil
     ) -> Ghostty.SurfaceView? {
         guard let at = target ?? workspace.surfaceTree.root?.leftmostLeaf() else { return nil }
-        guard let newView = makeSurface(for: workspace, baseConfig: baseConfig) else { return nil }
+        let resolvedSeed = seed ?? GaiPaneSessionSeed(
+            launchCommand: baseConfig?.command,
+            initialDirectoryPath: baseConfig?.workingDirectory ?? workspace.defaultDirectory?.path)
+        guard let newView = makeSurface(for: workspace, baseConfig: baseConfig, seed: resolvedSeed) else { return nil }
         do {
             workspace.surfaceTree = try workspace.surfaceTree.inserting(
                 view: newView, at: at, direction: direction)
@@ -316,25 +407,46 @@ final class GaiSplitController {
             }
 
         case .drop(let drop):
+            guard let payload = workspace.surfaceTree.first(where: { $0.id == drop.payloadID }) else { return }
+            guard payload !== drop.destination else { return }
+            if drop.zone == .center {
+                swapPanes(in: workspace, source: payload, destination: drop.destination)
+                return
+            }
+
             let direction: SplitTree<Ghostty.SurfaceView>.NewDirection = switch drop.zone {
             case .top: .up
             case .bottom: .down
             case .left: .left
             case .right: .right
+            case .center: .right
             }
             // v1: only moves within the same workspace tree.
-            guard let sourceNode = workspace.surfaceTree.root?.node(view: drop.payload) else { return }
+            guard let sourceNode = workspace.surfaceTree.root?.node(view: payload) else { return }
             let without = workspace.surfaceTree.removing(sourceNode)
             do {
                 workspace.surfaceTree = try without.inserting(
-                    view: drop.payload, at: drop.destination, direction: direction)
+                    view: payload, at: drop.destination, direction: direction)
             } catch {
                 Ghostty.logger.warning("failed split drop: \(error, privacy: .public)")
                 return
             }
             onTopologyDidChange?()
-            focus(drop.payload)
+            focus(payload)
         }
+    }
+
+    private func swapPanes(
+        in workspace: GaiWorkspace,
+        source: Ghostty.SurfaceView,
+        destination: Ghostty.SurfaceView
+    ) {
+        guard let root = workspace.surfaceTree.root else { return }
+        workspace.surfaceTree = SplitTree(
+            root: root.gaiSwappingLeaves(source, destination),
+            zoomed: nil)
+        onTopologyDidChange?()
+        focus(source)
     }
 
     /// Zoom a pane to fill the whole card (or restore it). Mirrors Ghostty's
@@ -421,7 +533,15 @@ final class GaiSplitController {
 
         var cfg = Ghostty.SurfaceConfiguration()
         cfg.workingDirectory = directory ?? workspace.defaultDirectory?.path
-        guard let newView = makeSurface(for: workspace, baseConfig: cfg) else { return nil }
+        let oldSession = workspace.session(for: oldView)
+        let seed = GaiPaneSessionSeed(
+            id: oldSession?.id,
+            name: oldSession?.name,
+            notificationsEnabled: oldSession?.notificationsEnabled ?? true,
+            autoFocusOnNotification: oldSession?.autoFocusOnNotification ?? false,
+            launchCommand: nil,
+            initialDirectoryPath: cfg.workingDirectory)
+        guard let newView = makeSurface(for: workspace, baseConfig: cfg, seed: seed) else { return nil }
 
         // Drop a stale zoom on the pane being replaced so the tree stays valid.
         let tree = workspace.surfaceTree.zoomed == oldNode
@@ -502,6 +622,27 @@ final class GaiSplitController {
                 node: targetNode, by: amount, in: spatialDirection, with: bounds)
         } catch {
             Ghostty.logger.warning("failed split keyboard resize: \(error, privacy: .public)")
+        }
+    }
+}
+
+private extension SplitTree<Ghostty.SurfaceView>.Node {
+    func gaiSwappingLeaves(
+        _ source: Ghostty.SurfaceView,
+        _ destination: Ghostty.SurfaceView
+    ) -> Self {
+        switch self {
+        case .leaf(let view):
+            if view === source { return .leaf(view: destination) }
+            if view === destination { return .leaf(view: source) }
+            return self
+
+        case .split(let split):
+            return .split(.init(
+                direction: split.direction,
+                ratio: split.ratio,
+                left: split.left.gaiSwappingLeaves(source, destination),
+                right: split.right.gaiSwappingLeaves(source, destination)))
         }
     }
 }

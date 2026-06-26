@@ -1,6 +1,11 @@
 #if os(macOS)
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
+
+private extension UTType {
+    static let gaiPaneID = UTType(exportedAs: "com.sipiyou.gaiterm.pane-id")
+}
 
 // MARK: - Metrics
 
@@ -52,6 +57,12 @@ struct WorkspaceStageView: View {
     let onDidCollapse: () -> Void
     /// Reapplies renderer focus/color policy when keyboard focus changes.
     let onFocusChanged: () -> Void
+    /// Pauses terminal rendering before live panel resize starts.
+    let onResizeBegan: () -> Void
+    /// Applies a user-driven stage width.
+    let onResizeWidth: (CGFloat) -> Void
+    /// Restores terminal rendering after live panel resize ends.
+    let onResizeEnded: () -> Void
 
     /// Slab offset: 0 = out; +stageCardWidth = tucked (panel still at its open
     /// frame). The mirror of the drawer's negative slide.
@@ -60,6 +71,8 @@ struct WorkspaceStageView: View {
     @State private var visualOpen = false
     @State private var generation = 0
     @State private var tabPressed = false
+    @State private var stageResizeStartWidth: CGFloat?
+    @State private var stageResizeHover = false
 
     @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
 
@@ -112,6 +125,7 @@ struct WorkspaceStageView: View {
         .frame(maxHeight: .infinity)
         .overlay(alignment: .leading) { chevron }
         .overlay(alignment: .leading) { tabHitArea }
+        .overlay(alignment: .leading) { stageResizeHandle.offset(x: D.tabWidth - 17) }
     }
 
     /// Flat panel gray instead of Liquid Glass — the glass re-rendered every
@@ -155,6 +169,26 @@ struct WorkspaceStageView: View {
                         tabPressed = false
                         ui.isStageExpanded.toggle()
                     })
+    }
+
+    private var stageResizeHandle: some View {
+        GaiPanelResizeHandle(
+            hovering: $stageResizeHover,
+            onBegan: {
+                stageResizeStartWidth = ui.stageCardWidth
+                onResizeBegan()
+            },
+            onChanged: { deltaX in
+                let start = stageResizeStartWidth ?? ui.stageCardWidth
+                onResizeWidth(start - deltaX)
+            },
+            onEnded: {
+                stageResizeStartWidth = nil
+                onResizeEnded()
+            })
+        .frame(width: 34)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
     }
 
     // MARK: Slide choreography (mirror of WorkspaceDrawerView)
@@ -514,7 +548,8 @@ private struct GaiSplitSubtree: View {
                 onToggleNotifications: { onToggleNotifications(surfaceView) },
                 onToggleAutoFocus: { onToggleAutoFocus(surfaceView) },
                 onClose: { onClosePane(surfaceView) },
-                onChangeFolder: { onChangeFolder(surfaceView, $0) })
+                onChangeFolder: { onChangeFolder(surfaceView, $0) },
+                onDropPane: { action(.drop($0)) })
             // Explicit identity per leaf: without it SwiftUI may reuse one
             // pane's platform container for a *different* surface across
             // tree rebuilds, physically swapping terminals between slots
@@ -598,10 +633,27 @@ private struct GaiPaneView: View {
     let onToggleAutoFocus: () -> Void
     let onClose: () -> Void
     let onChangeFolder: (String) -> Void
+    let onDropPane: (GaiSplitOperation.Drop) -> Void
 
     @State private var branch: String?
+    @State private var activeDropZone: GaiSplitDropZone?
 
     var body: some View {
+        GeometryReader { _ in
+            paneStack
+                .overlay { GaiPaneDropGuide(zone: activeDropZone, accent: accent) }
+                .overlay {
+                    GaiPaneDropTarget(
+                        destination: surfaceView,
+                        activeZone: $activeDropZone,
+                        onDrop: onDropPane)
+                }
+        }
+        .onAppear(perform: refreshBranch)
+        .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
+    }
+
+    private var paneStack: some View {
         VStack(spacing: 0) {
             paneHeader
             // Flat pane, no card: the terminal keeps the same fill; focus is a
@@ -621,8 +673,6 @@ private struct GaiPaneView: View {
                     transaction.animation = nil
                 }
         }
-        .onAppear(perform: refreshBranch)
-        .onChange(of: surfaceView.pwd) { _ in refreshBranch() }
     }
 
     private var paneIsActive: Bool {
@@ -669,6 +719,13 @@ private struct GaiPaneView: View {
     private func paneHeaderContent(width: CGFloat) -> some View {
         let layout = GaiPaneHeaderLayout(width: width)
         return HStack(spacing: layout.spacing) {
+            if layout.showsDragHandle {
+                GaiPaneDragHandle(size: layout.controlSize)
+                    .onDrag {
+                        paneDragProvider()
+                    }
+                    .layoutPriority(30)
+            }
             if layout.showsTitle {
                 GaiPaneTitle(
                     surfaceView: surfaceView,
@@ -755,6 +812,20 @@ private struct GaiPaneView: View {
             }
         }
     }
+
+    private func paneDragProvider() -> NSItemProvider {
+        GaiPaneDragCoordinator.begin(surfaceView.id)
+        let provider = NSItemProvider()
+        let data = Data(surfaceView.id.uuidString.utf8)
+        provider.registerDataRepresentation(
+            forTypeIdentifier: UTType.gaiPaneID.identifier,
+            visibility: .ownProcess
+        ) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
+    }
 }
 
 private struct GaiPaneHeaderLayout {
@@ -784,12 +855,14 @@ private struct GaiPaneHeaderLayout {
     }
 
     var showsTitle: Bool { width >= 118 }
+    var showsDragHandle: Bool { width >= 160 }
     var showsNotificationBadge: Bool { width >= 150 }
     var showsDirectory: Bool { width >= 360 }
     var showsBranch: Bool { width >= 520 }
 
     var titleMaxWidth: CGFloat? {
-        let reservedControls = controlSize * 6 + controlSpacing * 5 + edgePadding * 2
+        let drag = showsDragHandle ? controlSize + spacing : 0
+        let reservedControls = controlSize * 6 + controlSpacing * 5 + edgePadding * 2 + drag
         let available = max(0, width - reservedControls - spacing)
         if width < 180 { return available }
         if width < 300 { return min(available, 90) }
@@ -803,6 +876,207 @@ private struct GaiPaneHeaderLayout {
     var branchMaxWidth: CGFloat {
         width < 540 ? 68 : 120
     }
+}
+
+private struct GaiPaneDragHandle: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: max(7, size * 0.46), weight: .bold))
+            .foregroundStyle(.white.opacity(0.44))
+            .frame(width: size, height: size)
+            .contentShape(Rectangle())
+            .help("Move pane")
+    }
+}
+
+private struct GaiPaneDropGuide: View {
+    let zone: GaiSplitDropZone?
+    let accent: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            if let zone {
+                let rect = guideRect(zone: zone, size: geo.size)
+                Rectangle()
+                    .fill(accent.opacity(0.20))
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                    .overlay {
+                        Rectangle()
+                            .strokeBorder(
+                                accent.opacity(0.95),
+                                style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                    }
+                    .overlay {
+                        Text(label(for: zone))
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(accent.opacity(0.95)))
+                            .shadow(color: .black.opacity(0.28), radius: 5, y: 2)
+                            .position(x: rect.midX, y: rect.midY)
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func guideRect(zone: GaiSplitDropZone, size: CGSize) -> CGRect {
+        switch zone {
+        case .left:
+            return CGRect(x: 0, y: 0, width: size.width * 0.5, height: size.height)
+        case .right:
+            let width = size.width * 0.5
+            return CGRect(x: size.width - width, y: 0, width: width, height: size.height)
+        case .top:
+            return CGRect(x: 0, y: 0, width: size.width, height: size.height * 0.5)
+        case .bottom:
+            let height = size.height * 0.5
+            return CGRect(x: 0, y: size.height - height, width: size.width, height: height)
+        case .center:
+            return CGRect(origin: .zero, size: size)
+        }
+    }
+
+    private func label(for zone: GaiSplitDropZone) -> String {
+        switch zone {
+        case .top: return "Split Top"
+        case .bottom: return "Split Bottom"
+        case .left: return "Split Left"
+        case .right: return "Split Right"
+        case .center: return "Swap"
+        }
+    }
+}
+
+private struct GaiPaneDropTarget: NSViewRepresentable {
+    let destination: Ghostty.SurfaceView
+    @Binding var activeZone: GaiSplitDropZone?
+    let onDrop: (GaiSplitOperation.Drop) -> Void
+
+    final class TargetView: NSView {
+        weak var destination: Ghostty.SurfaceView?
+        var setActiveZone: ((GaiSplitDropZone?) -> Void)?
+        var onDrop: ((GaiSplitOperation.Drop) -> Void)?
+        private let pasteboardType = NSPasteboard.PasteboardType(UTType.gaiPaneID.identifier)
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            registerForDraggedTypes([pasteboardType])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            GaiPaneDragCoordinator.isDraggingPane ? self : nil
+        }
+
+        override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+            guard accepts(sender) else { return [] }
+            updateZone(sender)
+            return operation(for: sender)
+        }
+
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            guard accepts(sender) else { return [] }
+            GaiPaneDragCoordinator.keepAlive()
+            updateZone(sender)
+            return operation(for: sender)
+        }
+
+        override func draggingExited(_ sender: NSDraggingInfo?) {
+            setActiveZone?(nil)
+        }
+
+        override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            accepts(sender)
+        }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            defer {
+                setActiveZone?(nil)
+                GaiPaneDragCoordinator.end()
+            }
+            guard let destination,
+                  let id = draggedPaneID(sender)
+            else { return false }
+            let zone = gaiPaneDropZone(for: topLeftPoint(from: sender), size: bounds.size)
+            onDrop?(.init(payloadID: id, destination: destination, zone: zone))
+            return true
+        }
+
+        private func updateZone(_ sender: NSDraggingInfo) {
+            guard accepts(sender) else {
+                setActiveZone?(nil)
+                return
+            }
+            setActiveZone?(gaiPaneDropZone(for: topLeftPoint(from: sender), size: bounds.size))
+        }
+
+        private func accepts(_ sender: NSDraggingInfo) -> Bool {
+            draggedPaneID(sender) != nil
+        }
+
+        private func draggedPaneID(_ sender: NSDraggingInfo) -> UUID? {
+            if let data = sender.draggingPasteboard.data(forType: pasteboardType),
+               let raw = String(data: data, encoding: .utf8),
+               let id = UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return id
+            }
+            return GaiPaneDragCoordinator.paneID
+        }
+
+        private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
+            let mask = sender.draggingSourceOperationMask
+            if mask.contains(.move) { return .move }
+            if mask.contains(.copy) { return .copy }
+            return .generic
+        }
+
+        private func topLeftPoint(from sender: NSDraggingInfo) -> CGPoint {
+            let point = convert(sender.draggingLocation, from: nil)
+            return CGPoint(x: point.x, y: bounds.height - point.y)
+        }
+    }
+
+    func makeNSView(context: Context) -> TargetView {
+        let view = TargetView()
+        view.destination = destination
+        view.setActiveZone = { activeZone = $0 }
+        view.onDrop = onDrop
+        return view
+    }
+
+    func updateNSView(_ view: TargetView, context: Context) {
+        view.destination = destination
+        view.setActiveZone = { activeZone = $0 }
+        view.onDrop = onDrop
+    }
+}
+
+private func gaiPaneDropZone(for location: CGPoint, size: CGSize) -> GaiSplitDropZone {
+        let x = max(0, min(size.width, location.x))
+        let y = max(0, min(size.height, location.y))
+        let xRatio = size.width <= 0 ? 0.5 : x / size.width
+        let yRatio = size.height <= 0 ? 0.5 : y / size.height
+        let edge: CGFloat = 0.28
+        if xRatio < edge { return .left }
+        if xRatio > 1 - edge { return .right }
+        if yRatio < edge { return .top }
+        if yRatio > 1 - edge { return .bottom }
+        return .center
 }
 
 private struct GaiPaneAttentionBadge: View {
@@ -968,6 +1242,103 @@ private struct GaiSurfaceLayerAsserter: NSViewRepresentable {
     }
 }
 
+/// AppKit-level drag interception for panel resize. This sits above Ghostty's
+/// terminal hit path, so grabbing the stage edge never turns into text
+/// selection inside the terminal.
+struct GaiPanelResizeHandle: NSViewRepresentable {
+    @Binding var hovering: Bool
+    let onBegan: () -> Void
+    let onChanged: (CGFloat) -> Void
+    let onEnded: () -> Void
+
+    final class HandleView: NSView {
+        var setHover: (Bool) -> Void = { _ in }
+        var onBegan: () -> Void = {}
+        var onChanged: (CGFloat) -> Void = { _ in }
+        var onEnded: () -> Void = {}
+        private var trackingAreaRef: NSTrackingArea?
+        private var dragStartScreenX: CGFloat?
+
+        override var acceptsFirstResponder: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .resizeLeftRight)
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func updateTrackingAreas() {
+            if let trackingAreaRef {
+                removeTrackingArea(trackingAreaRef)
+            }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate, .inVisibleRect],
+                owner: self,
+                userInfo: nil)
+            trackingAreaRef = area
+            addTrackingArea(area)
+            super.updateTrackingAreas()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            setHover(true)
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            if dragStartScreenX == nil {
+                setHover(false)
+                NSCursor.arrow.set()
+            }
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragStartScreenX = NSEvent.mouseLocation.x
+            setHover(true)
+            onBegan()
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let dragStartScreenX else { return }
+            onChanged(NSEvent.mouseLocation.x - dragStartScreenX)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            dragStartScreenX = nil
+            setHover(bounds.contains(convert(event.locationInWindow, from: nil)))
+            onEnded()
+        }
+    }
+
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: HandleView, context: Context) {
+        view.setHover = { hovering = $0 }
+        view.onBegan = onBegan
+        view.onChanged = onChanged
+        view.onEnded = onEnded
+    }
+}
+
 /// AppKit-level click interception for header controls. An NSView gets the
 /// `mouseDown` straight from hit-testing — before SwiftUI's gesture and
 /// focus machinery — so the control fires on the *first* click no matter
@@ -1106,6 +1477,7 @@ private struct GaiPaneTitle: View {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let session else { return }
         session.name = trimmed
+        splits.persistWorkspaceState()
     }
 }
 

@@ -13,6 +13,12 @@ final class GaiWorkspaceUIModel: ObservableObject {
     @Published var isExpanded: Bool = false
     /// The workspace selected in the drawer.
     @Published var selectedWorkspaceID: GaiWorkspace.ID?
+    /// Visible width of the drawer card. Persisted because the drawer is also
+    /// a file browser; users need the width they chose to stay put.
+    @Published var drawerCardWidth: CGFloat = {
+        let value = UserDefaults.standard.double(forKey: GaiPreferenceKey.drawerCardWidth)
+        return max(value > 0 ? CGFloat(value) : GaiDrawerMetrics.cardWidth, GaiDrawerMetrics.cardWidth)
+    }()
     /// Current card height (rows + chrome, capped to the screen). Owned by
     /// the manager so the panel frames and the SwiftUI slab always agree.
     @Published var cardHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
@@ -93,13 +99,22 @@ final class GaiWorkspaceUIModel: ObservableObject {
     /// Visible width of the terminal card when the stage is out. Owned by the
     /// manager (depends on the screen) so the panel frames and the SwiftUI
     /// slab always agree — same contract as `cardHeight` for the drawer.
-    @Published var stageCardWidth: CGFloat = 600
+    @Published var stageCardWidth: CGFloat = {
+        let value = UserDefaults.standard.double(forKey: GaiPreferenceKey.stageCardWidth)
+        return value > 0 ? CGFloat(value) : 600
+    }()
+    /// Whether drawer/stage widths move together, preserving the minimum gap
+    /// between them as the user resizes either side.
+    @Published var panelWidthsLinked: Bool =
+        (UserDefaults.standard.object(forKey: GaiPreferenceKey.linkPanelWidths) as? Bool) ?? true
 
     /// True while the stage slab is mid-slide. The manager pauses terminal
     /// rendering during slides so the panel movement does not compete with
     /// busy CLI redraws.
     @Published private(set) var isSliding: Bool = false
+    @Published private(set) var isPanelResizing: Bool = false
     private var slideDepth: Int = 0
+    private var panelResizeDepth: Int = 0
     func beginSlide() {
         slideDepth += 1
         setTerminalRenderingAllowed(false)
@@ -109,6 +124,18 @@ final class GaiWorkspaceUIModel: ObservableObject {
         slideDepth = max(0, slideDepth - 1)
         if slideDepth == 0, isSliding {
             isSliding = false
+            setTerminalRenderingAllowed(isStageExpanded)
+        }
+    }
+    func beginPanelResize() {
+        panelResizeDepth += 1
+        setTerminalRenderingAllowed(false)
+        if !isPanelResizing { isPanelResizing = true }
+    }
+    func endPanelResize() {
+        panelResizeDepth = max(0, panelResizeDepth - 1)
+        if panelResizeDepth == 0, isPanelResizing {
+            isPanelResizing = false
             setTerminalRenderingAllowed(isStageExpanded)
         }
     }
@@ -123,6 +150,40 @@ final class GaiWorkspaceUIModel: ObservableObject {
 /// the (non-key) floating panel registers immediately.
 private class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview else { return super.hitTest(point) }
+        let local = convert(point, from: superview)
+        if let handle = resizeHandle(at: local) {
+            return handle
+        }
+        return super.hitTest(point)
+    }
+
+    private func resizeHandle(at local: NSPoint) -> GaiPanelResizeHandle.HandleView? {
+        var best: (view: GaiPanelResizeHandle.HandleView, area: CGFloat)?
+        func walk(_ view: NSView) {
+            if let handle = view as? GaiPanelResizeHandle.HandleView,
+               !handle.isHidden,
+               handle.bounds.width <= 48,
+               let rect = convertedRect(of: handle),
+               rect.contains(local) {
+                let area = rect.width * rect.height
+                if best == nil || area < best!.area {
+                    best = (handle, area)
+                }
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(self)
+        return best?.view
+    }
+
+    private func convertedRect(of view: NSView) -> CGRect? {
+        guard view.window === window else { return nil }
+        return view.convert(view.bounds, to: self)
+    }
+
     required init(rootView: Content) { super.init(rootView: rootView) }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
@@ -192,6 +253,30 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
         return best?.surface
     }
 
+    private func resizeHandle(at local: NSPoint) -> GaiPanelResizeHandle.HandleView? {
+        var best: (view: GaiPanelResizeHandle.HandleView, area: CGFloat)?
+        func walk(_ view: NSView) {
+            if let handle = view as? GaiPanelResizeHandle.HandleView,
+               !handle.isHidden,
+               handle.bounds.width <= 48,
+               let rect = convertedRect(of: handle),
+               rect.contains(local) {
+                let area = rect.width * rect.height
+                if best == nil || area < best!.area {
+                    best = (handle, area)
+                }
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(self)
+        return best?.view
+    }
+
+    private func convertedRect(of view: NSView) -> CGRect? {
+        guard view.window === window else { return nil }
+        return view.convert(view.bounds, to: self)
+    }
+
     /// Walk up from an AppKit hit to the terminal surface that contains it.
     private func enclosingSurface(of view: NSView?) -> Ghostty.SurfaceView? {
         var cur = view
@@ -207,6 +292,20 @@ private final class StageHostingView<Content: View>: FirstMouseHostingView<Conte
         // The hit point in our own (flipped) coordinate space — the same
         // space `renderedRect` reports in.
         let local = convert(point, from: superview)
+
+        // Pane drag/drop needs the pane-local drop target above the terminal
+        // surface. During that short interaction, bypass the terminal fast path
+        // so AppKit can hit-test the overlay normally.
+        if GaiPaneDragCoordinator.isDraggingPane {
+            return super.hitTest(point)
+        }
+
+        // Panel-width resize handles sit over terminal pixels; they must win
+        // before Ghostty's fast terminal hit path, otherwise a drag becomes
+        // terminal text selection.
+        if let handle = resizeHandle(at: local) {
+            return handle
+        }
 
         // 1. Terminal surface hot path: bypass SwiftUI's responder walk for
         // the area users interact with most during multi-pane CLI runs.
@@ -272,6 +371,8 @@ final class GaiWorkspaceManager {
         }
         controller.onTopologyDidChange = { [weak self] in
             self?.updateSurfacePerformanceState()
+            self?.refreshSurfacePersistenceObservers()
+            self?.scheduleWorkspaceSave()
         }
         return controller
     }()
@@ -288,6 +389,8 @@ final class GaiWorkspaceManager {
     /// springs to its new height — see `updateWorkspaceEditor`.
     private var panelContentHeight: CGFloat = GaiDrawerMetrics.cardHeight(forRows: 1)
     private var cancellables: Set<AnyCancellable> = []
+    private var surfaceStateCancellables: [ObjectIdentifier: AnyCancellable] = [:]
+    private var pendingWorkspaceSave: DispatchWorkItem?
     private var observersRegistered = false
     private var terminalBackgrounds: [ObjectIdentifier: GaiTerminalPaneRGB] = [:]
     private var pendingGenericExternalNotifications: [ObjectIdentifier: DispatchWorkItem] = [:]
@@ -490,15 +593,17 @@ final class GaiWorkspaceManager {
             return
         }
 
-        // Restore saved workspaces unless the user turned that off in Settings.
-        // No demo seeding — a fresh install opens to the empty state.
-        let restore = UserDefaults.standard.object(forKey: GaiPreferenceKey.restoreWorkspaces) as? Bool ?? true
-        if restore { store.loadPersisted() }
+        // Restore saved workspaces by default. GaiTerm is a workspace manager:
+        // deleting a workspace is the user's explicit "do not restore" action.
+        UserDefaults.standard.set(true, forKey: GaiPreferenceKey.restoreWorkspaces)
+        store.loadPersisted()
         // If workspaces exist, one of them is always the active workspace. The
         // default scratch terminal is only for the truly empty-workspace state.
         syncWorkspaceSelection()
         warmFirstSurfaces()
+        refreshSurfacePersistenceObservers()
         recomputeCardHeight()
+        constrainPanelWidths()
         ensurePanel()
         snapPanel(open: false)
         panel?.orderFrontRegardless()
@@ -548,6 +653,32 @@ final class GaiWorkspaceManager {
         }
     }
 
+    private func refreshSurfacePersistenceObservers() {
+        let liveViews = allWorkspaces.flatMap { Array($0.surfaceTree) }
+        let liveIDs = Set(liveViews.map { ObjectIdentifier($0) })
+        surfaceStateCancellables = surfaceStateCancellables.filter { liveIDs.contains($0.key) }
+
+        for view in liveViews {
+            let id = ObjectIdentifier(view)
+            guard surfaceStateCancellables[id] == nil else { continue }
+            surfaceStateCancellables[id] = view.$pwd
+                .dropFirst()
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.scheduleWorkspaceSave()
+                }
+        }
+    }
+
+    private func scheduleWorkspaceSave() {
+        pendingWorkspaceSave?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.store.save()
+        }
+        pendingWorkspaceSave = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
     /// Performance policy for Ghostty surfaces. A surface renders only when it
     /// is actually visible in the terminal stage. Everything off-stage, hidden
     /// by the editor, hidden by zoom, or moving during a slide is occluded.
@@ -557,6 +688,7 @@ final class GaiWorkspaceManager {
             ui.isStageExpanded &&
             ui.terminalRenderingAllowed &&
             !ui.isSliding &&
+            !ui.isPanelResizing &&
             !ui.stageShowsEditor
 
         let visibleViews: [Ghostty.SurfaceView] = if canRenderStage {
@@ -731,7 +863,11 @@ final class GaiWorkspaceManager {
             store: store,
             ui: ui,
             onWillOpen: { [weak self] in self?.snapPanel(open: true) },
-            onDidClose: { [weak self] in self?.snapPanel(open: false) })
+            onDidClose: { [weak self] in self?.snapPanel(open: false) },
+            onResizeBegan: { [weak self] in self?.beginPanelResize() },
+            onResizeWidth: { [weak self] width in self?.setDrawerCardWidth(width) },
+            onResizeEnded: { [weak self] in self?.endPanelResize() },
+            onToggleWidthLink: { [weak self] in self?.togglePanelWidthLink() })
         let host = FirstMouseHostingView(rootView: drawer)
         host.autoresizingMask = [.width, .height]
         panel.contentView = host
@@ -781,7 +917,10 @@ final class GaiWorkspaceManager {
             onClose: { [weak self] in self?.store.openWorkspaceID = nil },
             onWillExpand: { [weak self] in self?.snapStagePanel(open: true) },
             onDidCollapse: { [weak self] in self?.snapStagePanel(open: false) },
-            onFocusChanged: { [weak self] in self?.updateSurfacePerformanceState() })
+            onFocusChanged: { [weak self] in self?.updateSurfacePerformanceState() },
+            onResizeBegan: { [weak self] in self?.beginPanelResize() },
+            onResizeWidth: { [weak self] width in self?.setStageCardWidth(width) },
+            onResizeEnded: { [weak self] in self?.endPanelResize() })
         let host = StageHostingView(rootView: stage)
         host.surfacesProvider = { [weak self] in
             guard let self else { return [] }
@@ -879,18 +1018,130 @@ final class GaiWorkspaceManager {
         ui.stageCardWidth + GaiDrawerMetrics.tabWidth + GaiDrawerMetrics.bleed
     }
 
+    private var drawerSlabWidth: CGFloat {
+        GaiDrawerMetrics.bleed + ui.drawerCardWidth
+    }
+
+    private var minimumPanelGap: CGFloat {
+        GaiDrawerMetrics.tabWidth
+            + GaiStageMetrics.tabClearance
+            + GaiDrawerMetrics.tabWidth
+    }
+
+    private var minDrawerCardWidth: CGFloat { GaiDrawerMetrics.cardWidth }
+    private var maxDrawerCardWidth: CGFloat { 560 }
+    private var minStageCardWidth: CGFloat { 320 }
+
+    private func clamp(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+        Swift.min(Swift.max(value, minValue), maxValue)
+    }
+
     /// Card left edge = past the open drawer's footprint, a gap, then room for
     /// the stage's OWN pull tab (which protrudes to the left of its card). That
     /// last term keeps the stage tab clear of the drawer tab so both are
     /// clickable when the drawer is expanded over the stage.
     private func recomputeStageCardWidth() {
+        constrainPanelWidths()
+    }
+
+    private func setDrawerCardWidth(_ proposed: CGFloat) {
+        updatePanelWidths(proposedDrawer: proposed, proposedStage: nil, persist: false)
+    }
+
+    private func setStageCardWidth(_ proposed: CGFloat) {
+        updatePanelWidths(proposedDrawer: nil, proposedStage: proposed, persist: false)
+    }
+
+    private func beginPanelResize() {
+    }
+
+    private func endPanelResize() {
+        persistPanelWidths()
+        applyPanelWidthGeometry()
+    }
+
+    private func togglePanelWidthLink() {
+        ui.panelWidthsLinked.toggle()
+        UserDefaults.standard.set(ui.panelWidthsLinked, forKey: GaiPreferenceKey.linkPanelWidths)
+        updatePanelWidths(proposedDrawer: ui.drawerCardWidth, proposedStage: nil, persist: true)
+    }
+
+    private func constrainPanelWidths(persist: Bool = false) {
+        updatePanelWidths(
+            proposedDrawer: ui.drawerCardWidth,
+            proposedStage: ui.stageCardWidth,
+            persist: persist)
+    }
+
+    private func updatePanelWidths(
+        proposedDrawer: CGFloat?,
+        proposedStage: CGFloat?,
+        persist: Bool
+    ) {
         guard let visible = targetScreen()?.visibleFrame else { return }
-        let left = visible.minX
-            + GaiDrawerMetrics.cardWidth      // drawer card
-            + GaiDrawerMetrics.tabWidth        // drawer pull tab
-            + GaiStageMetrics.tabClearance     // gap that absorbs the overshoot
-            + GaiDrawerMetrics.tabWidth        // the stage's own pull tab
-        ui.stageCardWidth = max(visible.maxX - left, 320)
+        let available = visible.width - minimumPanelGap
+        guard available > minDrawerCardWidth + minStageCardWidth else { return }
+
+        let drawerMax = Swift.min(maxDrawerCardWidth, available - minStageCardWidth)
+        let stageMax = available - minDrawerCardWidth
+        var drawer = proposedDrawer ?? ui.drawerCardWidth
+        var stage = proposedStage ?? ui.stageCardWidth
+
+        if ui.panelWidthsLinked {
+            if proposedStage != nil, proposedDrawer == nil {
+                stage = clamp(stage, min: minStageCardWidth, max: stageMax)
+                drawer = clamp(available - stage, min: minDrawerCardWidth, max: drawerMax)
+                stage = available - drawer
+            } else {
+                drawer = clamp(drawer, min: minDrawerCardWidth, max: drawerMax)
+                stage = available - drawer
+            }
+        } else {
+            drawer = clamp(drawer, min: minDrawerCardWidth, max: drawerMax)
+            let stageMaxForDrawer = available - drawer
+            stage = clamp(stage, min: minStageCardWidth, max: stageMaxForDrawer)
+
+            if drawer + stage > available {
+                if proposedDrawer != nil, proposedStage == nil {
+                    drawer = clamp(available - stage, min: minDrawerCardWidth, max: drawerMax)
+                } else {
+                    stage = clamp(available - drawer, min: minStageCardWidth, max: stageMax)
+                }
+            }
+        }
+
+        let changed =
+            abs(ui.drawerCardWidth - drawer) > 0.5
+            || abs(ui.stageCardWidth - stage) > 0.5
+        if changed {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                ui.drawerCardWidth = drawer
+                ui.stageCardWidth = stage
+            }
+            applyPanelWidthGeometry()
+        }
+        if persist {
+            persistPanelWidths()
+        }
+    }
+
+    private func persistPanelWidths() {
+        UserDefaults.standard.set(Double(ui.drawerCardWidth), forKey: GaiPreferenceKey.drawerCardWidth)
+        UserDefaults.standard.set(Double(ui.stageCardWidth), forKey: GaiPreferenceKey.stageCardWidth)
+        UserDefaults.standard.set(ui.panelWidthsLinked, forKey: GaiPreferenceKey.linkPanelWidths)
+    }
+
+    private func applyPanelWidthGeometry() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            snapPanel(open: ui.isExpanded)
+            if stagePanel?.isVisible == true {
+                snapStagePanel(open: ui.isStageExpanded)
+            }
+        }
     }
 
     /// Out: card flush with the right edge, bleed hanging off-screen right,
@@ -920,9 +1171,8 @@ final class GaiWorkspaceManager {
 
     private func snapStagePanel(open: Bool) {
         guard let stagePanel, let screen = targetScreen() else { return }
-        stagePanel.setFrame(
-            open ? stageOpenFrame(on: screen) : stageClosedFrame(on: screen),
-            display: true)
+        let frame = open ? stageOpenFrame(on: screen) : stageClosedFrame(on: screen)
+        setFrameIfNeeded(stagePanel, frame)
     }
 
     // MARK: Geometry
@@ -937,7 +1187,7 @@ final class GaiWorkspaceManager {
     private func openFrame(on screen: NSScreen) -> NSRect {
         let visible = screen.visibleFrame
         let size = NSSize(
-            width: GaiDrawerMetrics.slabWidth + openRightMargin,
+            width: drawerSlabWidth + openRightMargin,
             height: panelContentHeight + 2 * openVerticalMargin)
         return NSRect(
             x: visible.minX - GaiDrawerMetrics.bleed,
@@ -952,14 +1202,24 @@ final class GaiWorkspaceManager {
     /// the open frame — the slab must not move by a single pixel when the
     /// panel snaps between the two.
     private func closedFrame(on screen: NSScreen) -> NSRect {
-        var frame = openFrame(on: screen).offsetBy(dx: -GaiDrawerMetrics.cardWidth, dy: 0)
-        frame.size.width = GaiDrawerMetrics.slabWidth + closedMargin
+        var frame = openFrame(on: screen).offsetBy(dx: -ui.drawerCardWidth, dy: 0)
+        frame.size.width = drawerSlabWidth + closedMargin
         return frame
     }
 
     private func snapPanel(open: Bool) {
         guard let panel, let screen = targetScreen() else { return }
-        panel.setFrame(open ? openFrame(on: screen) : closedFrame(on: screen), display: true)
+        setFrameIfNeeded(panel, open ? openFrame(on: screen) : closedFrame(on: screen))
+    }
+
+    private func setFrameIfNeeded(_ panel: NSPanel, _ frame: NSRect) {
+        let current = panel.frame
+        guard abs(current.origin.x - frame.origin.x) > 0.5
+            || abs(current.origin.y - frame.origin.y) > 0.5
+            || abs(current.size.width - frame.size.width) > 0.5
+            || abs(current.size.height - frame.size.height) > 0.5
+        else { return }
+        panel.setFrame(frame, display: true)
     }
 
     /// Target slab height: the list, or the single large expansion (used for the
@@ -1204,6 +1464,7 @@ final class GaiWorkspaceManager {
                 self?.syncWorkspaceSelection()
                 self?.refreshGeometry()
                 self?.warmFirstSurfaces()
+                self?.refreshSurfacePersistenceObservers()
                 self?.updateSurfacePerformanceState()
             }
             .store(in: &cancellables)
@@ -1543,8 +1804,8 @@ final class GaiWorkspaceManager {
 
     private func refreshGeometry() {
         recomputeCardHeight()
+        constrainPanelWidths()
         snapPanel(open: ui.isExpanded)
-        recomputeStageCardWidth()
         if stagePanel?.isVisible == true {
             snapStagePanel(open: ui.isStageExpanded)
         }

@@ -97,6 +97,14 @@ struct WorkspaceDrawerView: View {
     /// Snaps the panel to its resting closed frame. Called once the close
     /// slide has settled.
     let onDidClose: () -> Void
+    /// Pauses terminal rendering before live panel resize starts.
+    let onResizeBegan: () -> Void
+    /// Applies a user-driven drawer width.
+    let onResizeWidth: (CGFloat) -> Void
+    /// Restores terminal rendering after live panel resize ends.
+    let onResizeEnded: () -> Void
+    /// Toggles whether drawer/stage widths stay linked.
+    let onToggleWidthLink: () -> Void
 
     /// Slab offset: 0 = open appearance; -cardWidth = closed appearance
     /// while the panel is at its open frame.
@@ -108,6 +116,12 @@ struct WorkspaceDrawerView: View {
     /// Invalidates stale animation-completion callbacks after interruptions.
     @State private var generation = 0
     @State private var tabPressed = false
+    @State private var draggingWorkspaceID: GaiWorkspace.ID?
+    @State private var workspaceDragStartIndex: Int?
+    @State private var workspaceDragTargetIndex: Int?
+    @State private var workspaceDragTranslationY: CGFloat = 0
+    @State private var drawerResizeStartWidth: CGFloat?
+    @State private var drawerResizeHover = false
 
     /// Settings → Appearance: tint the glass with the selected workspace's
     /// accent color. Live-updates when toggled.
@@ -144,7 +158,7 @@ struct WorkspaceDrawerView: View {
                 // panel to its open frame, then slide in.
                 var snap = Transaction()
                 snap.disablesAnimations = true
-                withTransaction(snap) { slide = -M.cardWidth }
+                withTransaction(snap) { slide = -ui.drawerCardWidth }
                 onWillOpen()
                 panelIsOut = true
                 DispatchQueue.main.async {
@@ -154,7 +168,7 @@ struct WorkspaceDrawerView: View {
             }
         } else {
             guard panelIsOut else { return }
-            runSlide(.gaiDrawerClose, { slide = -M.cardWidth; visualOpen = false }) {
+            runSlide(.gaiDrawerClose, { slide = -ui.drawerCardWidth; visualOpen = false }) {
                 finishClose(gen)
             }
         }
@@ -193,7 +207,8 @@ struct WorkspaceDrawerView: View {
             cardContent
         }
         // No pull tab anymore — just the card (off-screen bleed + card width).
-        .frame(width: M.bleed + M.cardWidth, height: ui.cardHeight)
+        .frame(width: M.bleed + ui.drawerCardWidth, height: ui.cardHeight)
+        .overlay(alignment: .trailing) { drawerResizeHandle }
     }
 
     /// Accent of the selected workspace — the glass is tinted with it, so
@@ -276,6 +291,50 @@ struct WorkspaceDrawerView: View {
         // tab header race ahead of the slab background and "float" to its final
         // spot before the card caught up. Letting the content ride the slab's
         // own height animation keeps header and background perfectly in sync.
+        .overlay(alignment: .bottomTrailing) {
+            widthLinkButton
+                .padding(.trailing, 14)
+                .padding(.bottom, 10)
+        }
+    }
+
+    private var drawerResizeHandle: some View {
+        GaiPanelResizeHandle(
+            hovering: $drawerResizeHover,
+            onBegan: {
+                drawerResizeStartWidth = ui.drawerCardWidth
+                onResizeBegan()
+            },
+            onChanged: { deltaX in
+                let start = drawerResizeStartWidth ?? ui.drawerCardWidth
+                onResizeWidth(start + deltaX)
+            },
+            onEnded: {
+                drawerResizeStartWidth = nil
+                onResizeEnded()
+            })
+        .frame(width: 18)
+        .frame(height: ui.cardHeight)
+        .contentShape(Rectangle())
+    }
+
+    private var widthLinkButton: some View {
+        Button(action: onToggleWidthLink) {
+            Image(systemName: "link")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(.white.opacity(ui.panelWidthsLinked ? 0.9 : 0.42))
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(ui.panelWidthsLinked ? 0.16 : 0.08)))
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(ui.panelWidthsLinked ? 0.18 : 0.08), lineWidth: 1)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(ui.panelWidthsLinked ? "Unlink panel widths" : "Link panel widths")
     }
 
     // MARK: Tabs header
@@ -388,6 +447,7 @@ struct WorkspaceDrawerView: View {
                 GaiWorkspaceRow(
                     workspace: workspace,
                     isSelected: workspace.id == activeWorkspaceID,
+                    isDragging: draggingWorkspaceID == workspace.id,
                     onSelect: {
                         ui.selectedWorkspaceID = workspace.id
                         ui.stageShowsEditor = false
@@ -411,10 +471,105 @@ struct WorkspaceDrawerView: View {
                         }
                     })
                 .frame(height: M.rowHeight)
+                .zIndex(draggingWorkspaceID == workspace.id ? 2 : 0)
+                .offset(y: workspaceDragOffset(for: workspace.id))
+                .simultaneousGesture(workspaceDragGesture(for: workspace.id))
             }
             GaiAddWorkspaceRow(action: createNewWorkspace)
                 .frame(height: M.rowHeight)
         }
+        .animation(.spring(response: 0.23, dampingFraction: 0.9), value: workspaceDragTargetIndex)
+    }
+
+    private func workspaceDragGesture(for id: GaiWorkspace.ID) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .local)
+            .onChanged { value in
+                updateWorkspaceDrag(id: id, translationY: value.translation.height)
+            }
+            .onEnded { _ in
+                finishWorkspaceDrag()
+            }
+    }
+
+    private func updateWorkspaceDrag(id: GaiWorkspace.ID, translationY: CGFloat) {
+        let stride = M.rowHeight + M.rowSpacing
+        if draggingWorkspaceID == nil {
+            guard let startIndex = store.workspaces.firstIndex(where: { $0.id == id }) else { return }
+            draggingWorkspaceID = id
+            workspaceDragStartIndex = startIndex
+            workspaceDragTargetIndex = startIndex
+            workspaceDragTranslationY = 0
+        }
+
+        guard draggingWorkspaceID == id,
+              let startIndex = workspaceDragStartIndex
+        else { return }
+
+        let minY = CGFloat(-startIndex) * stride
+        let maxY = CGFloat(store.workspaces.count - 1 - startIndex) * stride
+        let clampedY = min(max(translationY, minY), maxY)
+        workspaceDragTranslationY = clampedY
+
+        let rawStep = clampedY / stride
+        let nextIndex = min(
+            max(0, startIndex + Int(rawStep.rounded(.toNearestOrAwayFromZero))),
+            store.workspaces.count - 1)
+        guard nextIndex != workspaceDragTargetIndex else { return }
+        withAnimation(.spring(response: 0.23, dampingFraction: 0.9)) {
+            workspaceDragTargetIndex = nextIndex
+        }
+    }
+
+    private func finishWorkspaceDrag() {
+        let sourceID = draggingWorkspaceID
+        let startIndex = workspaceDragStartIndex
+        let targetIndex = workspaceDragTargetIndex
+        let finalOrder: [GaiWorkspace.ID]? = {
+            guard let sourceID,
+                  let startIndex,
+                  let targetIndex,
+                  startIndex != targetIndex
+            else { return nil }
+
+            var order = store.workspaces.map(\.id)
+            order.removeAll { $0 == sourceID }
+            order.insert(sourceID, at: min(targetIndex, order.count))
+            return order
+        }()
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            if let finalOrder {
+                store.reorderWorkspaces(finalOrder)
+            }
+            draggingWorkspaceID = nil
+            workspaceDragStartIndex = nil
+            workspaceDragTargetIndex = nil
+            workspaceDragTranslationY = 0
+        }
+    }
+
+    private func workspaceDragOffset(for id: GaiWorkspace.ID) -> CGFloat {
+        let stride = M.rowHeight + M.rowSpacing
+        guard let draggingWorkspaceID,
+              let startIndex = workspaceDragStartIndex,
+              let targetIndex = workspaceDragTargetIndex,
+              let index = store.workspaces.firstIndex(where: { $0.id == id })
+        else { return 0 }
+
+        if id == draggingWorkspaceID {
+            return workspaceDragTranslationY
+        }
+        if targetIndex > startIndex,
+           index > startIndex, index <= targetIndex {
+            return -stride
+        }
+        if targetIndex < startIndex,
+           index >= targetIndex, index < startIndex {
+            return stride
+        }
+        return 0
     }
 
     /// The File tab: the selected workspace's folder, browsed as a tree.
@@ -509,6 +664,7 @@ private struct GaiAddWorkspaceRow: View {
 private struct GaiWorkspaceRow: View {
     @ObservedObject var workspace: GaiWorkspace
     let isSelected: Bool
+    let isDragging: Bool
     let onSelect: () -> Void
     let onEdit: () -> Void
     let onDuplicate: () -> Void
@@ -583,8 +739,17 @@ private struct GaiWorkspaceRow: View {
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(isSelected
-                    ? Color.white.opacity(0.16)
+                    ? Color.white.opacity(isDragging ? 0.18 : 0.16)
+                    : isDragging ? Color.white.opacity(0.10)
                     : hovering ? Color.white.opacity(0.07) : Color.clear))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(
+                    isDragging ? Color.white.opacity(0.16) : Color.clear,
+                    lineWidth: 1)
+        }
+        .scaleEffect(isDragging ? 1.015 : 1)
+        .shadow(color: .black.opacity(isDragging ? 0.18 : 0), radius: 9, y: 5)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onSelect)
@@ -595,6 +760,7 @@ private struct GaiWorkspaceRow: View {
             Button(role: .destructive, action: onDelete) { Label("Supprimer", systemImage: "trash") }
         }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.10), value: isDragging)
     }
 }
 

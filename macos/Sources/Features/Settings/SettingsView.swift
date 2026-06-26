@@ -17,6 +17,12 @@ enum GaiPreferenceKey {
     static let editorWrapLines = "GaiEditorWrapLines"
     /// Restore saved workspaces on launch (vs. start empty).
     static let restoreWorkspaces = "GaiRestoreWorkspaces"
+    /// Persisted drawer card width.
+    static let drawerCardWidth = "GaiDrawerCardWidth"
+    /// Persisted stage card width.
+    static let stageCardWidth = "GaiStageCardWidth"
+    /// Whether drawer/stage widths move as one linked block.
+    static let linkPanelWidths = "GaiLinkPanelWidths"
     /// Show macOS banners for CLI notifications.
     static let agentDesktopNotifications = "GaiAgentDesktopNotifications"
     /// Play an app sound when a CLI notification arrives.
@@ -358,7 +364,6 @@ final class GaiNotificationSoundPlayer: NSObject, NSSoundDelegate {
 // MARK: - General
 
 private struct GeneralSettings: View {
-    @AppStorage(GaiPreferenceKey.restoreWorkspaces) private var restore = true
     @State private var launchAtLogin = false
 
     var body: some View {
@@ -369,10 +374,6 @@ private struct GeneralSettings: View {
                     subtitle: "Open GaiTerm automatically when you log in.",
                     first: true,
                     isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
-                SettingsToggle(
-                    title: "Restore workspaces",
-                    subtitle: "Reopen your saved workspaces on launch instead of starting empty.",
-                    isOn: $restore)
             }
         }
         .onAppear { launchAtLogin = (SMAppService.mainApp.status == .enabled) }

@@ -38,6 +38,15 @@ struct GaiTerminalNotification: Identifiable {
     let createdAt: Date
 }
 
+struct GaiPaneSessionSeed {
+    var id: UUID?
+    var name: String?
+    var notificationsEnabled: Bool = true
+    var autoFocusOnNotification: Bool = false
+    var launchCommand: String?
+    var initialDirectoryPath: String?
+}
+
 // MARK: - Session
 
 /// A single terminal inside a workspace.
@@ -47,7 +56,7 @@ struct GaiTerminalNotification: Identifiable {
 /// when staged. The surface stays alive for the life of the session even when
 /// off-stage; its rendering is paused via occlusion (see the performance pass).
 final class GaiTerminalSession: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
 
     /// Display name (auto-generated codename, user-editable).
     @Published var name: String
@@ -55,16 +64,24 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
     /// The live terminal surface.
     let surfaceView: Ghostty.SurfaceView
 
+    /// Command GaiTerm typed to start this pane's CLI, if the pane was opened
+    /// from a workspace plan. Persisted so a restart rebuilds the user's agents.
+    let launchCommand: String?
+
+    /// Starting folder used when the pane was created. The live `pwd` wins
+    /// during snapshots, but this keeps a sensible fallback for fresh shells.
+    let initialDirectoryPath: String?
+
     /// Current attention state, maintained by the attention engine.
     @Published var attention: GaiAttention = .idle
 
     /// Whether this pane is allowed to emit disruptive notifications: unread
     /// badges, sounds, and macOS banners. The attention state still updates
     /// when muted so an idle agent remains visible without interrupting work.
-    @Published private(set) var notificationsEnabled = true
+    @Published private(set) var notificationsEnabled: Bool
 
     /// When enabled, a completed agent jumps GaiTerm straight to this pane.
-    @Published private(set) var autoFocusOnNotification = false
+    @Published private(set) var autoFocusOnNotification: Bool
 
     /// Unread terminal notifications for this pane. Kept tiny and pane-local so
     /// the drawer can aggregate counts without observing terminal output.
@@ -82,9 +99,22 @@ final class GaiTerminalSession: ObservableObject, Identifiable {
     private var lastAudibleNotificationFingerprint: String?
     private var lastAudibleNotificationAt: Date?
 
-    init(name: String, surfaceView: Ghostty.SurfaceView) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        surfaceView: Ghostty.SurfaceView,
+        notificationsEnabled: Bool = true,
+        autoFocusOnNotification: Bool = false,
+        launchCommand: String? = nil,
+        initialDirectoryPath: String? = nil
+    ) {
+        self.id = id
         self.name = name
         self.surfaceView = surfaceView
+        self.notificationsEnabled = notificationsEnabled
+        self.autoFocusOnNotification = autoFocusOnNotification
+        self.launchCommand = launchCommand
+        self.initialDirectoryPath = initialDirectoryPath
         self.lastActiveAt = Date()
     }
 
@@ -253,6 +283,10 @@ final class GaiWorkspace: ObservableObject, Identifiable {
     /// dividers resize it — exactly like a Ghostty window.
     @Published var surfaceTree: SplitTree<Ghostty.SurfaceView> = .init()
 
+    /// Deferred pane layout loaded from UserDefaults. It becomes live surfaces
+    /// only when the split controller can safely create Ghostty surfaces.
+    var restoredPaneLayout: GaiPaneLayoutData?
+
     init(
         name: String,
         colorHex: String? = nil,
@@ -341,6 +375,109 @@ extension SplitTree.Node {
 
 // MARK: - Persistence DTO
 
+enum GaiPaneLayoutDirection: String, Codable, Equatable {
+    case horizontal
+    case vertical
+
+    init(_ direction: SplitTree<Ghostty.SurfaceView>.Direction) {
+        switch direction {
+        case .horizontal: self = .horizontal
+        case .vertical: self = .vertical
+        }
+    }
+
+    var splitDirection: SplitTree<Ghostty.SurfaceView>.Direction {
+        switch self {
+        case .horizontal: return .horizontal
+        case .vertical: return .vertical
+        }
+    }
+}
+
+struct GaiPaneData: Codable, Equatable {
+    var id: UUID
+    var name: String
+    var directoryPath: String?
+    var command: String?
+    var notificationsEnabled: Bool
+    var autoFocusOnNotification: Bool
+}
+
+indirect enum GaiPaneLayoutData: Codable, Equatable {
+    case pane(GaiPaneData)
+    case split(direction: GaiPaneLayoutDirection, ratio: Double, left: GaiPaneLayoutData, right: GaiPaneLayoutData)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case pane
+        case direction
+        case ratio
+        case left
+        case right
+    }
+
+    private enum NodeType: String, Codable {
+        case pane
+        case split
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(NodeType.self, forKey: .type) {
+        case .pane:
+            self = .pane(try c.decode(GaiPaneData.self, forKey: .pane))
+        case .split:
+            self = .split(
+                direction: try c.decode(GaiPaneLayoutDirection.self, forKey: .direction),
+                ratio: try c.decode(Double.self, forKey: .ratio),
+                left: try c.decode(GaiPaneLayoutData.self, forKey: .left),
+                right: try c.decode(GaiPaneLayoutData.self, forKey: .right))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .pane(let pane):
+            try c.encode(NodeType.pane, forKey: .type)
+            try c.encode(pane, forKey: .pane)
+        case .split(let direction, let ratio, let left, let right):
+            try c.encode(NodeType.split, forKey: .type)
+            try c.encode(direction, forKey: .direction)
+            try c.encode(ratio, forKey: .ratio)
+            try c.encode(left, forKey: .left)
+            try c.encode(right, forKey: .right)
+        }
+    }
+
+    init?(
+        workspace: GaiWorkspace,
+        node: SplitTree<Ghostty.SurfaceView>.Node? = nil
+    ) {
+        guard let node = node ?? workspace.surfaceTree.root else { return nil }
+        switch node {
+        case .leaf(let view):
+            guard let session = workspace.session(for: view) else { return nil }
+            self = .pane(GaiPaneData(
+                id: session.id,
+                name: session.name,
+                directoryPath: view.pwd ?? session.initialDirectoryPath ?? workspace.defaultDirectory?.path,
+                command: session.launchCommand,
+                notificationsEnabled: session.notificationsEnabled,
+                autoFocusOnNotification: session.autoFocusOnNotification))
+        case .split(let split):
+            guard let left = GaiPaneLayoutData(workspace: workspace, node: split.left),
+                  let right = GaiPaneLayoutData(workspace: workspace, node: split.right)
+            else { return nil }
+            self = .split(
+                direction: GaiPaneLayoutDirection(split.direction),
+                ratio: split.ratio,
+                left: left,
+                right: right)
+        }
+    }
+}
+
 /// The persistable settings of a workspace (no live sessions/surfaces).
 struct GaiWorkspaceData: Codable {
     var name: String
@@ -351,6 +488,7 @@ struct GaiWorkspaceData: Codable {
     var startupCommand: String?
     var notifyOnInput: Bool
     var openAtLaunch: Bool
+    var paneLayout: GaiPaneLayoutData?
     // Optional so older saved payloads (without these keys) still decode.
     var perTerminalFolders: Bool?
     var terminals: [GaiTerminalSpec]?
@@ -364,6 +502,7 @@ struct GaiWorkspaceData: Codable {
         startupCommand = w.startupCommand
         notifyOnInput = w.notifyOnInput
         openAtLaunch = w.openAtLaunch
+        paneLayout = GaiPaneLayoutData(workspace: w) ?? w.restoredPaneLayout
         perTerminalFolders = w.perTerminalFolders
         terminals = w.terminals
     }
@@ -378,6 +517,7 @@ struct GaiWorkspaceData: Codable {
         w.startupCommand = startupCommand
         w.notifyOnInput = notifyOnInput
         w.openAtLaunch = openAtLaunch
+        w.restoredPaneLayout = paneLayout
         w.perTerminalFolders = perTerminalFolders ?? false
         w.terminals = terminals ?? []
         return w
@@ -427,6 +567,7 @@ final class GaiWorkspaceStore: ObservableObject {
             defaultDirectory: defaultDirectory,
             defaultCommand: defaultCommand)
         workspaces.append(workspace)
+        save()
         return workspace
     }
 
@@ -474,6 +615,26 @@ final class GaiWorkspaceStore: ObservableObject {
         if let data = try? JSONEncoder().encode(items) {
             UserDefaults.standard.set(data, forKey: Self.persistenceKey)
         }
+    }
+
+    func moveWorkspace(_ sourceID: GaiWorkspace.ID, before targetID: GaiWorkspace.ID?) {
+        guard let sourceIndex = workspaces.firstIndex(where: { $0.id == sourceID }) else { return }
+        let workspace = workspaces.remove(at: sourceIndex)
+        if let targetID,
+           let targetIndex = workspaces.firstIndex(where: { $0.id == targetID }) {
+            workspaces.insert(workspace, at: targetIndex)
+        } else {
+            workspaces.append(workspace)
+        }
+        save()
+    }
+
+    func reorderWorkspaces(_ orderedIDs: [GaiWorkspace.ID]) {
+        let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        let ordered = orderedIDs.compactMap { byID[$0] }
+        let included = Set(ordered.map(\.id))
+        workspaces = ordered + workspaces.filter { !included.contains($0.id) }
+        save()
     }
 
     func removeWorkspace(_ id: GaiWorkspace.ID) {
@@ -524,9 +685,17 @@ final class GaiWorkspaceStore: ObservableObject {
     @discardableResult
     func attachSession(
         for view: Ghostty.SurfaceView,
-        in workspace: GaiWorkspace
+        in workspace: GaiWorkspace,
+        seed: GaiPaneSessionSeed? = nil
     ) -> GaiTerminalSession {
-        let session = GaiTerminalSession(name: nextCodename(), surfaceView: view)
+        let session = GaiTerminalSession(
+            id: seed?.id ?? UUID(),
+            name: seed?.name ?? nextCodename(),
+            surfaceView: view,
+            notificationsEnabled: seed?.notificationsEnabled ?? true,
+            autoFocusOnNotification: seed?.autoFocusOnNotification ?? false,
+            launchCommand: seed?.launchCommand,
+            initialDirectoryPath: seed?.initialDirectoryPath)
         workspace.sessions.append(session)
         return session
     }
@@ -605,6 +774,7 @@ final class GaiWorkspaceStore: ObservableObject {
         session.toggleNotificationsEnabled()
         workspace.refreshNotificationSummary()
         refreshUnreadNotificationCount()
+        save()
     }
 
     func toggleAutoFocusOnNotification(for view: Ghostty.SurfaceView) {
@@ -615,6 +785,7 @@ final class GaiWorkspaceStore: ObservableObject {
 
         session.toggleAutoFocusOnNotification()
         workspace.refreshNotificationSummary()
+        save()
     }
 
     private func refreshUnreadNotificationCount() {

@@ -331,8 +331,6 @@ struct GaiWorkspaceEditor: View {
     private var toggleSection: some View {
         VStack(spacing: 0) {
             toggleRow("Notifications", $workspace.notifyOnInput)
-            Divider().overlay(Color.white.opacity(0.06))
-            toggleRow("Open at launch", $workspace.openAtLaunch)
         }
         .background(fieldBackground)
     }
