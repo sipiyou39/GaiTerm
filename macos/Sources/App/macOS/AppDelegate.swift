@@ -6,7 +6,7 @@ import Sparkle
 import GhosttyKit
 
 private extension NSWindow.Level {
-    static let gaiCriticalDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
+    static let gaiCriticalDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 30)
 }
 
 class AppDelegate: NSObject,
@@ -195,6 +195,7 @@ class AppDelegate: NSObject,
 
         // Start our update checker.
         updateController.startUpdater()
+        GaiUpdateWindowController.shared.showReleaseNotesIfNeeded()
 
         // This registers the Services menu to exist.
         NSApp.servicesMenu = menuServices
@@ -1210,10 +1211,16 @@ extension AppDelegate {
         alert.addButton(withTitle: "Terminate")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
+
+        let restorePanels = GaiFloatingPanels.lower()
+        defer { restorePanels() }
+
+        NSApp.activate(ignoringOtherApps: true)
         alert.window.level = .gaiCriticalDialog
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.window.center()
+        alert.window.makeKeyAndOrderFront(nil)
         alert.window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:

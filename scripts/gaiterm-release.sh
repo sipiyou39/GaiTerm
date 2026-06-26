@@ -14,6 +14,7 @@ set -euo pipefail
 
 VERSION="${1:?usage: gaiterm-release.sh <version> [notes]}"
 NOTES="${2:-GaiTerm $VERSION}"
+APPCAST_NOTES="GaiTerm $VERSION est disponible. Les notes detaillees s'afficheront au premier lancement apres installation."
 REPO="sipiyou39/GaiTerm"
 # Stable self-signed code-signing identity. Gives every build the same code
 # identity so macOS keeps a user's granted permissions (Full Disk Access, folder
@@ -73,7 +74,7 @@ cat > "$OUT/appcast.xml" <<XML
     <title>GaiTerm</title>
     <item>
       <title>$VERSION</title>
-      <description><![CDATA[$NOTES]]></description>
+      <description><![CDATA[$APPCAST_NOTES]]></description>
       <pubDate>$(date -R 2>/dev/null || date)</pubDate>
       <sparkle:version>$BUILD</sparkle:version>
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>

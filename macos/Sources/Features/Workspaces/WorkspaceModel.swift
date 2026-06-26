@@ -647,6 +647,13 @@ final class GaiWorkspaceStore: ObservableObject {
         save()
     }
 
+    func discardLiveTerminalSurfaces(in workspace: GaiWorkspace) {
+        releaseAllTerminalSurfaces(in: workspace)
+        workspace.restoredPaneLayout = nil
+        workspace.refreshNotificationSummary()
+        refreshUnreadNotificationCount()
+    }
+
     private func releaseAllTerminalSurfaces(in workspace: GaiWorkspace) {
         for view in workspace.surfaceTree {
             view.gaiReleaseTerminalSurface()

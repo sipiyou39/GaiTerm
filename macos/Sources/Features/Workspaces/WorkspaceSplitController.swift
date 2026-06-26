@@ -235,7 +235,8 @@ final class GaiSplitController {
             guard let view = makeSurface(for: workspace, baseConfig: cfg, seed: seed) else {
                 return nil
             }
-            if let command = pane.command {
+            if let command = pane.command,
+               !shouldDeferRestoredAgentCommand(command) {
                 launchQueue.append((command, view))
             }
             return .leaf(view: view)
@@ -259,13 +260,14 @@ final class GaiSplitController {
     func openRootSurface(
         in workspace: GaiWorkspace,
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        seed: GaiPaneSessionSeed? = nil,
         focus shouldFocus: Bool = true
     ) -> Ghostty.SurfaceView? {
         guard workspace.surfaceTree.isEmpty else { return workspace.surfaceTree.root?.leftmostLeaf() }
-        let seed = GaiPaneSessionSeed(
+        let resolvedSeed = seed ?? GaiPaneSessionSeed(
             launchCommand: baseConfig?.command,
             initialDirectoryPath: baseConfig?.workingDirectory ?? workspace.defaultDirectory?.path)
-        guard let view = makeSurface(for: workspace, baseConfig: baseConfig, seed: seed) else { return nil }
+        guard let view = makeSurface(for: workspace, baseConfig: baseConfig, seed: resolvedSeed) else { return nil }
         workspace.surfaceTree = SplitTree(view: view)
         onTopologyDidChange?()
         if shouldFocus { focus(view) }
@@ -364,6 +366,13 @@ final class GaiSplitController {
         }
     }
 
+    /// Restoring a pane layout should rebuild the user's workspace, not silently
+    /// re-enter a previous agent conversation. Codex/Claude resume from the
+    /// explicit resume prompt instead.
+    private func shouldDeferRestoredAgentCommand(_ command: String) -> Bool {
+        GaiAgentKind.fromLaunchCommand(command) != nil
+    }
+
     /// Split the given surface (or the workspace's first pane when nil —
     /// used by the header button) in a direction.
     @discardableResult
@@ -382,6 +391,7 @@ final class GaiSplitController {
         do {
             workspace.surfaceTree = try workspace.surfaceTree.inserting(
                 view: newView, at: at, direction: direction)
+            workspace.surfaceTree = workspace.surfaceTree.equalized()
         } catch {
             Ghostty.logger.warning("failed to insert split: \(error, privacy: .public)")
             store.detachSession(for: newView, in: workspace)
@@ -527,7 +537,8 @@ final class GaiSplitController {
     func reopenPane(
         in workspace: GaiWorkspace,
         surface oldView: Ghostty.SurfaceView,
-        directory: String?
+        directory: String?,
+        command: String? = nil
     ) -> Ghostty.SurfaceView? {
         guard let oldNode = workspace.surfaceTree.root?.node(view: oldView) else { return nil }
 
@@ -539,7 +550,7 @@ final class GaiSplitController {
             name: oldSession?.name,
             notificationsEnabled: oldSession?.notificationsEnabled ?? true,
             autoFocusOnNotification: oldSession?.autoFocusOnNotification ?? false,
-            launchCommand: nil,
+            launchCommand: command,
             initialDirectoryPath: cfg.workingDirectory)
         guard let newView = makeSurface(for: workspace, baseConfig: cfg, seed: seed) else { return nil }
 
@@ -558,8 +569,35 @@ final class GaiSplitController {
         store.detachSession(for: oldView, in: workspace)
         oldView.gaiReleaseTerminalSurface()
         onTopologyDidChange?()
+        if let command {
+            runCommand(command, in: newView)
+        }
         focus(newView)
         return newView
+    }
+
+    @discardableResult
+    func openAgentResumePane(
+        in workspace: GaiWorkspace,
+        command: String,
+        directory: String?
+    ) -> Ghostty.SurfaceView? {
+        var cfg = Ghostty.SurfaceConfiguration()
+        cfg.workingDirectory = directory ?? workspace.defaultDirectory?.path
+        let seed = GaiPaneSessionSeed(
+            launchCommand: command,
+            initialDirectoryPath: cfg.workingDirectory)
+
+        let view: Ghostty.SurfaceView?
+        if workspace.surfaceTree.isEmpty {
+            view = openRootSurface(in: workspace, baseConfig: cfg, seed: seed, focus: true)
+        } else {
+            view = newSplit(in: workspace, at: nil, direction: .right, baseConfig: cfg, seed: seed)
+        }
+        if let view {
+            runCommand(command, in: view)
+        }
+        return view
     }
 
     @objc private func didRequestCloseSurface(_ notification: Notification) {

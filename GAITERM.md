@@ -256,7 +256,9 @@ Ce qu'il fait, dans l'ordre :
 3. Zippe le bundle (`ditto -c -k --keepParent`) → `build/release/GaiTerm-X.zip`.
 4. **Signe** le zip avec la clé EdDSA Sparkle (`sign_update`, trouvé dans
    DerivedData ; il faut donc avoir ouvert/buildé le projet au moins une fois).
-5. Écrit `appcast.xml` (avec la signature et la taille).
+5. Écrit `appcast.xml` (avec la signature et la taille). L'appcast garde une
+   description courte pour l'ancienne fenêtre Sparkle ; les vraies notes de
+   patch sont affichées par GaiTerm au premier lancement après installation.
 6. Publie une **GitHub Release** `vX` sur **`sipiyou39/GaiTerm`** avec le zip +
    l'appcast (crée la release, ou met à jour `--clobber` si elle existe).
 

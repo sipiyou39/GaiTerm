@@ -419,6 +419,7 @@ final class GaiWorkspaceManager {
     private var observersRegistered = false
     private var terminalBackgrounds: [ObjectIdentifier: GaiTerminalPaneRGB] = [:]
     private var pendingGenericExternalNotifications: [ObjectIdentifier: DispatchWorkItem] = [:]
+    private var agentResumePromptShown = false
 
     /// Transparent margins around the slab in the open frame so the glass can
     /// cast its light and shadow without being clipped at the window edge.
@@ -638,6 +639,7 @@ final class GaiWorkspaceManager {
         // is opened. The drawer has no pull tab — it mirrors the stage (see
         // `registerObservers`), so opening the stage here opens the drawer too.
         showStage()
+        presentAgentResumePromptIfNeeded()
 
         if ProcessInfo.processInfo.environment["GAI_AUTOEXPAND"] != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -676,6 +678,59 @@ final class GaiWorkspaceManager {
             if workspace.id == ui.editingWorkspaceID { continue }
             splits.ensureFirstSurface(in: workspace, focus: false)
         }
+    }
+
+    private func presentAgentResumePromptIfNeeded() {
+        guard !agentResumePromptShown else { return }
+        agentResumePromptShown = true
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            var candidates = GaiAgentResumeScanner.candidates(for: self.store.workspaces)
+            #if DEBUG
+            if candidates.isEmpty,
+               ProcessInfo.processInfo.environment[GaiAgentResumeScanner.forceEnvironmentKey] != nil {
+                candidates = GaiAgentResumeScanner.debugCandidates(for: self.store.workspaces)
+            }
+            #endif
+            guard !candidates.isEmpty else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                GaiAgentResumeWindowController.shared.show(
+                    candidates: candidates,
+                    screen: self.targetScreen(),
+                    resume: { [weak self] candidate in
+                        self?.resumeAgentSession(candidate)
+                    })
+            }
+        }
+    }
+
+    private func resumeAgentSession(_ candidate: GaiAgentResumeCandidate) {
+        guard let workspace = store.workspace(for: candidate.workspaceID) else { return }
+        store.openWorkspaceID = workspace.id
+        ui.selectedWorkspaceID = workspace.id
+        if ui.stageShowsEditor { ui.stageShowsEditor = false }
+        showStage()
+
+        let command = candidate.command
+        let directory = candidate.directoryPath
+        if let paneID = candidate.paneID,
+           let session = workspace.sessions.first(where: { $0.id == paneID }) {
+            _ = splits.reopenPane(
+                in: workspace,
+                surface: session.surfaceView,
+                directory: directory,
+                command: command)
+            store.save()
+            return
+        }
+
+        _ = splits.openAgentResumePane(
+            in: workspace,
+            command: command,
+            directory: directory)
+        store.save()
     }
 
     private func refreshSurfacePersistenceObservers() {

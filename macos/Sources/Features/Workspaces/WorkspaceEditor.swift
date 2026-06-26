@@ -629,12 +629,16 @@ struct GaiWorkspaceEditor: View {
     private func validate() {
         applyColor()
         let wasNew = ui.editingIsNew
+        if wasNew {
+            store.discardLiveTerminalSurfaces(in: workspace)
+        }
         ui.editingIsNew = false
         ui.editingWorkspaceID = nil
         if wasNew {
             ui.selectedWorkspaceID = workspace.id
             store.openWorkspaceID = workspace.id
         }
+        store.save()
     }
 
     private func delete() {

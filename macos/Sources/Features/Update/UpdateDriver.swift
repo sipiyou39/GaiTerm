@@ -177,7 +177,7 @@ class UpdateDriver: NSObject, SPUUserDriver {
 
     func showUpdateInstalledAndRelaunched(_ relaunched: Bool, acknowledgement: @escaping () -> Void) {
         DispatchQueue.main.async {
-            GaiUpdateWindowController.shared.showReleaseNotes()
+            GaiUpdateWindowController.shared.showReleaseNotesIfNeeded(force: true)
         }
         acknowledgement()
         viewModel.state = .idle
