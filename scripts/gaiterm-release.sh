@@ -139,7 +139,8 @@ codesign --verify --deep --strict --verbose=2 "$APP" || {
   echo "✗ signed bundle verification failed"
   exit 1
 }
-codesign -dvv "$APP" 2>&1 | grep -Fqx "Authority=$SIGN_ID" || {
+SIGN_DETAILS="$(codesign -dvv "$APP" 2>&1)"
+grep -Fqx "Authority=$SIGN_ID" <<<"$SIGN_DETAILS" || {
   echo "✗ bundle was not signed by required identity '$SIGN_ID'"
   exit 1
 }
