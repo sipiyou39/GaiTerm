@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "family": "nimbo",
+  "id": "purple",
+  "displayName": "Purple",
+  "description": "Bright creative purple.",
+  "palette": {
+    "shadow": "#6035A8",
+    "base": "#9460E2",
+    "light": "#D8A5FF",
+    "original": false
+  },
+  "assets": {
+    "spritesheetPng": "spritesheet.png",
+    "spritesheetWebp": "spritesheet.webp",
+    "framesDirectory": "frames",
+    "previewsDirectory": "previews"
+  },
+  "atlas": {
+    "width": 1536,
+    "height": 1872,
+    "columns": 8,
+    "rows": 9,
+    "cellWidth": 192,
+    "cellHeight": 208,
+    "transparentBackground": true,
+    "pngSha256": "3beb7e835e44c318c0b85da63ca02d0bfb6821b63cbfe086244fab91be66b45f",
+    "webpSha256": "11f75023cc48d0d422279322018ad4dd0b66532e8fe24e6f6e6780bf573d76be"
+  },
+  "states": {
+    "idle": {
+      "row": 0,
+      "frameCount": 6,
+      "durationsMs": [1680, 660, 660, 840, 840, 1920],
+      "loop": true,
+      "phases": ["base-terminal", "neutral-eyes", "look-left", "blink", "look-right", "happy-eyes"],
+      "sourceStatus": "validated",
+      "baseDurationsMs": [280, 110, 110, 140, 140, 320]
+    },
+    "running-right": {
+      "row": 1,
+      "frameCount": 8,
+      "durationsMs": [120, 120, 120, 120, 120, 120, 120, 220],
+      "loop": true,
+      "phases": [
+        "yellow-leg-contact",
+        "yellow-leg-down",
+        "yellow-leg-passing",
+        "yellow-leg-up",
+        "green-leg-contact",
+        "green-leg-down",
+        "green-leg-passing",
+        "green-leg-up"
+      ],
+      "sourceStatus": "provisional"
+    },
+    "running-left": {
+      "row": 2,
+      "frameCount": 8,
+      "durationsMs": [120, 120, 120, 120, 120, 120, 120, 220],
+      "loop": true,
+      "phases": [
+        "yellow-leg-contact",
+        "yellow-leg-down",
+        "yellow-leg-passing",
+        "yellow-leg-up",
+        "green-leg-contact",
+        "green-leg-down",
+        "green-leg-passing",
+        "green-leg-up"
+      ],
+      "sourceStatus": "validated"
+    },
+    "waving": {
+      "row": 3,
+      "frameCount": 4,
+      "durationsMs": [140, 140, 140, 280],
+      "loop": false,
+      "phases": ["rest", "anticipation", "raised-paw-apex", "return-with-wink"],
+      "sourceStatus": "validated"
+    },
+    "jumping": {
+      "row": 4,
+      "frameCount": 5,
+      "durationsMs": [140, 140, 140, 140, 280],
+      "loop": false,
+      "phases": ["rest", "anticipation-compression", "takeoff", "apex", "landing-compression"],
+      "sourceStatus": "validated"
+    },
+    "failed": {
+      "row": 5,
+      "frameCount": 8,
+      "durationsMs": [140, 140, 140, 140, 140, 140, 140, 240],
+      "loop": false,
+      "phases": [
+        "rest",
+        "alert",
+        "hard-error",
+        "initial-slump",
+        "worried",
+        "closed-sad",
+        "partial-recovery",
+        "held-sadness"
+      ],
+      "sourceStatus": "validated"
+    },
+    "thinking": {
+      "row": 6,
+      "frameCount": 6,
+      "durationsMs": [150, 150, 150, 150, 150, 260],
+      "loop": true,
+      "phases": [
+        "thinking-rest",
+        "idea-appears",
+        "searching-look",
+        "deep-concentration",
+        "thinking-blink",
+        "return-to-thought"
+      ],
+      "sourceStatus": "validated",
+      "contractState": "waiting"
+    },
+    "working": {
+      "row": 7,
+      "frameCount": 6,
+      "durationsMs": [120, 120, 120, 120, 120, 220],
+      "loop": true,
+      "phases": [
+        "both-hands-contact",
+        "concentrated-keystroke",
+        "first-hand-alternation",
+        "second-hand-alternation",
+        "blink-during-keystroke",
+        "satisfied-micro-pause"
+      ],
+      "sourceStatus": "validated",
+      "contractState": "running"
+    },
+    "ready": {
+      "row": 8,
+      "frameCount": 6,
+      "durationsMs": [150, 150, 150, 150, 150, 280],
+      "loop": false,
+      "phases": [
+        "rest",
+        "attention-eyes-open",
+        "completion-checkmark",
+        "happy-celebration-apex",
+        "blink-and-arms-return",
+        "satisfied-hold"
+      ],
+      "sourceStatus": "validated",
+      "contractState": "review"
+    }
+  },
+  "aliases": {
+    "waiting": "thinking",
+    "running": "working",
+    "review": "ready"
+  },
+  "playback": {
+    "nonIdleRepeatCount": 3,
+    "fallbackState": "idle",
+    "reducedMotionFrame": 0,
+    "backgroundSize": "800% 900%",
+    "framePositionFormula": {
+      "x": "column / 7 * 100",
+      "y": "row / 8 * 100"
+    }
+  },
+  "suggestedEvents": {
+    "firstAppearance": "waving",
+    "hover": "jumping",
+    "draggingRight": "running-right",
+    "draggingLeft": "running-left",
+    "taskActive": "working",
+    "waitingForUser": "thinking",
+    "taskFailed": "failed",
+    "taskCompleted": "ready",
+    "inactive": "idle"
+  },
+  "quality": {
+    "status": "passed",
+    "knownIssues": [
+      "Facial expressions are baked into the current source frames and may change too often in non-idle loops.",
+      "running-right uses the currently accepted provisional three-quarter source frames and can be replaced later without changing this manifest contract."
+    ]
+  }
+}

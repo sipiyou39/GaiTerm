@@ -1069,12 +1069,25 @@ extension Ghostty {
                 return
             }
 
-            // On Enter, the user has handed work back to the CLI. Clear the
-            // "waiting for input" attention only at that point.
-            bell = false
-            if event.keyCode == 36 || event.keyCode == 76 {
+            // A plain Enter hands work back to the CLI. Modified Return is
+            // commonly used for multiline input, so it must not create a new
+            // lifecycle generation. Ctrl-C explicitly cancels the active one.
+            let lifecycleModifiers = event.modifierFlags.intersection([
+                .shift, .control, .option, .command,
+            ])
+            let isPlainEnter = (event.keyCode == 36 || event.keyCode == 76)
+                && lifecycleModifiers.isEmpty
+            let isInterrupt = event.keyCode == 8
+                && lifecycleModifiers == .control
+            if isPlainEnter && !event.isARepeat {
+                bell = false
                 NotificationCenter.default.post(
                     name: .gaiSurfaceDidReceiveUserInput,
+                    object: self)
+            } else if isInterrupt {
+                bell = false
+                NotificationCenter.default.post(
+                    name: .gaiSurfaceDidCancelAgentWork,
                     object: self)
             }
 
@@ -1815,8 +1828,13 @@ extension Ghostty {
             let id = notification.request.identifier
             guard self.notificationIdentifiers.remove(id) != nil else { return }
             if focus {
-                self.window?.makeKeyAndOrderFront(self)
-                Ghostty.moveFocus(to: self)
+                // GaiTerm's companion manager owns terminal presentation,
+                // exclusivity and completion acknowledgement. Ordering the
+                // NSPanel directly would bypass that state machine and could
+                // reveal a terminal whose runtime still says `collapsed`.
+                NotificationCenter.default.post(
+                    name: .gaiSurfaceDidRequestImmediateFocus,
+                    object: self)
             }
         }
 

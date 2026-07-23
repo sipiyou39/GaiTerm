@@ -22,6 +22,10 @@ pub const Message = union(enum) {
     /// and still have focus.
     visible: bool,
 
+    /// Request high-frequency, display-synchronised rendering independently
+    /// from terminal input focus. Visibility still takes precedence.
+    high_refresh: bool,
+
     /// Reset the cursor blink by immediately showing the cursor then
     /// restarting the timer.
     reset_cursor_blink,

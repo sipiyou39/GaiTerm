@@ -108,6 +108,10 @@ flags: packed struct {
     /// This is true when the view is focused. This defaults to true
     /// and it is up to the apprt to set the correct value.
     focused: bool = true,
+
+    /// Keep a visible surface at interactive render cadence even when it
+    /// doesn't own terminal input focus.
+    high_refresh: bool = false,
 } = .{},
 
 pub const DerivedConfig = struct {
@@ -278,10 +282,12 @@ fn setQosClass(self: *const Thread) void {
         if (!self.flags.visible) break :class .utility;
 
         // GaiTerm commonly keeps 8-16 terminal panes visible. A visible
-        // background pane should not compete with the active CLI for CPU.
-        if (!self.flags.focused) break :class .utility;
+        // background pane should not compete with the active CLI for CPU
+        // unless its host explicitly requests interactive rendering.
+        if (!self.flags.focused and !self.flags.high_refresh)
+            break :class .utility;
 
-        // We are focused and visible, we are the definition of user interactive.
+        // We are visible and either focused or explicitly high refresh.
         break :class .user_interactive;
     };
 
@@ -380,6 +386,18 @@ fn drainMailbox(self: *Thread) !void {
                 // state across different transitions is going to be bug-prone,
                 // so its easier to just let them keep firing and have them
                 // check the visible state themselves to control their behavior.
+            },
+
+            .high_refresh => |v| high_refresh: {
+                // If our state didn't change we do nothing.
+                if (self.flags.high_refresh == v) break :high_refresh;
+
+                self.flags.high_refresh = v;
+
+                // High refresh affects render priority but deliberately does
+                // not alter cursor, PTY, secure-input, or focus semantics.
+                self.setQosClass();
+                self.renderer.setHighRefresh(v);
             },
 
             .focus => |v| focus: {
@@ -536,9 +554,10 @@ fn wakeupCallback(
     t.drainMailbox() catch |err|
         log.err("error draining mailbox err={}", .{err});
 
-    // Focused panes stay fully interactive. Visible unfocused panes are
-    // coalesced so many busy splits do not each render every PTY wakeup.
-    if (t.flags.focused) {
+    // Focused or explicitly high-refresh panes stay fully interactive.
+    // Ordinary visible unfocused panes are coalesced so many busy splits do
+    // not each render every PTY wakeup.
+    if (t.flags.focused or t.flags.high_refresh) {
         _ = renderCallback(t, undefined, undefined, {});
     } else if (t.flags.visible and t.render_c.state() != .active) {
         t.render_h.run(

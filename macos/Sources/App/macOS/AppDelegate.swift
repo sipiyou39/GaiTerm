@@ -4,6 +4,7 @@ import UserNotifications
 import OSLog
 import Sparkle
 import GhosttyKit
+import Carbon
 
 private extension NSWindow.Level {
     static let gaiCriticalDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 30)
@@ -97,9 +98,18 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
-    /// GaiTerm's floating workspaces system: the always-on-top panel hosting
-    /// the workspace handles (Repos), Aperçu, and Scène.
-    lazy var gaiWorkspaceManager = GaiWorkspaceManager(ghostty: ghostty)
+    /// DouDou Company uses one stable terminal surface per agent in every
+    /// macOS configuration. Debug keeps a separate bundle identity so it can
+    /// coexist safely with the installed release.
+    lazy var gaiWorkspaceManager = GaiCompanionManager(ghostty: ghostty)
+    private var gaiAgentEventSocketServer: GaiCompanionEventSocketServer?
+    private var gaiAgentHotKey: EventHotKeyRef?
+    private var gaiAgentHotKeyHandler: EventHandlerRef?
+    private static let gaiAgentHotKeySignature: OSType = 0x4444434F // "DDCO"
+    private static let gaiAgentHotKeyIdentifier: UInt32 = 1
+    var gaiAgentEventSocketPath: String? {
+        gaiAgentEventSocketServer?.socketPath
+    }
 
     /// The global undo manager for app-level actions. This remains
     /// ExpiringUndoManager while the classic Ghostty window files are still
@@ -187,11 +197,27 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // Bring up the floating workspaces overlay. We do this here (not gated on
-        // activation) because an always-on-top overlay should appear on launch
-        // regardless of whether we're the frontmost app.
+        // Start the ordered local transport before creating any PTYs so every
+        // hosted CLI inherits its private socket path from the first process.
+        let eventServer = GaiCompanionEventSocketServer { [weak self] url in
+            self?.handleGaiTermURL(url) ?? false
+        }
+        do {
+            _ = try eventServer.start()
+            gaiAgentEventSocketServer = eventServer
+        } catch {
+            // Provider hooks retain their authenticated LaunchServices fallback
+            // if the local socket cannot be established.
+            Ghostty.logger.warning(
+                "ordered agent transport unavailable: \(String(describing: error), privacy: .public)")
+        }
+
+        // A provider reads its hook/plugin configuration when its process is
+        // created. Finish the bounded local installation before GaiTerm can
+        // create the first agent PTY; otherwise that first agent session could
+        // miss every lifecycle signal until it is restarted.
+        GaiAgentHookInstaller.installBeforeLaunchingCompanionSurfaces()
         gaiWorkspaceManager.start()
-        GaiAgentHookInstaller.installIfNeeded()
 
         // Start our update checker.
         updateController.startUpdater()
@@ -237,8 +263,12 @@ class AppDelegate: NSObject,
             object: nil)
 
         // Configure user notifications
+        let showAction = UNNotificationAction(
+            identifier: Ghostty.userNotificationActionShow,
+            title: "Show",
+            options: [.foreground])
         let actions = [
-            UNNotificationAction(identifier: Ghostty.userNotificationActionShow, title: "Show")
+            showAction
         ]
 
         let center = UNUserNotificationCenter.current()
@@ -272,6 +302,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        registerGaiAgentHotKey()
 
         // Setup signal handlers
         setupSignals()
@@ -324,7 +355,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return derivedConfig.shouldQuitAfterLastWindowClosed
+        // Closing the company window only sends it to the background. Agents
+        // and their PTYs keep running until the user explicitly quits.
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -373,6 +406,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        unregisterGaiAgentHotKey()
+        gaiAgentEventSocketServer?.stop()
+        gaiAgentEventSocketServer = nil
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
@@ -387,9 +423,14 @@ class AppDelegate: NSObject,
         // but I haven't seen it happen in releases. I'm unsure why.
         guard applicationHasBecomeActive else { return true }
 
-        // GaiTerm's home is the floating workspaces block, not a classic
-        // Ghostty terminal window.
+        NSApp.unhide(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        // DouDou Company's home is the agent library, not a classic terminal
+        // window. Reopening it preserves the independent Hide Agents choice.
         gaiWorkspaceManager.reveal()
+        reloadDockMenu()
         return false
     }
 
@@ -442,7 +483,7 @@ class AppDelegate: NSObject,
             // may want to show this as a sheet on the focused window (especially if we're
             // opening a tab). I'm not sure.
             let alert = NSAlert()
-            alert.messageText = "Allow GaiTerm to execute \"\(filename)\"?"
+            alert.messageText = "Allow DouDou Company to execute \"\(filename)\"?"
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Cancel")
             alert.alertStyle = .warning
@@ -468,8 +509,23 @@ class AppDelegate: NSObject,
 
     @discardableResult
     private func handleGaiTermURL(_ url: URL) -> Bool {
-        let expectedScheme =
-            Bundle.main.bundleIdentifier == "com.sipiyou.gaiterm.debug" ? "gaiterm-debug" : "gaiterm"
+        if url.scheme == GaiCompanionEventEnvelope.scheme,
+           url.host == GaiCompanionEventEnvelope.host {
+            do {
+                let envelope = try GaiCompanionEventEnvelope(url: url)
+                return gaiWorkspaceManager.recordAgentEvent(
+                    envelope.event,
+                    token: envelope.token).shouldAcknowledge
+            } catch {
+                // Never log the URL because it carries the per-terminal
+                // capability token.
+                Ghostty.logger.warning(
+                    "ignored malformed agent event: \(String(describing: error), privacy: .public)")
+                return false
+            }
+        }
+
+        let expectedScheme = GaiCompanionEventEnvelope.scheme
         guard url.scheme == expectedScheme, url.host == "notify" else { return false }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return true }
         let items = components.queryItems ?? []
@@ -485,6 +541,90 @@ class AppDelegate: NSObject,
             title: value("title", maxLength: 80),
             body: value("body", maxLength: 240))
         return true
+    }
+
+    /// Registers a real system-wide shortcut. Unlike an AppKit key equivalent,
+    /// this keeps working while DouDou Company is in the background.
+    private func registerGaiAgentHotKey() {
+        guard gaiAgentHotKey == nil, gaiAgentHotKeyHandler == nil else { return }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed))
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, userData -> OSStatus in
+                guard let event, let userData else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                var hotKeyID = EventHotKeyID()
+                let parameterStatus = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID)
+                guard parameterStatus == noErr,
+                      hotKeyID.signature == AppDelegate.gaiAgentHotKeySignature,
+                      hotKeyID.id == AppDelegate.gaiAgentHotKeyIdentifier
+                else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                let appDelegate = Unmanaged<AppDelegate>
+                    .fromOpaque(userData)
+                    .takeUnretainedValue()
+                DispatchQueue.main.async {
+                    appDelegate.toggleVisibility(appDelegate)
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &gaiAgentHotKeyHandler)
+        guard handlerStatus == noErr else {
+            Ghostty.logger.warning(
+                "could not install DouDou Company global hot-key handler: \(handlerStatus)")
+            gaiAgentHotKeyHandler = nil
+            return
+        }
+
+        let hotKeyID = EventHotKeyID(
+            signature: Self.gaiAgentHotKeySignature,
+            id: Self.gaiAgentHotKeyIdentifier)
+        let modifiers = UInt32(cmdKey | optionKey | controlKey)
+        let registrationStatus = RegisterEventHotKey(
+            UInt32(kVK_ANSI_D),
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &gaiAgentHotKey)
+        guard registrationStatus == noErr else {
+            Ghostty.logger.warning(
+                "could not register DouDou Company global hot key: \(registrationStatus)")
+            if let handler = gaiAgentHotKeyHandler {
+                RemoveEventHandler(handler)
+                gaiAgentHotKeyHandler = nil
+            }
+            gaiAgentHotKey = nil
+            return
+        }
+    }
+
+    private func unregisterGaiAgentHotKey() {
+        if let hotKey = gaiAgentHotKey {
+            UnregisterEventHotKey(hotKey)
+            gaiAgentHotKey = nil
+        }
+        if let handler = gaiAgentHotKeyHandler {
+            RemoveEventHandler(handler)
+            gaiAgentHotKeyHandler = nil
+        }
     }
 
     /// Setup signal handlers
@@ -625,7 +765,8 @@ class AppDelegate: NSObject,
     }
 
     private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
-        center.requestAuthorization(options: [.badge]) { granted, error in
+        let options: UNAuthorizationOptions = [.alert, .badge, .sound]
+        center.requestAuthorization(options: options) { granted, error in
             if let error = error {
                 Self.logger.warning("Error requesting badge authorization: \(error, privacy: .public)")
                 return
@@ -707,6 +848,12 @@ class AppDelegate: NSObject,
         // explicitly false (NO), auto-updates are disabled. Otherwise, we use the behavior
         // defined by our "auto-update" configuration (if set) or fall back to Sparkle
         // user-based defaults.
+        #if DEBUG
+        // Debug and Release intentionally coexist. Never let the development
+        // bundle consume or install the public Sparkle appcast.
+        updateController.updater.automaticallyChecksForUpdates = false
+        updateController.updater.automaticallyDownloadsUpdates = false
+        #else
         if Bundle.main.infoDictionary?["SUEnableAutomaticChecks"] as? Bool == false {
             updateController.updater.automaticallyChecksForUpdates = false
             updateController.updater.automaticallyDownloadsUpdates = false
@@ -724,6 +871,7 @@ class AppDelegate: NSObject,
              */
             // updateController.updater.checkForUpdatesInBackground()
         }
+        #endif
 
         // Config could change keybindings, so update everything that depends on that
         DispatchQueue.main.async {
@@ -883,7 +1031,9 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func showAbout(_ sender: Any?) {
-        NSApp.orderFrontStandardAboutPanel(sender)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "DouDou Company",
+        ])
     }
 
     @IBAction func showHelp(_ sender: Any) {
@@ -897,29 +1047,14 @@ class AppDelegate: NSObject,
 
     @IBAction func showGaiTerm(_ sender: Any) {
         gaiWorkspaceManager.reveal()
+        reloadDockMenu()
     }
 
-    /// Toggles visibility of all GaiTerm Terminal windows. When hidden, activates GaiTerm as the frontmost application
+    /// Toggles the lightweight agent layer without touching PTYs or the
+    /// library window.
     @IBAction func toggleVisibility(_ sender: Any) {
-        // If we have focus, then we hide all windows.
-        if NSApp.isActive {
-            // Toggle visibility doesn't do anything if the focused window is native
-            // fullscreen. This is only relevant if Ghostty is active.
-            guard let keyWindow = NSApp.keyWindow,
-                  !keyWindow.styleMask.contains(.fullScreen) else { return }
-
-            NSApp.hide(nil)
-            return
-        }
-
-        // If we're not active, we want to become active
-        NSApp.activate(ignoringOtherApps: true)
-
-        // Bring all windows to the front. Note: we don't use NSApp.unhide because
-        // that will unhide ALL hidden windows. We want to only bring forward the
-        // ones that we hid.
-        hiddenState?.restore()
-        hiddenState = nil
+        gaiWorkspaceManager.toggleAgentVisibility()
+        reloadDockMenu()
     }
 
     @IBAction func bringAllToFront(_ sender: Any) {
@@ -1001,11 +1136,19 @@ extension AppDelegate {
     }
 
     private func reloadDockMenu() {
-        let reveal = NSMenuItem(title: "Show GaiTerm", action: #selector(showGaiTerm), keyEquivalent: "")
-        let newTerminal = NSMenuItem(title: "New Terminal", action: #selector(newWindow), keyEquivalent: "")
+        let reveal = NSMenuItem(
+            title: "Open DouDou Company",
+            action: #selector(showGaiTerm),
+            keyEquivalent: "")
+        let toggleAgents = NSMenuItem(
+            title: gaiWorkspaceManager.agentWindowsAreVisible ? "Hide Agents" : "Show Agents",
+            action: #selector(toggleVisibility),
+            keyEquivalent: "")
+        let newTerminal = NSMenuItem(title: "Hire Agent", action: #selector(newWindow), keyEquivalent: "")
 
         dockMenu.removeAllItems()
         dockMenu.addItem(reveal)
+        dockMenu.addItem(toggleAgents)
         dockMenu.addItem(newTerminal)
     }
 
@@ -1048,6 +1191,26 @@ extension AppDelegate {
         self.menuMoveSplitDividerRight?.setImageIfDesired(systemSymbolName: "arrow.right.to.line")
         self.menuFloatOnTop?.setImageIfDesired(systemSymbolName: "square.filled.on.square")
         self.menuFindParent?.setImageIfDesired(systemSymbolName: "text.page.badge.magnifyingglass")
+
+        // The agent UI has no split tree; each terminal owns one stable agent.
+        // Keep the legacy outlets connected while removing those commands from
+        // the public DouDou Company menus.
+        menuAbout?.title = "About DouDou Company"
+        menuQuit?.title = "Quit DouDou Company"
+        menuNewWindow?.title = "Hire Agent"
+        menuNewTab?.isHidden = true
+        menuCloseAllWindows?.title = "Remove All Agents"
+        menuShowGaiTerm?.title = "Open DouDou Company"
+        configureGaiAgentVisibilityMenuItem()
+        [
+            menuSplitRight, menuSplitLeft, menuSplitUp, menuSplitDown,
+            menuZoomSplit, menuPreviousSplit, menuNextSplit,
+            menuSelectSplitLeft, menuSelectSplitRight,
+            menuSelectSplitAbove, menuSelectSplitBelow,
+            menuMoveSplitDividerUp, menuMoveSplitDividerDown,
+            menuMoveSplitDividerLeft, menuMoveSplitDividerRight,
+            menuEqualizeSplits, menuChangeTitle, menuFloatOnTop,
+        ].forEach { $0?.isHidden = true }
     }
 
     /// Sync all of our menu item keyboard shortcuts with the Ghostty configuration.
@@ -1102,7 +1265,7 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "reset_font_size", menuItem: self.menuResetFontSize)
         syncMenuShortcut(config, action: "prompt_surface_title", menuItem: self.menuChangeTitle)
         syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: self.menuShowGaiTerm)
-        syncMenuShortcut(config, action: "toggle_visibility", menuItem: self.menuToggleVisibility)
+        configureGaiAgentVisibilityMenuItem()
         syncMenuShortcut(config, action: "toggle_window_float_on_top", menuItem: self.menuFloatOnTop)
 
         syncMenuShortcut(config, action: "toggle_secure_input", menuItem: self.menuSecureInput)
@@ -1121,6 +1284,13 @@ extension AppDelegate {
         menuShortcutManager.syncMenuShortcut(config, action: action, menuItem: menuItem)
     }
 
+    private func configureGaiAgentVisibilityMenuItem() {
+        menuToggleVisibility?.title =
+            gaiWorkspaceManager.agentWindowsAreVisible ? "Hide Agents" : "Show Agents"
+        menuToggleVisibility?.keyEquivalent = "d"
+        menuToggleVisibility?.keyEquivalentModifierMask = [.command, .option, .control]
+    }
+
     @MainActor func performGhosttyBindingMenuKeyEquivalent(with event: NSEvent) -> Bool {
         menuShortcutManager.performGhosttyBindingMenuKeyEquivalent(with: event)
     }
@@ -1135,6 +1305,11 @@ extension AppDelegate {
     }
 
     @IBAction func floatOnTop(_ menuItem: NSMenuItem) {
+        if let identifier = NSApp.keyWindow?.identifier?.rawValue,
+           identifier.hasPrefix("gai.companion.") {
+            menuItem.state = .off
+            return
+        }
         menuItem.state = menuItem.state == .on ? .off : .on
         guard let window = NSApp.keyWindow else { return }
         window.level = menuItem.state == .on ? .floating : .normal
@@ -1152,7 +1327,7 @@ extension AppDelegate {
                 let alert = NSAlert()
                 alert.messageText = "Failed to Set Default Terminal"
                 alert.informativeText = """
-                GaiTerm could not be set as the default terminal application.
+                DouDou Company could not be set as the default terminal application.
 
                 Error: \(error.localizedDescription)
                 """
@@ -1168,6 +1343,11 @@ extension AppDelegate {
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(toggleVisibility(_:)):
+            item.title =
+                gaiWorkspaceManager.agentWindowsAreVisible ? "Hide Agents" : "Show Agents"
+            return true
+
         case #selector(setAsDefaultTerminal(_:)):
             return NSWorkspace.shared.defaultTerminal != Bundle.main.bundleURL
 
@@ -1206,7 +1386,7 @@ extension AppDelegate {
         }
 
         let alert = NSAlert()
-        alert.messageText = "Quit GaiTerm?"
+        alert.messageText = "Quit DouDou Company?"
         alert.informativeText = "At least one terminal process is still running. If you quit, those processes will be terminated."
         alert.addButton(withTitle: "Terminate")
         alert.addButton(withTitle: "Cancel")

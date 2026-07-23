@@ -1326,6 +1326,19 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
 
+                // GaiTerm's generic lifecycle fallback consumes the shell
+                // integration boundary directly. Keep this independent from
+                // the optional user-facing command-finish notification below.
+                NotificationCenter.default.post(
+                    name: .gaiSurfaceCommandDidFinish,
+                    object: surfaceView,
+                    userInfo: [
+                        SwiftUI.Notification.Name.GaiSurfaceCommandExitCodeKey:
+                            Int(v.exit_code),
+                        SwiftUI.Notification.Name.GaiSurfaceCommandDurationNanosecondsKey:
+                            NSNumber(value: v.duration),
+                    ])
+
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
                 switch config.notifyOnCommandFinish {

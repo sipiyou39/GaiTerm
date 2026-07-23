@@ -64,8 +64,8 @@ struct WorkspaceStageView: View {
     /// Restores terminal rendering after live panel resize ends.
     let onResizeEnded: () -> Void
 
-    /// Slab offset: 0 = out; +stageCardWidth = tucked (panel still at its open
-    /// frame). The mirror of the drawer's negative slide.
+    /// Slab offset: 0 = out; +stageCardWidth = tucked while the panel is still
+    /// at its open frame during the close animation.
     @State private var slide: CGFloat = 0
     @State private var panelIsOut = false
     @State private var visualOpen = false
@@ -79,14 +79,26 @@ struct WorkspaceStageView: View {
     private typealias D = GaiDrawerMetrics
 
     private var slabWidth: CGFloat { ui.stageCardWidth + D.tabWidth + D.bleed }
+    private var collapsedWidth: CGFloat { D.tabWidth }
     var body: some View {
-        ZStack(alignment: .trailing) {
+        ZStack(alignment: panelIsOut ? .trailing : .leading) {
             Color.clear
             // Always show a terminal: the open workspace, or the default scratch
             // terminal when none is open.
-            slab(store.stageWorkspace).offset(x: slide)
+            if panelIsOut {
+                slab(store.stageWorkspace)
+                    .offset(x: slide)
+            } else {
+                slab(store.stageWorkspace)
+                    .frame(width: slabWidth, alignment: .leading)
+                    .frame(width: collapsedWidth, alignment: .leading)
+                    .clipped()
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: panelIsOut ? .trailing : .leading)
         .environmentObject(ghostty)
         .onReceive(ui.$isStageExpanded.removeDuplicates().dropFirst()) { expanded in
             setExpanded(expanded)

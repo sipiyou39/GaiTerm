@@ -2,8 +2,8 @@ import AppKit
 import AppIntents
 
 struct ShowGaiTermIntent: AppIntent {
-    static var title: LocalizedStringResource = "Show GaiTerm"
-    static var description = IntentDescription("Show the GaiTerm stage and drawer.")
+    static var title: LocalizedStringResource = "Show DouDou Company"
+    static var description = IntentDescription("Bring the DouDou Company library forward.")
 
 #if compiler(>=6.2)
     @available(macOS 26.0, *)

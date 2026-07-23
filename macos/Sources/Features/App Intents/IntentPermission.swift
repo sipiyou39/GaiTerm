@@ -45,7 +45,7 @@ func requestIntentPermission() async -> Bool {
 
             PermissionRequest.show(
                 "com.sipiyou.gaiterm.shortcutsPermission",
-                message: "Allow Shortcuts to interact with GaiTerm?",
+                message: "Allow Shortcuts to interact with DouDou Company?",
                 allowDuration: .forever,
                 rememberDuration: nil,
             ) { response in

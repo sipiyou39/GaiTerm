@@ -34,13 +34,63 @@ private enum GaiUpdateReleaseNotes {
 
     static let sections: [GaiReleaseNoteSection] = [
         .init(
+            id: "doudou-company",
+            introducedVersion: "2.0.0",
+            icon: "building.2.fill",
+            title: "Bienvenue chez DouDou Company",
+            summary: "GaiTerm devient une petite entreprise d'agents numeriques.",
+            points: [
+                "Chaque agent possede son propre terminal, son nom, sa couleur, sa taille et son dossier de travail.",
+                "La bibliotheque centrale permet d'embaucher, renommer, regler et retrouver tous tes agents au meme endroit.",
+                "L'identite visuelle, l'icone et les menus ont ete entierement repenses sans casser le canal de mise a jour existant.",
+            ],
+            color: Color(red: 0.57, green: 0.38, blue: 0.90)),
+        .init(
+            id: "desktop-agents",
+            introducedVersion: "2.0.0",
+            icon: "person.3.fill",
+            title: "Des agents vivants sur le bureau",
+            summary: "Tes doudous restent proches de leur terminal et reagissent au travail.",
+            points: [
+                "Clique sur un agent pour ouvrir ou refermer son terminal, deja pret a recevoir ta saisie.",
+                "Deplace un agent librement : son terminal se ferme en douceur pendant le geste et se replace proprement.",
+                "Un agent s'anime pendant son travail, puis saute et devient vert lorsque sa reponse est terminee.",
+                "Le raccourci Controle + Option + Commande + D masque ou affiche toute l'equipe.",
+            ],
+            color: Color(red: 0.45, green: 0.78, blue: 0.67)),
+        .init(
+            id: "agent-terminal",
+            introducedVersion: "2.0.0",
+            icon: "terminal.fill",
+            title: "Un terminal, un agent",
+            summary: "Une interface plus simple, rapide et impossible a confondre.",
+            points: [
+                "Un seul terminal est ouvert a la fois, en format compact ou plein ecran, avec un rendu haute fluidite.",
+                "Le dossier et le nom se modifient directement depuis le header, sans panneaux split ni commandes inutiles.",
+                "Un clic a l'exterieur referme le terminal; le cadenas permet de le garder ouvert.",
+                "Supprimer un agent demande toujours confirmation avant de tuer son terminal.",
+            ],
+            color: Color(red: 0.50, green: 0.66, blue: 1.0)),
+        .init(
+            id: "agent-lifecycle",
+            introducedVersion: "2.0.0",
+            icon: "waveform.path.ecg",
+            title: "Suivi de travail robuste",
+            summary: "DouDou Company comprend le cycle de travail de tes CLI.",
+            points: [
+                "Codex, Claude Code, Agy et OpenCode signalent leur activite par des evenements authentifies et ordonnes.",
+                "Les sous-agents et les evenements repetes ne declenchent plus de fausses fins de travail.",
+                "Le son de fin est reglable agent par agent et fonctionne avec l'animation de completion.",
+            ],
+            color: Color(red: 0.96, green: 0.65, blue: 0.32)),
+        .init(
             id: "agent-resume",
             introducedVersion: "1.0.9",
             icon: "clock.arrow.circlepath",
             title: "Reprise Codex et Claude",
             summary: "Tes conversations CLI peuvent repartir au bon endroit.",
             points: [
-                "Au lancement, GaiTerm detecte les sessions Codex et Claude liees aux panes restaurees.",
+                "Au lancement, DouDou Company detecte les sessions Codex et Claude liees aux panes restaurees.",
                 "Tu peux reprendre une session precise, tout reprendre d'un coup, ou ignorer la reprise.",
                 "Les panes se restaurent sans relancer automatiquement une ancienne conversation : rien ne repart sans ton clic.",
                 "La fenetre de reprise reste au premier plan et s'ouvre au centre de l'ecran.",
@@ -54,7 +104,7 @@ private enum GaiUpdateReleaseNotes {
             summary: "Chaque pane garde son identite agent meme si tu changes son dossier.",
             points: [
                 "Changer le dossier d'un pane Codex ou Claude ne casse plus son lien avec la reprise de session.",
-                "Au redemarrage, GaiTerm peut matcher chaque conversation avec le dossier propre a son pane, pas seulement avec le dossier du workspace.",
+                "Au redemarrage, DouDou Company peut matcher chaque conversation avec le dossier propre a son pane, pas seulement avec le dossier du workspace.",
                 "Le terminal est toujours rouvert proprement, mais l'identite Codex/Claude reste attachee au pane.",
             ],
             color: Color(red: 0.58, green: 0.78, blue: 1.0)),
@@ -88,7 +138,7 @@ private enum GaiUpdateReleaseNotes {
             introducedVersion: "1.0.9",
             icon: "externaldrive.fill",
             title: "Memoire de session",
-            summary: "GaiTerm revient avec ton espace de travail au lieu de repartir a zero.",
+            summary: "DouDou Company revient avec ton espace de travail au lieu de repartir a zero.",
             points: [
                 "Les workspaces se rouvrent par defaut au lancement.",
                 "La disposition des panes, leurs noms, dossiers, commandes CLI et options de notification sont restaurees.",
@@ -115,7 +165,7 @@ private enum GaiUpdateReleaseNotes {
             title: "Notifications et mises a jour",
             summary: "Les alertes restent utiles sans polluer ton flux.",
             points: [
-                "Les sons CLI sont joues par GaiTerm, meme quand les bannieres macOS ne suffisent pas.",
+                "Les sons CLI sont joues par DouDou Company, meme quand les bannieres macOS ne suffisent pas.",
                 "Rouge signale une reponse non lue, orange signale une CLI qui attend ton input.",
                 "La confirmation de fermeture passe au premier plan, devant la stage, pour pouvoir terminer les processus sans blocage.",
                 "La fenetre de mise a jour reste simple; les notes detaillees apparaissent seulement apres installation.",
@@ -124,10 +174,21 @@ private enum GaiUpdateReleaseNotes {
     ]
 
     static func sectionsToShow(after previousVersion: String?, upTo currentVersion: String) -> [GaiReleaseNoteSection] {
-        sections.filter { section in
-            versionCompare(section.introducedVersion, currentVersion) <= 0
-                && (previousVersion == nil || versionCompare(section.introducedVersion, previousVersion!) > 0)
+        let available = sections.filter {
+            versionCompare($0.introducedVersion, currentVersion) <= 0
         }
+        if let previousVersion {
+            return available.filter {
+                versionCompare($0.introducedVersion, previousVersion) > 0
+            }
+        }
+
+        // A fresh install should introduce the current product, not replay
+        // release notes for workspaces and panes that no longer exist.
+        guard let newestVersion = available.map(\.introducedVersion).max(by: {
+            versionCompare($0, $1) < 0
+        }) else { return [] }
+        return available.filter { $0.introducedVersion == newestVersion }
     }
 
     private static func versionCompare(_ lhs: String, _ rhs: String) -> Int {
@@ -202,7 +263,7 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
                 install()
             })
         let window = makeWindow(
-            title: "GaiTerm Update",
+            title: "DouDou Company Update",
             size: NSSize(width: 430, height: 230),
             rootView: view)
         updateWindow = window
@@ -255,7 +316,7 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
             sections: sections,
             close: { [weak self] in self?.closeNotesWindow() })
         let window = makeWindow(
-            title: "GaiTerm Release Notes",
+            title: "DouDou Company Release Notes",
             size: NSSize(width: 760, height: 690),
             rootView: view)
         notesWindow = window
@@ -358,13 +419,13 @@ private struct GaiUpdateAvailableWindow: View {
                     Text("Mise a jour disponible")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
-                    Text("GaiTerm \(version) est pret a etre installe.")
+                    Text("DouDou Company \(version) est pret a etre installe.")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.white.opacity(0.68))
                 }
             }
 
-            Text("GaiTerm peut l'installer maintenant, ou te le rappeler plus tard.")
+            Text("DouDou Company peut l'installer maintenant, ou te le rappeler plus tard.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.58))
                 .fixedSize(horizontal: false, vertical: true)
@@ -429,7 +490,7 @@ private struct GaiReleaseNotesWindow: View {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(.white.opacity(0.075)))
 
-            Text("GaiTerm \(version)")
+            Text("DouDou Company \(version)")
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
 

@@ -72,11 +72,11 @@
         <customObject id="YLy-65-1bz" customClass="NSFontManager"/>
         <menu title="Main Menu" systemMenu="main" id="AYu-sK-qS6">
             <items>
-                <menuItem title="GaiTerm" id="1Xt-HY-uBw">
+                <menuItem title="DouDou Company" id="1Xt-HY-uBw">
                     <modifierMask key="keyEquivalentModifierMask"/>
-                    <menu key="submenu" title="GaiTerm" systemMenu="apple" id="uQy-DD-JDr">
+                    <menu key="submenu" title="DouDou Company" systemMenu="apple" id="uQy-DD-JDr">
                         <items>
-                            <menuItem title="About GaiTerm" id="5kV-Vb-QxS">
+                            <menuItem title="About DouDou Company" id="5kV-Vb-QxS">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="showAbout:" target="-1" id="tGt-68-tLn"/>
@@ -112,7 +112,7 @@
                                     <action selector="toggleSecureInput:" target="bbz-4X-AYv" id="vWx-z8-5Sy"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Make GaiTerm the Default Terminal" id="b1t-oB-7MI" userLabel="Set GaiTerm as Default Terminal App">
+                            <menuItem title="Make DouDou Company the Default Terminal" id="b1t-oB-7MI" userLabel="Set DouDou Company as Default Terminal App">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="setAsDefaultTerminal:" target="bbz-4X-AYv" id="QHh-CA-Qho"/>
@@ -124,7 +124,7 @@
                                 <menu key="submenu" title="Services" id="aQe-vS-j8Q"/>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="qno-yg-pur"/>
-                            <menuItem title="Hide GaiTerm" keyEquivalent="h" id="Olw-nP-bQN">
+                            <menuItem title="Hide DouDou Company" keyEquivalent="h" id="Olw-nP-bQN">
                                 <connections>
                                     <action selector="hide:" target="-1" id="PnN-Uc-m68"/>
                                 </connections>
@@ -142,7 +142,7 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="kCx-OE-vgT"/>
-                            <menuItem title="Quit GaiTerm" id="4sb-4s-VLi">
+                            <menuItem title="Quit DouDou Company" id="4sb-4s-VLi">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="terminate:" target="-1" id="Te7-pn-YzF"/>
@@ -335,7 +335,7 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="Vkj-tP-dMZ"/>
-                            <menuItem title="Show GaiTerm" id="1pv-LF-NBJ">
+                            <menuItem title="Show DouDou Company" id="1pv-LF-NBJ">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="showGaiTerm:" target="bbz-4X-AYv" id="qDV-sz-Agc"/>
@@ -366,7 +366,7 @@
                                     <action selector="toggleFullScreen:" target="-1" id="QB9-7R-xyc"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Show/Hide GaiTerm" id="DOX-wA-ilh">
+                            <menuItem title="Show/Hide DouDou Company" id="DOX-wA-ilh">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="toggleVisibility:" target="bbz-4X-AYv" id="2vT-tL-3tQ"/>
@@ -494,7 +494,7 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="Help" systemMenu="help" id="F2S-fz-NVQ">
                         <items>
-                            <menuItem title="GaiTerm Help" keyEquivalent="?" id="FKE-Sm-Kum">
+                            <menuItem title="DouDou Company Help" keyEquivalent="?" id="FKE-Sm-Kum">
                                 <connections>
                                     <action selector="showHelp:" target="bbz-4X-AYv" id="tiy-ow-xSw"/>
                                 </connections>

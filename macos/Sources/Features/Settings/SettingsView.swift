@@ -58,7 +58,7 @@ final class GaiSettingsWindowController {
         if window == nil {
             let host = NSHostingController(rootView: SettingsView())
             let window = NSWindow(contentViewController: host)
-            window.title = "GaiTerm Settings"
+            window.title = "DouDou Company Settings"
             window.styleMask = [.titled, .closable, .fullSizeContentView]
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
@@ -143,7 +143,7 @@ struct SettingsView: View {
                 .frame(width: 34, height: 34)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 1) {
-                Text("GaiTerm")
+                Text("DouDou Company")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
                 Text(appVersion)
@@ -370,8 +370,8 @@ private struct GeneralSettings: View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSection(title: "Startup") {
                 SettingsToggle(
-                    title: "Launch GaiTerm at login",
-                    subtitle: "Open GaiTerm automatically when you log in.",
+                    title: "Launch DouDou Company at login",
+                    subtitle: "Open DouDou Company automatically when you log in.",
                     first: true,
                     isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
             }
@@ -429,7 +429,7 @@ private struct NotificationsSettings: View {
             SettingsSection(title: "Sounds") {
                 SettingsToggle(
                     title: "Play notification sound",
-                    subtitle: "Use the selected GaiTerm sound for CLI completion notifications.",
+                    subtitle: "Use the selected DouDou Company sound for CLI completion notifications.",
                     first: true,
                     isOn: $soundEnabled)
                 SettingsRow(title: "Sound", subtitle: "Choose the bundled completion sound.") {
@@ -540,14 +540,14 @@ private struct PermissionsSettings: View {
                 }
                 SettingsRow(
                     title: "Dock badge",
-                    subtitle: "Allows macOS notification badge support; GaiTerm also updates its Dock count directly.") {
+                    subtitle: "Allows macOS notification badge support; DouDou Company also updates its Dock count directly.") {
                     PermissionStatusBadge(
                         title: notificationBadgeSetting == .enabled ? "Ready" : "Off",
                         state: notificationBadgeSetting == .enabled ? .granted : .blocked)
                 }
                 SettingsRow(
                     title: "Notification sound",
-                    subtitle: "Allows sound on macOS notifications. GaiTerm custom sounds are controlled in Notifications → Sounds.") {
+                    subtitle: "Allows sound on macOS notifications. DouDou Company sounds are controlled in Notifications → Sounds.") {
                     PermissionStatusBadge(
                         title: notificationSoundSetting == .enabled ? "Ready" : "Off",
                         state: notificationSoundSetting == .enabled ? .granted : .blocked)
@@ -557,7 +557,7 @@ private struct PermissionsSettings: View {
             SettingsSection(title: "Keyboard shortcut") {
                 SettingsRow(
                     title: "Global double Option",
-                    subtitle: "Required for opening and closing GaiTerm with a fast double Option tap while another app is active.",
+                    subtitle: "Required for opening and closing DouDou Company with a fast double Option tap while another app is active.",
                     first: true) {
                     PermissionStatusBadge(
                         title: accessibilityTrusted ? "Granted" : "Not granted",
@@ -583,7 +583,7 @@ private struct PermissionsSettings: View {
                 }
                 SettingsRow(
                     title: "Open System Settings",
-                    subtitle: "Find GaiTerm in the list, switch it on. If it isn't listed, use “+” and pick GaiTerm.") {
+                    subtitle: "Find DouDou Company in the list, switch it on. If it isn't listed, use “+” and pick DouDou Company.") {
                     actionButton("Open Full Disk Access", action: openFullDiskAccess)
                 }
                 SettingsRow(
@@ -593,7 +593,7 @@ private struct PermissionsSettings: View {
                 }
             }
 
-            Text("After enabling Full Disk Access, quit and reopen GaiTerm once for it to take effect.")
+            Text("After enabling Full Disk Access, quit and reopen DouDou Company once for it to take effect.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.white.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)
@@ -759,7 +759,7 @@ private struct UpdatesSettings: View {
             SettingsSection(title: "Software updates") {
                 SettingsToggle(
                     title: "Automatically check for updates",
-                    subtitle: "Periodically check for new versions of GaiTerm in the background.",
+                    subtitle: "Periodically check for new versions of DouDou Company in the background.",
                     first: true,
                     isOn: Binding(get: { autoCheck }, set: { setAuto($0) }))
                 SettingsRow(title: "Check now", subtitle: "Look for an update right now.") {

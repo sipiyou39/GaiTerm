@@ -230,6 +230,8 @@ extension Notification.Name {
         Notification.Name("com.sipiyou.gaiterm.surfaceDidRequestImmediateFocus")
     static let gaiSurfaceDidReceiveUserInput =
         Notification.Name("com.sipiyou.gaiterm.surfaceDidReceiveUserInput")
+    static let gaiSurfaceDidCancelAgentWork =
+        Notification.Name("com.sipiyou.gaiterm.surfaceDidCancelAgentWork")
 }
 
 /// Stage hosting view: takes over hit-testing at the root so header controls
@@ -403,6 +405,8 @@ final class GaiWorkspaceManager {
     }()
     private var panel: NSPanel?
     private var stagePanel: NSPanel?
+    private var screenTabPanels: [CGDirectDisplayID: NSPanel] = [:]
+    private var activeScreenID: CGDirectDisplayID?
     private var localModifierMonitor: Any?
     private var globalModifierMonitor: Any?
     private var shortcutOptionIsDown = false
@@ -450,6 +454,7 @@ final class GaiWorkspaceManager {
     /// Bring the drawer forward and slide it open — used when the app is
     /// reopened from the Dock (instead of spawning a terminal window).
     func reveal() {
+        setActiveScreenUnderMouseIfAvailable()
         start()
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         // Open the block (stage + drawer via the mirror), like the pull tab does —
@@ -520,6 +525,7 @@ final class GaiWorkspaceManager {
         if ui.isStageExpanded {
             dismissBlock()
         } else {
+            setActiveScreenUnderMouseIfAvailable()
             reveal()
         }
     }
@@ -927,7 +933,7 @@ final class GaiWorkspaceManager {
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
-        panel.level = .statusBar
+        panel.level = GaiFloatingPanels.overlayLevel
         panel.collectionBehavior = [
             .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
         ]
@@ -967,6 +973,11 @@ final class GaiWorkspaceManager {
         override func resignMain() {}
     }
 
+    private final class StageScreenTabPanel: NSPanel {
+        override var canBecomeKey: Bool { false }
+        override var canBecomeMain: Bool { false }
+    }
+
     private func ensureStagePanel() {
         guard stagePanel == nil else { return }
         let panel = StagePanel(
@@ -974,7 +985,7 @@ final class GaiWorkspaceManager {
             styleMask: [.borderless],
             backing: .buffered,
             defer: false)
-        panel.level = .statusBar
+        panel.level = GaiFloatingPanels.overlayLevel
         panel.collectionBehavior = [
             .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
         ]
@@ -1026,8 +1037,75 @@ final class GaiWorkspaceManager {
         self.stagePanel = panel
     }
 
+    private func ensureScreenTabPanels() {
+        var liveIDs: Set<CGDirectDisplayID> = []
+        for screen in NSScreen.screens {
+            guard let screenID = displayID(for: screen) else { continue }
+            liveIDs.insert(screenID)
+            if screenTabPanels[screenID] == nil {
+                screenTabPanels[screenID] = makeScreenTabPanel(for: screen, screenID: screenID)
+            }
+        }
+
+        let staleIDs = screenTabPanels.keys.filter { !liveIDs.contains($0) }
+        for screenID in staleIDs {
+            screenTabPanels[screenID]?.orderOut(nil)
+            screenTabPanels[screenID] = nil
+        }
+        updateScreenTabPanels()
+    }
+
+    private func makeScreenTabPanel(for screen: NSScreen, screenID: CGDirectDisplayID) -> NSPanel {
+        let panel = StageScreenTabPanel(
+            contentRect: screenTabFrame(on: screen),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+        panel.level = GaiFloatingPanels.overlayLevel
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
+        ]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+
+        let tab = GaiStageScreenTabProxyView(store: store) { [weak self] in
+            self?.openStageFromScreenTab(screenID)
+        }
+        let host = FirstMouseHostingView(rootView: tab)
+        host.autoresizingMask = [.width, .height]
+        panel.contentView = host
+        return panel
+    }
+
+    private func openStageFromScreenTab(_ screenID: CGDirectDisplayID) {
+        guard let screen = screen(for: screenID) else { return }
+        setActiveScreen(screen)
+        showStage()
+    }
+
+    private func updateScreenTabPanels() {
+        let activeID = targetScreen().flatMap { displayID(for: $0) }
+        for screen in NSScreen.screens {
+            guard let screenID = displayID(for: screen),
+                  let panel = screenTabPanels[screenID]
+            else { continue }
+            setFrameIfNeeded(panel, screenTabFrame(on: screen))
+            if screenID == activeID {
+                panel.orderOut(nil)
+            } else {
+                panel.orderFrontRegardless()
+            }
+        }
+    }
+
     private func showStage() {
         ensureStagePanel()
+        ensureScreenTabPanels()
         guard let stagePanel else { return }
         recomputeStageCardWidth()
         let wasVisible = stagePanel.isVisible
@@ -1082,6 +1160,7 @@ final class GaiWorkspaceManager {
             }
         }
         updateSurfacePerformanceState()
+        updateScreenTabPanels()
     }
 
     private func hideStage() {
@@ -1089,6 +1168,7 @@ final class GaiWorkspaceManager {
         ui.setTerminalRenderingAllowed(false)
         ui.isStageExpanded = false
         stagePanel.orderOut(nil)
+        updateScreenTabPanels()
         updateSurfacePerformanceState()
     }
 
@@ -1098,8 +1178,16 @@ final class GaiWorkspaceManager {
         ui.stageCardWidth + GaiDrawerMetrics.tabWidth + GaiDrawerMetrics.bleed
     }
 
+    private var stageClosedPanelWidth: CGFloat {
+        GaiDrawerMetrics.tabWidth
+    }
+
     private var drawerSlabWidth: CGFloat {
         GaiDrawerMetrics.bleed + ui.drawerCardWidth
+    }
+
+    private var drawerClosedPanelWidth: CGFloat {
+        1
     }
 
     private var minimumPanelGap: CGFloat {
@@ -1236,16 +1324,16 @@ final class GaiWorkspaceManager {
             height: visible.height)
     }
 
-    /// Resting tucked: slid right by the card width so only the tab peeks at
-    /// the right edge; trimmed to a thin strip so the panel doesn't hang as an
-    /// invisible layer over other apps. Same height/position contract as the
-    /// drawer's closed frame — the slab must not move when the panel snaps.
+    /// Resting tucked: only the pull tab remains inside the target screen.
+    /// Never extend the closed panel past `visible.maxX`: with a display
+    /// arranged to the right, that "off-screen" area is a real visible display.
     private func stageClosedFrame(on screen: NSScreen) -> NSRect {
         let visible = screen.visibleFrame
+        let width = stageClosedPanelWidth
         return NSRect(
-            x: visible.maxX - GaiDrawerMetrics.tabWidth - closedMargin,
+            x: visible.maxX - width,
             y: visible.minY,
-            width: stageSlabWidth + closedMargin,
+            width: width,
             height: visible.height)
     }
 
@@ -1255,11 +1343,51 @@ final class GaiWorkspaceManager {
         setFrameIfNeeded(stagePanel, frame)
     }
 
+    private func screenTabFrame(on screen: NSScreen) -> NSRect {
+        let frame = screen.frame
+        let width = stageClosedPanelWidth
+        return NSRect(
+            x: frame.maxX - width,
+            y: frame.minY,
+            width: width,
+            height: frame.height)
+    }
+
     // MARK: Geometry
 
-    /// The drawer lives on the primary display (the one with the menu bar).
+    /// The drawer/stage live on the screen that opened them. Collapsed proxy
+    /// tabs exist on every display and set this target before opening.
     private func targetScreen() -> NSScreen? {
-        NSScreen.screens.first
+        if let activeScreenID,
+           let screen = screen(for: activeScreenID) {
+            return screen
+        }
+        return NSScreen.screens.first
+    }
+
+    private func setActiveScreen(_ screen: NSScreen) {
+        guard let screenID = displayID(for: screen) else { return }
+        activeScreenID = screenID
+        refreshGeometry()
+    }
+
+    private func setActiveScreenUnderMouseIfAvailable() {
+        guard let screen = screenContainingMouse() else { return }
+        setActiveScreen(screen)
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let point = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
+    }
+
+    private func screen(for id: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first { displayID(for: $0) == id }
+    }
+
+    private func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        return (screen.deviceDescription[key] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
     }
 
     /// Open: the slab's bleed hangs off-screen, card flush with the edge,
@@ -1276,15 +1404,16 @@ final class GaiWorkspaceManager {
             height: size.height)
     }
 
-    /// Resting closed: slid left by `cardWidth` so only the tab peeks, and
-    /// trimmed to a thin margin past the tab so the panel doesn't hang as an
-    /// invisible layer over other apps. Same height and vertical center as
-    /// the open frame — the slab must not move by a single pixel when the
-    /// panel snaps between the two.
+    /// Resting closed: the drawer has no independent pull tab anymore, so keep
+    /// only a transparent in-screen sliver. Never park the off-screen card on an
+    /// adjacent display.
     private func closedFrame(on screen: NSScreen) -> NSRect {
-        var frame = openFrame(on: screen).offsetBy(dx: -ui.drawerCardWidth, dy: 0)
-        frame.size.width = drawerSlabWidth + closedMargin
-        return frame
+        let open = openFrame(on: screen)
+        return NSRect(
+            x: screen.visibleFrame.minX,
+            y: open.minY,
+            width: drawerClosedPanelWidth,
+            height: open.height)
     }
 
     private func snapPanel(open: Bool) {
@@ -1473,6 +1602,7 @@ final class GaiWorkspaceManager {
                 if !open {
                     self?.ui.setTerminalRenderingAllowed(false)
                 }
+                self?.updateScreenTabPanels()
                 self?.updateSurfacePerformanceState()
             }
             .store(in: &cancellables)
@@ -1848,7 +1978,7 @@ final class GaiWorkspaceManager {
         fallbackTitle: String
     ) -> String {
         let cleanFallback = fallbackTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let workspace else { return cleanFallback.isEmpty ? "GaiTerm" : cleanFallback }
+        guard let workspace else { return cleanFallback.isEmpty ? "DouDou Company" : cleanFallback }
         let workspaceName = workspace.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let folderName = systemNotificationFolderName(surface: surface, workspace: workspace)
 
@@ -1860,7 +1990,7 @@ final class GaiWorkspaceManager {
         case (true, false):
             return folderName
         case (true, true):
-            return cleanFallback.isEmpty ? "GaiTerm" : cleanFallback
+            return cleanFallback.isEmpty ? "DouDou Company" : cleanFallback
         }
     }
 
@@ -1889,6 +2019,7 @@ final class GaiWorkspaceManager {
         if stagePanel?.isVisible == true {
             snapStagePanel(open: ui.isStageExpanded)
         }
+        ensureScreenTabPanels()
     }
 
     /// Keep drawer selection and stage workspace coherent. When real
@@ -1917,45 +2048,335 @@ final class GaiWorkspaceManager {
     }
 }
 
+private struct GaiStageScreenTabProxyView: View {
+    @ObservedObject var store: GaiWorkspaceStore
+    let onOpen: () -> Void
+
+    @State private var pressed = false
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
+
+    private typealias D = GaiDrawerMetrics
+    private var slabWidth: CGFloat { 360 + D.tabWidth + D.bleed }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            GaiStageSlabShape()
+                .fill(Color.gaiPanelColor(
+                    accent: store.stageWorkspace.accentColor,
+                    tinted: tintPanels))
+                .frame(width: slabWidth)
+                .frame(maxHeight: .infinity)
+                .frame(width: D.tabWidth, alignment: .leading)
+                .clipped()
+
+            Image(systemName: "chevron.left")
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.95))
+                .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
+                .scaleEffect(pressed ? 0.8 : 1)
+                .animation(.easeOut(duration: 0.08), value: pressed)
+                .frame(width: D.tabWidth, height: D.tabExtent)
+        }
+        .frame(width: D.tabWidth)
+        .frame(maxHeight: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressed = true }
+                .onEnded { _ in
+                    pressed = false
+                    onOpen()
+                })
+    }
+}
+
 // MARK: - Agent notification hooks
 
-/// Installs the minimal CLI hooks GaiTerm needs to know when hosted agents are
-/// done and waiting for the user again. The commands no-op outside GaiTerm panes.
+/// Installs provider-native lifecycle hooks for terminals hosted by DouDou
+/// Company. Typed events use the identity inherited from each terminal, so the
+/// installed Release and a Debug build can coexist without cross-talk.
 enum GaiAgentHookInstaller {
     private static let codexHookMarker = "gaiterm-codex-stop-notify"
     private static let claudeHookMarker = "gaiterm-claude-stop-notify"
+    private static let agyHookMarker = "gaiterm-agy-stop-notify"
+    private static let agentEventHookMarker = "gaiterm-agent-event-v1"
+    private static let agyHookGroupName = "gaiterm-agent-lifecycle-v1"
 
+    // Older GaiTerm builds may have written this feature block. Keep its marker
+    // constants for compatibility, but never mutate the user's TOML features.
     private static let codexFeatureBegin = "# gaiterm-codex-hooks-feature begin"
     private static let codexFeatureEnd = "# gaiterm-codex-hooks-feature end"
     private static let codexTrustBegin = "# gaiterm-codex-hook-trust begin"
     private static let codexTrustEnd = "# gaiterm-codex-hook-trust end"
+    private static let codexTypedTrustBegin = "# gaiterm-codex-agent-event-trust-v1 begin"
+    private static let codexTypedTrustEnd = "# gaiterm-codex-agent-event-trust-v1 end"
 
-    private static let codexStopCommand =
-        "/bin/sh -c ': \(codexHookMarker); cat >/dev/null 2>&1 || true; " +
-        "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
-        "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-        "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
-        "url=\"$scheme://notify?surface=$surface&title=Codex&body=Turn%20complete\"; " +
-        "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
-        ">/dev/null 2>&1 || true; fi; printf \"{}\\n\"'"
+    private struct HookSpec: Sendable {
+        let eventName: String
+        let eventLabel: String
+        let command: String
 
-    private static let claudeStopCommand =
-        "/bin/sh -c ': \(claudeHookMarker); cat >/dev/null 2>&1 || true; " +
-        "surface=\"${GAITERM_SURFACE_ID:-}\"; if [ -n \"$surface\" ]; then " +
-        "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-        "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
-        "url=\"$scheme://notify?surface=$surface&title=Claude%20Code&body=Turn%20complete\"; " +
-        "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
-        ">/dev/null 2>&1 || true; fi'"
+        init(
+            eventName: String,
+            eventLabel: String? = nil,
+            provider: String,
+            kind: String
+        ) {
+            self.eventName = eventName
+            self.eventLabel = eventLabel ?? eventName
+            self.command = GaiAgentHookInstaller.agentEventCommand(
+                provider: provider,
+                kind: kind)
+        }
 
-    static func installIfNeeded() {
-        DispatchQueue.global(qos: .utility).async {
-            install("Codex") {
-                try installCodexStopHook()
-            }
-            install("Claude") {
-                try installClaudeStopHook()
-            }
+        init(
+            legacyStopProvider provider: String,
+            title: String,
+            marker: String
+        ) {
+            self.eventName = "Stop"
+            self.eventLabel = "stop"
+            self.command = GaiAgentHookInstaller.legacyStopCommand(
+                provider: provider,
+                title: title,
+                marker: marker)
+        }
+    }
+
+    private struct CodexTrustEntry: Sendable {
+        let key: String
+        let trustedHash: String
+    }
+
+    private static let codexHookSpecs = [
+        HookSpec(
+            eventName: "SessionStart",
+            eventLabel: "session_start",
+            provider: "codex",
+            kind: "ready"),
+        HookSpec(
+            eventName: "UserPromptSubmit",
+            eventLabel: "user_prompt_submit",
+            provider: "codex",
+            kind: "started"),
+        HookSpec(
+            eventName: "PermissionRequest",
+            eventLabel: "permission_request",
+            provider: "codex",
+            kind: "awaitingApproval"),
+        HookSpec(
+            eventName: "PostToolUse",
+            eventLabel: "post_tool_use",
+            provider: "codex",
+            kind: "resumed"),
+        HookSpec(
+            eventName: "Stop",
+            eventLabel: "stop",
+            provider: "codex",
+            kind: "stop"),
+        HookSpec(
+            eventName: "SessionEnd",
+            eventLabel: "session_end",
+            provider: "codex",
+            kind: "cancelled"),
+    ]
+    private static let codexLegacyStopSpec = HookSpec(
+        legacyStopProvider: "codex",
+        title: "Codex",
+        marker: codexHookMarker)
+
+    private static let claudeHookSpecs = [
+        HookSpec(eventName: "SessionStart", provider: "claude", kind: "ready"),
+        HookSpec(eventName: "UserPromptSubmit", provider: "claude", kind: "started"),
+        HookSpec(eventName: "PermissionRequest", provider: "claude", kind: "awaitingApproval"),
+        HookSpec(eventName: "PostToolUse", provider: "claude", kind: "resumed"),
+        HookSpec(eventName: "Stop", provider: "claude", kind: "stop"),
+        HookSpec(eventName: "StopFailure", provider: "claude", kind: "failed"),
+        HookSpec(eventName: "SessionEnd", provider: "claude", kind: "cancelled"),
+    ]
+    private static let claudeLegacyStopSpec = HookSpec(
+        legacyStopProvider: "claude",
+        title: "Claude%20Code",
+        marker: claudeHookMarker)
+
+    /// Filtering occurs before both typed and legacy transport decisions so a
+    /// child agent can never change the desktop state of its parent terminal.
+    /// Claude's `--agent` main process legitimately carries `agent_type`, so it
+    /// is identified by `agent_id` or the explicit SubagentStop event instead.
+    private static func rootAgentPayloadGuard(provider: String) -> String {
+        let agentID =
+            "agent_id=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract agent_id raw -o - -- - || true); "
+        if provider == "claude" {
+            return agentID +
+                "hook_event=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+                "/usr/bin/plutil -extract hook_event_name raw -o - -- - || true); " +
+                "if [ -n \"$agent_id\" ] || [ \"$hook_event\" = \"SubagentStop\" ]; " +
+                "then exit 0; fi; "
+        }
+        return agentID +
+            "agent_type=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract agent_type raw -o - -- - || true); " +
+            "if [ -n \"$agent_id\" ] || [ -n \"$agent_type\" ]; then exit 0; fi; "
+    }
+
+    /// This command is deliberately self-contained: hook processes inherit the
+    /// terminal surface environment, consume their complete JSON payload, and
+    /// never write to stdout (some providers inject stdout into model context).
+    /// Only conservative URL-safe correlation identifiers leave the process.
+    private static func agentEventCommand(
+        provider: String,
+        kind: String
+    ) -> String {
+        return
+            "/bin/sh -c ': \(agentEventHookMarker)-\(provider)-\(kind); " +
+            "exec >/dev/null 2>&1; " +
+            "payload=$(/bin/cat || true); " +
+            rootAgentPayloadGuard(provider: provider) +
+            "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
+            "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
+            "case \"$token\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
+            "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract turn_id raw -o - -- - || true); " +
+            "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
+            "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract prompt_id raw -o - -- - || true); " +
+            "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
+            "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract user_prompt_id raw -o - -- - || true); " +
+            "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
+            "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract session_id raw -o - -- - || true); " +
+            "if [ -n \"$turn\" ]; then turn=\"session:$turn\"; fi; fi; fi; fi; " +
+            "case \"$turn\" in *[!A-Za-z0-9._:-]*) turn= ;; esac; " +
+            "event=$(/usr/bin/uuidgen | /usr/bin/tr \"[:upper:]\" \"[:lower:]\"); " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) exit 0 ;; esac; " +
+            "url=\"$scheme://agent-event?v=1&surface=$surface&token=$token" +
+            "&provider=\(provider)&kind=\(kind)&event=\(provider)-\(kind)-$event\"; " +
+            "if [ -n \"$turn\" ]; then url=\"$url&turn=$turn\"; fi; " +
+            "socket=\"${GAITERM_EVENT_SOCKET:-}\"; " +
+            "case \"$socket\" in /*) " +
+            "reply=$(/usr/bin/printf \"%s\\n\" \"$url\" | " +
+            "/usr/bin/nc -U -w 2 \"$socket\" || true); " +
+            "if [ \"$reply\" = \"OK\" ]; then exit 0; fi ;; esac; " +
+            "/usr/bin/open -g -b \"$bundle\" \"$url\" || true; exit 0'"
+    }
+
+    /// Compatibility notification kept as a distinct Stop handler. It cannot
+    /// emit while an authenticated companion token is present, and carries no
+    /// typed-event marker or token in its URL.
+    private static func legacyStopCommand(
+        provider: String,
+        title: String,
+        marker: String
+    ) -> String {
+        "/bin/sh -c ': gaiterm-legacy-stop-\(provider); : \(marker); " +
+            "exec >/dev/null 2>&1; " +
+            "payload=$(/bin/cat || true); " +
+            rootAgentPayloadGuard(provider: provider) +
+            "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
+            "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
+            "if [ -n \"$token\" ]; then exit 0; fi; " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) exit 0 ;; esac; " +
+            "url=\"$scheme://notify?surface=$surface&title=\(title)&body=Turn%20complete\"; " +
+            "/usr/bin/open -g -b \"$bundle\" \"$url\" || true; exit 0'"
+    }
+
+    /// Antigravity uses a named root hook group and camelCase payload fields.
+    /// Its invocation and Stop hooks also have an explicit JSON stdout contract,
+    /// so this adapter cannot share Claude/Codex's silent command wrapper.
+    private static func agyAgentEventCommand(
+        kind: String,
+        stopCanFail: Bool = false,
+        includesLegacyStopFallback: Bool = false
+    ) -> String {
+        let responseJSON = includesLegacyStopFallback
+            ? "{\\\"decision\\\":\\\"\\\"}"
+            : "{}"
+        let kindResolution: String
+        if stopCanFail {
+            kindResolution =
+                "kind=stop; " +
+                "termination=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+                "/usr/bin/plutil -extract terminationReason raw -o - -- - 2>/dev/null || true); " +
+                "hook_error=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+                "/usr/bin/plutil -extract error raw -o - -- - 2>/dev/null || true); " +
+                "fully_idle=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+                "/usr/bin/plutil -extract fullyIdle raw -o - -- - 2>/dev/null || true); " +
+                "if [ \"$fully_idle\" = \"false\" ]; then respond; exit 0; fi; " +
+                "if [ -n \"$hook_error\" ] || [ \"$termination\" = \"error\" ]; " +
+                "then kind=failed; fi; "
+        } else {
+            kindResolution = "kind=\(kind); "
+        }
+
+        let invalidTokenAction: String
+        if includesLegacyStopFallback {
+            invalidTokenAction =
+                "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+                "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+                "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) respond; exit 0 ;; esac; " +
+                "legacy_url=\"$scheme://notify?surface=$surface&title=Agy&body=Turn%20complete\"; " +
+                "/usr/bin/open -g -b \"$bundle\" \"$legacy_url\" >/dev/null 2>&1 || true; " +
+                "respond; exit 0; "
+        } else {
+            invalidTokenAction = "respond; exit 0; "
+        }
+
+        let legacyMarker = includesLegacyStopFallback ? "; : \(agyHookMarker)" : ""
+        return
+            "/bin/sh -c ': \(agentEventHookMarker)-agy-\(kind)\(legacyMarker); " +
+            "respond() { /usr/bin/printf \"%s\\n\" \"\(responseJSON)\"; }; " +
+            "payload=$(/bin/cat || true); " +
+            kindResolution +
+            "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
+            "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) respond; exit 0 ;; esac; " +
+            "case \"$token\" in \"\"|*[!A-Za-z0-9._:-]*) \(invalidTokenAction) ;; esac; " +
+            "conversation=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract conversationId raw -o - -- - 2>/dev/null || true); " +
+            "turn=; if [ -n \"$conversation\" ]; then turn=\"session:$conversation\"; fi; " +
+            "case \"$turn\" in *[!A-Za-z0-9._:-]*) turn= ;; esac; " +
+            "event=$(/usr/bin/uuidgen | /usr/bin/tr \"[:upper:]\" \"[:lower:]\"); " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) respond; exit 0 ;; esac; " +
+            "url=\"$scheme://agent-event?v=1&surface=$surface&token=$token" +
+            "&provider=agy&kind=$kind&event=agy-$kind-$event\"; " +
+            "if [ -n \"$turn\" ]; then url=\"$url&turn=$turn\"; fi; " +
+            "socket=\"${GAITERM_EVENT_SOCKET:-}\"; " +
+            "case \"$socket\" in /*) " +
+            "reply=$(/usr/bin/printf \"%s\\n\" \"$url\" | " +
+            "/usr/bin/nc -U -w 2 \"$socket\" 2>/dev/null || true); " +
+            "if [ \"$reply\" = \"OK\" ]; then respond; exit 0; fi ;; esac; " +
+            "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
+            ">/dev/null 2>&1 || true; respond; exit 0'"
+    }
+
+    /// Provider processes snapshot these files when they launch. Keep this
+    /// bounded file-only work synchronous so no agent PTY can beat its adapter.
+    static func installBeforeLaunchingCompanionSurfaces() {
+        install("Codex") {
+            try installCodexHooks()
+        }
+        install("Claude Code") {
+            try installClaudeHooks()
+        }
+        install("Agy") {
+            try installAgyHooks()
+        }
+        install("OpenCode") {
+            try installOpenCodePlugin()
         }
     }
 
@@ -1967,84 +2388,351 @@ enum GaiAgentHookInstaller {
         }
     }
 
-    private static func installCodexStopHook() throws {
+    private static func installCodexHooks() throws {
         let home = codexHome()
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
 
         let hooksURL = home.appendingPathComponent("hooks.json", isDirectory: false)
         var root = try readJSONObject(at: hooksURL)
-        var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var stopGroups = hooks["Stop"] as? [[String: Any]] ?? []
-        stopGroups = removingHookMarker(codexHookMarker, from: stopGroups)
-        stopGroups.append([
-            "hooks": [[
-                "type": "command",
-                "command": codexStopCommand,
-                "timeout": 5,
-            ]],
-        ])
-        hooks["Stop"] = stopGroups
+        let existingHooks = root["hooks"]
+        guard existingHooks == nil || existingHooks is [String: Any] else {
+            throw HookInstallError.invalidHooksObject(provider: "Codex")
+        }
+        var hooks = existingHooks as? [String: Any] ?? [:]
+        removeManagedHooks(from: &hooks)
+
+        var typedTrustEntries: [CodexTrustEntry] = []
+        for spec in codexHookSpecs {
+            typedTrustEntries.append(try appendCodexHook(spec, to: &hooks, at: hooksURL))
+        }
+        let legacyTrustEntry = try appendCodexHook(
+            codexLegacyStopSpec,
+            to: &hooks,
+            at: hooksURL)
         root["hooks"] = hooks
         try writeJSONObjectIfChanged(root, to: hooksURL)
 
-        let hookIndex = max(stopGroups.count - 1, 0)
-        let trustKey = "\(normalizedHookSourcePath(hooksURL.path)):stop:\(hookIndex):0"
-        let trustedHash = codexCommandHookHash(
-            eventLabel: "stop",
-            matcher: nil,
-            command: codexStopCommand,
-            timeout: 5,
-            statusMessage: nil)
         try installCodexTrust(
             in: home.appendingPathComponent("config.toml", isDirectory: false),
-            key: trustKey,
-            trustedHash: trustedHash)
+            typedEntries: typedTrustEntries,
+            legacyEntries: [legacyTrustEntry])
     }
 
-    private static func installClaudeStopHook() throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude", isDirectory: true)
+    /// Retained for migration tests and older compatibility maintenance.
+    private static func installCodexLegacyStopHook() throws {
+        let home = codexHome()
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
 
-        let settingsURL = home.appendingPathComponent("settings.local.json", isDirectory: false)
-        var root = try readJSONObject(at: settingsURL)
-        var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var stopGroups = hooks["Stop"] as? [[String: Any]] ?? []
-        stopGroups = removingHookMarker(claudeHookMarker, from: stopGroups)
-        stopGroups.append([
-            "matcher": "",
+        let hooksURL = home.appendingPathComponent("hooks.json", isDirectory: false)
+        var root = try readJSONObject(at: hooksURL)
+        let existingHooks = root["hooks"]
+        guard existingHooks == nil || existingHooks is [String: Any] else {
+            throw HookInstallError.invalidHooksObject(provider: "Codex")
+        }
+        var hooks = existingHooks as? [String: Any] ?? [:]
+        var groups = try hookGroups(for: "Stop", in: hooks, provider: "Codex")
+        groups = removingHookMarker(codexHookMarker, from: groups)
+        groups.append([
             "hooks": [[
                 "type": "command",
-                "command": claudeStopCommand,
+                "command": codexLegacyStopSpec.command,
+                "timeout": 5,
             ]],
         ])
-        hooks["Stop"] = stopGroups
+        hooks["Stop"] = groups
         root["hooks"] = hooks
+        try writeJSONObjectIfChanged(root, to: hooksURL)
+
+        let hookIndex = max(groups.count - 1, 0)
+        let key = "\(normalizedHookSourcePath(hooksURL.path)):stop:\(hookIndex):0"
+        let hash = codexCommandHookHash(
+            eventLabel: "stop",
+            matcher: nil,
+            command: codexLegacyStopSpec.command,
+            timeout: 5,
+            statusMessage: nil)
+        try installCodexLegacyTrust(
+            in: home.appendingPathComponent("config.toml", isDirectory: false),
+            entry: CodexTrustEntry(key: key, trustedHash: hash))
+    }
+
+    private static func appendCodexHook(
+        _ spec: HookSpec,
+        to hooks: inout [String: Any],
+        at hooksURL: URL
+    ) throws -> CodexTrustEntry {
+        var groups = try hookGroups(for: spec.eventName, in: hooks, provider: "Codex")
+        groups.append([
+            "hooks": [[
+                "type": "command",
+                "command": spec.command,
+                "timeout": 5,
+            ]],
+        ])
+        hooks[spec.eventName] = groups
+
+        let hookIndex = max(groups.count - 1, 0)
+        let trustKey =
+            "\(normalizedHookSourcePath(hooksURL.path)):\(spec.eventLabel):\(hookIndex):0"
+        let trustedHash = codexCommandHookHash(
+            eventLabel: spec.eventLabel,
+            matcher: nil,
+            command: spec.command,
+            timeout: 5,
+            statusMessage: nil)
+        return CodexTrustEntry(key: trustKey, trustedHash: trustedHash)
+    }
+
+    private static func installClaudeHooks() throws {
+        let home = claudeConfigDirectory()
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        // Claude's user-wide configuration is settings.json. Keep both the
+        // authenticated adapter and the token-gated legacy compatibility
+        // handler in that one supported scope so either build may run without
+        // disabling the other.
+        try installJSONHooks(
+            claudeHookSpecs + [claudeLegacyStopSpec],
+            at: claudeGlobalSettingsURL(in: home),
+            providerName: "Claude Code",
+            includeMatcher: true)
+    }
+
+    private static func installClaudeLegacyStopHook() throws {
+        let home = claudeConfigDirectory()
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let settingsURL = claudeGlobalSettingsURL(in: home)
+        var root = try readJSONObject(at: settingsURL)
+        root = try claudeLegacyHooksConfiguration(from: root)
         try writeJSONObjectIfChanged(root, to: settingsURL)
     }
 
-    private static func codexHome() -> URL {
-        if let override = ProcessInfo.processInfo.environment["CODEX_HOME"],
-           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+    /// Compatibility-only updater retained for older configuration migrations.
+    /// Typed handlers and every user hook remain represented in the JSON model.
+    private static func claudeLegacyHooksConfiguration(
+        from existing: [String: Any]
+    ) throws -> [String: Any] {
+        var root = existing
+        let existingHooks = root["hooks"]
+        guard existingHooks == nil || existingHooks is [String: Any] else {
+            throw HookInstallError.invalidHooksObject(provider: "Claude Code")
         }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        var hooks = existingHooks as? [String: Any] ?? [:]
+        var groups = try hookGroups(for: "Stop", in: hooks, provider: "Claude Code")
+        groups = removingHookMarker(claudeHookMarker, from: groups)
+        groups.append([
+            "matcher": "",
+            "hooks": [[
+                "type": "command",
+                "command": claudeLegacyStopSpec.command,
+            ]],
+        ])
+        hooks["Stop"] = groups
+        root["hooks"] = hooks
+        return root
     }
 
-    private static func readJSONObject(at url: URL) throws -> [String: Any] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
-        let data = try Data(contentsOf: url)
-        guard !data.isEmpty else { return [:] }
-        let object = try JSONSerialization.jsonObject(with: data)
-        guard let dictionary = object as? [String: Any] else { return [:] }
-        return dictionary
+    private static func installAgyHooks() throws {
+        let hooksURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/config/hooks.json", isDirectory: false)
+        let existing = try readJSONObject(at: hooksURL)
+        let updated = try agyHooksConfiguration(from: existing)
+        try writeJSONObjectIfChanged(updated, to: hooksURL)
     }
 
-    private static func writeJSONObjectIfChanged(_ object: [String: Any], to url: URL) throws {
-        var data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-        data.append(0x0A)
-        try writeDataIfChanged(data, to: url)
+    /// Antigravity's root is a dictionary of independently named hook groups,
+    /// not the Claude/Codex `{ "hooks": { event: ... } }` envelope. Migrate any
+    /// older GaiTerm handlers wherever they were written, retain every user
+    /// group/handler, then own one versioned group with the provider's native
+    /// direct-vs-matcher event shapes.
+    private static func agyHooksConfiguration(
+        from existing: [String: Any]
+    ) throws -> [String: Any] {
+        var root = existing
+        removeManagedAgyHooks(from: &root)
+
+        let existingGroup = root[agyHookGroupName]
+        guard existingGroup == nil || existingGroup is [String: Any] else {
+            throw HookInstallError.invalidHooksObject(provider: "Agy GaiTerm group")
+        }
+        var group = existingGroup as? [String: Any] ?? [:]
+        group["enabled"] = true
+
+        var invocationHandlers = try directHookHandlers(
+            for: "PreInvocation",
+            in: group,
+            provider: "Agy")
+        invocationHandlers.append([
+            "type": "command",
+            "command": agyAgentEventCommand(kind: "started"),
+            "timeout": 5,
+        ])
+        group["PreInvocation"] = invocationHandlers
+
+        var toolGroups = try hookGroups(
+            for: "PostToolUse",
+            in: group,
+            provider: "Agy")
+        toolGroups.append([
+            "matcher": "",
+            "hooks": [[
+                "type": "command",
+                "command": agyAgentEventCommand(kind: "resumed"),
+                "timeout": 5,
+            ]],
+        ])
+        group["PostToolUse"] = toolGroups
+
+        var stopHandlers = try directHookHandlers(
+            for: "Stop",
+            in: group,
+            provider: "Agy")
+        stopHandlers.append([
+            "type": "command",
+            "command": agyAgentEventCommand(
+                kind: "stop",
+                stopCanFail: true,
+                includesLegacyStopFallback: true),
+            "timeout": 5,
+        ])
+        group["Stop"] = stopHandlers
+        root[agyHookGroupName] = group
+        return root
+    }
+
+    private static func directHookHandlers(
+        for eventName: String,
+        in group: [String: Any],
+        provider: String
+    ) throws -> [[String: Any]] {
+        guard let value = group[eventName] else { return [] }
+        guard let handlers = value as? [[String: Any]] else {
+            throw HookInstallError.invalidEventHooks(provider: provider, event: eventName)
+        }
+        return handlers
+    }
+
+    /// Remove only commands carrying a GaiTerm marker. This handles both the
+    /// official direct handler arrays and the matcher-group shape emitted by an
+    /// older Debug build without normalizing unrelated user JSON.
+    private static func removeManagedAgyHooks(from root: inout [String: Any]) {
+        for groupName in Array(root.keys) {
+            guard var group = root[groupName] as? [String: Any] else { continue }
+            for eventName in Array(group.keys) {
+                guard let entries = group[eventName] as? [[String: Any]] else { continue }
+                let retained = entries.compactMap { entry -> [String: Any]? in
+                    if let command = entry["command"] as? String,
+                       isManagedHookCommand(command) {
+                        return nil
+                    }
+
+                    var updated = entry
+                    guard var handlers = updated["hooks"] as? [[String: Any]] else {
+                        return updated
+                    }
+                    handlers.removeAll { handler in
+                        guard let command = handler["command"] as? String else { return false }
+                        return isManagedHookCommand(command)
+                    }
+                    guard !handlers.isEmpty else { return nil }
+                    updated["hooks"] = handlers
+                    return updated
+                }
+
+                if retained.isEmpty {
+                    group.removeValue(forKey: eventName)
+                } else {
+                    group[eventName] = retained
+                }
+            }
+
+            if group.isEmpty {
+                root.removeValue(forKey: groupName)
+            } else {
+                root[groupName] = group
+            }
+        }
+    }
+
+    private static func installJSONHooks(
+        _ specs: [HookSpec],
+        at url: URL,
+        providerName: String,
+        includeMatcher: Bool
+    ) throws {
+        let existing = try readJSONObject(at: url)
+        let updated = try jsonHooksConfiguration(
+            specs,
+            from: existing,
+            providerName: providerName,
+            includeMatcher: includeMatcher)
+        try writeJSONObjectIfChanged(updated, to: url)
+    }
+
+    private static func jsonHooksConfiguration(
+        _ specs: [HookSpec],
+        from existing: [String: Any],
+        providerName: String,
+        includeMatcher: Bool
+    ) throws -> [String: Any] {
+        var root = existing
+        let existingHooks = root["hooks"]
+        guard existingHooks == nil || existingHooks is [String: Any] else {
+            throw HookInstallError.invalidHooksObject(provider: providerName)
+        }
+        var hooks = existingHooks as? [String: Any] ?? [:]
+        removeManagedHooks(from: &hooks)
+
+        for spec in specs {
+            var groups = try hookGroups(for: spec.eventName, in: hooks, provider: providerName)
+            var group: [String: Any] = [
+                "hooks": [[
+                    "type": "command",
+                    "command": spec.command,
+                ]],
+            ]
+            if includeMatcher { group["matcher"] = "" }
+            groups.append(group)
+            hooks[spec.eventName] = groups
+        }
+
+        root["hooks"] = hooks
+        return root
+    }
+
+    private static func hookGroups(
+        for eventName: String,
+        in hooks: [String: Any],
+        provider: String
+    ) throws -> [[String: Any]] {
+        guard let value = hooks[eventName] else { return [] }
+        guard let groups = value as? [[String: Any]] else {
+            throw HookInstallError.invalidEventHooks(provider: provider, event: eventName)
+        }
+        return groups
+    }
+
+    private static func removeManagedHooks(from hooks: inout [String: Any]) {
+        for (eventName, value) in hooks {
+            guard let groups = value as? [[String: Any]] else { continue }
+            hooks[eventName] = removingManagedHooks(from: groups)
+        }
+    }
+
+    private static func removingManagedHooks(
+        from groups: [[String: Any]]
+    ) -> [[String: Any]] {
+        groups.compactMap { group in
+            var updated = group
+            guard var hookList = updated["hooks"] as? [[String: Any]] else { return updated }
+            hookList.removeAll { hook in
+                guard let command = hook["command"] as? String else { return false }
+                return isManagedHookCommand(command)
+            }
+            guard !hookList.isEmpty else { return nil }
+            updated["hooks"] = hookList
+            return updated
+        }
     }
 
     private static func removingHookMarker(
@@ -2063,7 +2751,369 @@ enum GaiAgentHookInstaller {
         }
     }
 
-    private static func installCodexTrust(in url: URL, key: String, trustedHash: String) throws {
+    private static func isManagedHookCommand(_ command: String) -> Bool {
+        command.contains(agentEventHookMarker)
+            || command.contains(codexHookMarker)
+            || command.contains(claudeHookMarker)
+            || command.contains(agyHookMarker)
+    }
+
+    private static func installOpenCodePlugin() throws {
+        let pluginURL = openCodeConfigDirectory()
+            .appendingPathComponent("plugins", isDirectory: true)
+            .appendingPathComponent("gaiterm-agent-events.js", isDirectory: false)
+        try writeDataIfChanged(Data(openCodePluginSource.utf8), to: pluginURL)
+    }
+
+    /// OpenCode exposes lifecycle state directly rather than through command
+    /// hooks. One terminal represents one employee, so aggregate every root
+    /// session in that process into a single work cycle. Child sessions never
+    /// affect desktop state, and the employee completes only when the final
+    /// active root session becomes idle.
+    // Keep JavaScript escape sequences literal. A normal Swift multiline string
+    // would turn `\n` and `\r\n` into real line breaks inside JavaScript string
+    // literals, producing a plugin which OpenCode cannot parse.
+    private static let openCodePluginSource = #"""
+    // Installed by GaiTerm. Marker: gaiterm-agent-event-v1-opencode
+    export const GaiTermAgentEventsPlugin = async () => {
+      const surface = process.env.GAITERM_SURFACE_ID ?? "";
+      const token = process.env.GAITERM_EVENT_TOKEN ?? "";
+      const socket = process.env.GAITERM_EVENT_SOCKET ?? "";
+      const scheme = process.env.GAITERM_NOTIFY_URL_SCHEME ?? "gaiterm";
+      const bundle = process.env.GAITERM_NOTIFY_BUNDLE_ID ?? "com.sipiyou.gaiterm";
+      const safe = /^[A-Za-z0-9._:-]{1,256}$/;
+      const routeSafe = /^[A-Za-z0-9._:+-]{1,256}$/;
+      if (!safe.test(surface)
+        || !safe.test(token)
+        || !routeSafe.test(scheme)
+        || !routeSafe.test(bundle)) return {};
+
+      const active = new Set();
+      const children = new Set();
+      const pendingErrors = new Set();
+      let cycleTurn = "";
+      let cycleFailed = false;
+      let deliveryQueue = Promise.resolve();
+
+      const sessionID = (event) =>
+        event?.properties?.sessionID ?? event?.properties?.info?.id ?? "";
+      const tracked = (id) => safe.test(id) && !children.has(id);
+
+      const send = (kind, turn) => {
+        deliveryQueue = deliveryQueue.then(async () => {
+          try {
+            const query = new URLSearchParams({
+              v: "1",
+              surface,
+              token,
+              provider: "opencode",
+              kind,
+              event: `opencode-${kind}-${crypto.randomUUID()}`,
+            });
+            if (safe.test(turn)) query.set("turn", `session:${turn}`);
+            const url = `${scheme}://agent-event?${query}`;
+            if (socket.startsWith("/") && socket.length <= 1024) {
+              try {
+                const socketChild = Bun.spawn(
+                  ["/usr/bin/nc", "-U", "-w", "2", socket],
+                  { stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+                );
+                socketChild.stdin.write(`${url}\n`);
+                socketChild.stdin.end();
+                const [reply, exitCode] = await Promise.all([
+                  new Response(socketChild.stdout).text(),
+                  socketChild.exited,
+                ]);
+                const acknowledgement = reply.endsWith("\r\n")
+                  ? reply.slice(0, -2)
+                  : reply.endsWith("\n") ? reply.slice(0, -1) : reply;
+                if (exitCode === 0 && acknowledgement === "OK") return;
+              } catch {}
+            }
+            const openChild = Bun.spawn(
+              [
+                "/usr/bin/open",
+                "-g",
+                "-b",
+                bundle,
+                url,
+              ],
+              { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+            );
+            await openChild.exited;
+          } catch {}
+        });
+        return deliveryQueue;
+      };
+
+      const begin = async (id) => {
+        if (!tracked(id)) return;
+        pendingErrors.delete(id);
+        const startsCycle = active.size === 0;
+        active.add(id);
+        if (!startsCycle) return;
+        cycleTurn = id;
+        cycleFailed = false;
+        await send("started", cycleTurn);
+      };
+
+      const finish = async (id, outcome = "stop") => {
+        if (!active.delete(id)) {
+          pendingErrors.delete(id);
+          return;
+        }
+        if (pendingErrors.delete(id) || outcome === "failed") cycleFailed = true;
+        if (active.size > 0) return;
+
+        const turn = cycleTurn || id;
+        const kind = cycleFailed ? "failed" : outcome;
+        cycleTurn = "";
+        cycleFailed = false;
+        pendingErrors.clear();
+        await send(kind, turn);
+      };
+
+      // Loading the plugin itself is the adapter handshake. It also settles
+      // the shell Enter which launched OpenCode before a session exists.
+      await send("ready", "");
+
+      return {
+        "chat.message": async ({ sessionID: id }) => {
+          try {
+            await begin(id);
+          } catch {}
+        },
+        event: async ({ event }) => {
+          try {
+            const type = event?.type ?? "";
+            const id = sessionID(event);
+
+            if (type === "session.created" || type === "session.updated") {
+              if (event?.properties?.info?.parentID) {
+                children.add(id);
+                pendingErrors.delete(id);
+                await finish(id, "cancelled");
+              } else {
+                children.delete(id);
+                if (type === "session.created") await send("ready", id);
+              }
+              return;
+            }
+            if (type === "session.deleted") {
+              pendingErrors.delete(id);
+              await finish(id, "cancelled");
+              children.delete(id);
+              return;
+            }
+
+            if (type === "session.status") {
+              const status = event?.properties?.status?.type ?? "";
+              if (!tracked(id)) return;
+              if (status === "busy") await begin(id);
+              if (status === "idle") await finish(id);
+              return;
+            }
+            if (type === "session.idle") {
+              if (tracked(id)) await finish(id);
+              return;
+            }
+            if (type === "session.error") {
+              if (!tracked(id) || !active.has(id)) return;
+              const errorName = event?.properties?.error?.name
+                ?? event?.properties?.error?.data?.name
+                ?? "";
+              if (errorName === "MessageAbortedError") {
+                pendingErrors.delete(id);
+                await finish(id, "cancelled");
+              } else {
+                // OpenCode may recover and become busy again after an error
+                // (for example after compaction). Commit failure only if the
+                // authoritative idle boundary arrives without new busy work.
+                pendingErrors.add(id);
+              }
+              return;
+            }
+            if (!tracked(id) || !active.has(id)) return;
+            if (type === "permission.asked") {
+              await send("awaitingApproval", cycleTurn || id);
+              return;
+            }
+            if (type === "question.asked") {
+              await send("awaitingInput", cycleTurn || id);
+              return;
+            }
+            if (type === "permission.replied"
+              || type === "question.replied"
+              || type === "question.rejected") {
+              await send("resumed", cycleTurn || id);
+            }
+          } catch {}
+        },
+      };
+    };
+    """#
+
+    #if DEBUG
+    static func codexTrustContentForTesting(_ existing: String) -> String {
+        codexTrustContent(
+            existing: existing,
+            typedEntries: [CodexTrustEntry(
+                key: "/tmp/hooks.json:stop:0:0",
+                trustedHash: "sha256:typed")],
+            legacyEntries: [CodexTrustEntry(
+                key: "/tmp/hooks.json:stop:1:0",
+                trustedHash: "sha256:legacy")])
+    }
+
+    static func claudeHooksConfigurationForTesting(
+        _ existing: [String: Any]
+    ) throws -> [String: Any] {
+        try jsonHooksConfiguration(
+            claudeHookSpecs + [claudeLegacyStopSpec],
+            from: existing,
+            providerName: "Claude Code",
+            includeMatcher: true)
+    }
+
+    static func claudeLegacyHooksConfigurationForTesting(
+        _ existing: [String: Any]
+    ) throws -> [String: Any] {
+        try claudeLegacyHooksConfiguration(from: existing)
+    }
+
+    static var claudeGlobalSettingsFilenameForTesting: String {
+        claudeGlobalSettingsURL(in: claudeConfigDirectory()).lastPathComponent
+    }
+
+    static func agyHooksConfigurationForTesting(
+        _ existing: [String: Any]
+    ) throws -> [String: Any] {
+        try agyHooksConfiguration(from: existing)
+    }
+
+    static var openCodePluginSourceForTesting: String {
+        openCodePluginSource
+    }
+    #endif
+
+    private enum HookInstallError: LocalizedError {
+        case invalidRootObject(path: String)
+        case invalidHooksObject(provider: String)
+        case invalidEventHooks(provider: String, event: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRootObject(let path):
+                "The JSON root at \(path) is not an object; leaving it untouched."
+            case .invalidHooksObject(let provider):
+                "\(provider) has a non-object hooks value; leaving it untouched."
+            case .invalidEventHooks(let provider, let event):
+                "\(provider) has an unsupported \(event) hook shape; leaving it untouched."
+            }
+        }
+    }
+
+    private static func codexHome() -> URL {
+        environmentDirectory(named: "CODEX_HOME")
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+    }
+
+    private static func claudeConfigDirectory() -> URL {
+        environmentDirectory(named: "CLAUDE_CONFIG_DIR")
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude", isDirectory: true)
+    }
+
+    private static func claudeGlobalSettingsURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("settings.json", isDirectory: false)
+    }
+
+    private static func openCodeConfigDirectory() -> URL {
+        let configHome = environmentDirectory(named: "XDG_CONFIG_HOME")
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".config", isDirectory: true)
+        return configHome.appendingPathComponent("opencode", isDirectory: true)
+    }
+
+    /// GUI apps do not source shell startup files. Honor only values actually
+    /// inherited by this process; guessing a user's shell configuration would
+    /// make installation non-deterministic and could target the wrong profile.
+    private static func environmentDirectory(named name: String) -> URL? {
+        guard let rawValue = ProcessInfo.processInfo.environment[name] else { return nil }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        return URL(
+            fileURLWithPath: (value as NSString).expandingTildeInPath,
+            isDirectory: true)
+    }
+
+    private static func readJSONObject(at url: URL) throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty else { return [:] }
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dictionary = object as? [String: Any] else {
+            throw HookInstallError.invalidRootObject(path: url.path)
+        }
+        return dictionary
+    }
+
+    private static func writeJSONObjectIfChanged(_ object: [String: Any], to url: URL) throws {
+        var data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        data.append(0x0A)
+        try writeDataIfChanged(data, to: url)
+    }
+
+    private static func installCodexTrust(
+        in url: URL,
+        typedEntries: [CodexTrustEntry],
+        legacyEntries: [CodexTrustEntry]
+    ) throws {
+        let existing: String
+        if FileManager.default.fileExists(atPath: url.path) {
+            existing = try String(contentsOf: url, encoding: .utf8)
+        } else {
+            existing = ""
+        }
+
+        let content = codexTrustContent(
+            existing: existing,
+            typedEntries: typedEntries,
+            legacyEntries: legacyEntries)
+        try writeDataIfChanged(Data(content.utf8), to: url)
+    }
+
+    private static func codexTrustContent(
+        existing: String,
+        typedEntries: [CodexTrustEntry],
+        legacyEntries: [CodexTrustEntry]
+    ) -> String {
+        var lines = tomlLines(existing)
+        removeMarkedBlock(begin: codexTypedTrustBegin, end: codexTypedTrustEnd, from: &lines)
+        removeMarkedBlock(begin: codexTrustBegin, end: codexTrustEnd, from: &lines)
+        for entry in typedEntries + legacyEntries {
+            removeCodexTrustTable(
+                forEscapedKey: tomlBasicStringContent(entry.key),
+                from: &lines)
+        }
+        appendCodexTrustBlock(
+            begin: codexTypedTrustBegin,
+            end: codexTypedTrustEnd,
+            entries: typedEntries,
+            to: &lines)
+        appendCodexTrustBlock(
+            begin: codexTrustBegin,
+            end: codexTrustEnd,
+            entries: legacyEntries,
+            to: &lines)
+        return tomlContent(lines)
+    }
+
+    private static func installCodexLegacyTrust(
+        in url: URL,
+        entry: CodexTrustEntry
+    ) throws {
         let existing: String
         if FileManager.default.fileExists(atPath: url.path) {
             existing = try String(contentsOf: url, encoding: .utf8)
@@ -2072,61 +3122,63 @@ enum GaiAgentHookInstaller {
         }
 
         var lines = tomlLines(existing)
-        removeMarkedBlock(begin: codexFeatureBegin, end: codexFeatureEnd, from: &lines)
         removeMarkedBlock(begin: codexTrustBegin, end: codexTrustEnd, from: &lines)
-        removeCodexTrustTable(forEscapedKey: tomlBasicStringContent(key), from: &lines)
-        installCodexHooksFeature(in: &lines)
-
-        if !lines.isEmpty, lines.last?.isEmpty == false {
-            lines.append("")
-        }
-        lines.append(codexTrustBegin)
-        lines.append("[hooks.state.\"\(tomlBasicStringContent(key))\"]")
-        lines.append("trusted_hash = \"\(tomlBasicStringContent(trustedHash))\"")
-        lines.append(codexTrustEnd)
+        removeCodexTrustTable(
+            forEscapedKey: tomlBasicStringContent(entry.key),
+            from: &lines)
+        appendCodexTrustBlock(
+            begin: codexTrustBegin,
+            end: codexTrustEnd,
+            entries: [entry],
+            to: &lines)
 
         let content = tomlContent(lines)
         try writeDataIfChanged(Data(content.utf8), to: url)
     }
 
-    private static func installCodexHooksFeature(in lines: inout [String]) {
-        let block = [codexFeatureBegin, "hooks = true", codexFeatureEnd]
-        let dottedBlock = [codexFeatureBegin, "features.hooks = true", codexFeatureEnd]
-
-        if let featuresStart = lines.firstIndex(where: { tomlLineIsTable("features", line: $0) }) {
-            let featuresEnd = tomlTableEndIndex(in: lines, after: featuresStart)
-            if let hooksIndex = (featuresStart + 1..<featuresEnd)
-                .first(where: { tomlLineDefinesKey("hooks", line: lines[$0]) }) {
-                if !tomlLineDefinesTrueKey("hooks", line: lines[hooksIndex]) {
-                    lines.replaceSubrange(hooksIndex...hooksIndex, with: block)
-                }
-            } else {
-                lines.insert(contentsOf: block, at: featuresStart + 1)
-            }
-            return
-        }
-
-        if let dottedIndex = lines.firstIndex(where: { tomlLineDefinesKey("features.hooks", line: $0) }) {
-            if !tomlLineDefinesTrueKey("features.hooks", line: lines[dottedIndex]) {
-                lines.replaceSubrange(dottedIndex...dottedIndex, with: dottedBlock)
-            }
-            return
-        }
-
+    private static func appendCodexTrustBlock(
+        begin: String,
+        end: String,
+        entries: [CodexTrustEntry],
+        to lines: inout [String]
+    ) {
+        guard !entries.isEmpty else { return }
         if !lines.isEmpty, lines.last?.isEmpty == false {
             lines.append("")
         }
-        lines.append("[features]")
-        lines.append(contentsOf: block)
+        lines.append(begin)
+        for entry in entries {
+            lines.append("[hooks.state.\"\(tomlBasicStringContent(entry.key))\"]")
+            lines.append("trusted_hash = \"\(tomlBasicStringContent(entry.trustedHash))\"")
+        }
+        lines.append(end)
     }
 
     private static func removeMarkedBlock(begin: String, end: String, from lines: inout [String]) {
         while let start = lines.firstIndex(of: begin) {
             guard let stop = lines[start...].firstIndex(of: end) else {
                 lines.remove(at: start)
+                collapseEmptyLines(at: start, in: &lines)
                 continue
             }
             lines.removeSubrange(start...stop)
+            collapseEmptyLines(at: start, in: &lines)
+        }
+    }
+
+    /// Removing a managed block must not leave one additional blank line on
+    /// every launch. Limit cleanup to the block boundary so user formatting
+    /// elsewhere in the TOML remains untouched.
+    private static func collapseEmptyLines(at boundary: Int, in lines: inout [String]) {
+        guard lines.count > 1 else { return }
+        var index = min(max(boundary, 1), lines.count - 1)
+        while index < lines.count,
+              lines[index].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.remove(at: index)
+            guard lines.count > 1 else { break }
+            if index >= lines.count { index = lines.count - 1 }
+            guard index > 0 else { break }
         }
     }
 
@@ -2176,14 +3228,6 @@ enum GaiAgentHookInstaller {
         let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
         guard let rawKey = parts.first else { return false }
         return rawKey.trimmingCharacters(in: .whitespacesAndNewlines) == key
-    }
-
-    private static func tomlLineDefinesTrueKey(_ key: String, line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2,
-              parts[0].trimmingCharacters(in: .whitespacesAndNewlines) == key else { return false }
-        return parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"
     }
 
     private static func codexCommandHookHash(

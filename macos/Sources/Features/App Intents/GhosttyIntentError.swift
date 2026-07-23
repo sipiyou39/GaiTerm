@@ -5,9 +5,9 @@ enum GhosttyIntentError: Error, CustomLocalizedStringResourceConvertible {
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case .appUnavailable: "The GaiTerm app isn't properly initialized."
+        case .appUnavailable: "DouDou Company isn't properly initialized."
         case .surfaceNotFound: "The terminal no longer exists."
-        case .permissionDenied: "GaiTerm doesn't allow Shortcuts."
+        case .permissionDenied: "DouDou Company doesn't allow Shortcuts."
         }
     }
 }

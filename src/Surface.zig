@@ -3326,6 +3326,22 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     try self.queueRender();
 }
 
+/// Request high-frequency rendering without changing terminal input focus.
+///
+/// This is intended for a visible surface whose output must remain fluid even
+/// while another window owns keyboard focus. Visibility remains authoritative:
+/// an occluded surface never renders regardless of this setting.
+pub fn highRefreshCallback(self: *Surface, enabled: bool) !void {
+    // Crash metadata in case we crash in here
+    crash.sentry.thread_state = self.crashThreadState();
+    defer crash.sentry.thread_state = null;
+
+    _ = self.renderer_thread.mailbox.push(.{
+        .high_refresh = enabled,
+    }, .{ .forever = {} });
+    try self.queueRender();
+}
+
 pub fn focusCallback(self: *Surface, focused: bool) !void {
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();

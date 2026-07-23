@@ -115,6 +115,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// True if the window is focused
         focused: bool,
 
+        /// True if the renderer's host explicitly requests interactive
+        /// display cadence independently from terminal input focus.
+        high_refresh: bool,
+
+        /// True if the renderer's view is currently visible.
+        visible: bool,
+
         /// Flag to indicate that our focus state changed for custom
         /// shaders to update their state.
         custom_shader_focused_changed: bool = false,
@@ -709,6 +716,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .grid_metrics = font_critical.metrics,
                 .size = options.size,
                 .focused = true,
+                .high_refresh = false,
+                .visible = true,
                 .scrollbar = .zero,
                 .scrollbar_dirty = false,
                 .last_bottom_node = null,
@@ -1039,29 +1048,33 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Flag that we need to update our custom shaders
             self.custom_shader_focused_changed = true;
 
-            // If we're not focused, then we want to stop the display link
-            // because it is a waste of resources and we can move to pure
-            // change-driven updates.
-            if (comptime DisplayLink != void) link: {
-                const display_link = self.display_link orelse break :link;
-                if (focus) {
-                    display_link.start() catch {};
-                } else {
-                    display_link.stop() catch {};
-                }
-            }
+            self.syncDisplayLink();
         }
 
         /// Callback when the window is visible or occluded.
         ///
         /// Must be called on the render thread.
         pub fn setVisible(self: *Self, visible: bool) void {
-            // If we're not visible, then we want to stop the display link
-            // because it is a waste of resources and we can move to pure
-            // change-driven updates.
+            self.visible = visible;
+            self.syncDisplayLink();
+        }
+
+        /// Request interactive display cadence independently from terminal
+        /// input focus.
+        ///
+        /// Must be called on the render thread.
+        pub fn setHighRefresh(self: *Self, enabled: bool) void {
+            assert(self.high_refresh != enabled);
+            self.high_refresh = enabled;
+            self.syncDisplayLink();
+        }
+
+        /// Keep vsync active only while the surface can actually present and
+        /// either focus or the host requests interactive cadence.
+        fn syncDisplayLink(self: *Self) void {
             if (comptime DisplayLink != void) link: {
                 const display_link = self.display_link orelse break :link;
-                if (visible and self.focused) {
+                if (self.visible and (self.focused or self.high_refresh)) {
                     display_link.start() catch {};
                 } else {
                     display_link.stop() catch {};

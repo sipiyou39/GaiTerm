@@ -8,7 +8,7 @@ import GhosttyKit
 @available(macOS 15.0, *)
 struct NewTerminalIntent: AppIntent {
     static var title: LocalizedStringResource = "New Terminal"
-    static var description = IntentDescription("Create a new GaiTerm terminal.")
+    static var description = IntentDescription("Create a new DouDou Company terminal.")
 
     @Parameter(
         title: "Location",

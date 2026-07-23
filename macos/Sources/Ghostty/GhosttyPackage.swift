@@ -357,6 +357,17 @@ extension Notification.Name {
     static let GaiTerminalNotificationBodyKey =
         "com.sipiyou.gaiterm.terminalNotification.body"
 
+    /// Shell integration reported that the foreground command exited. Unlike
+    /// `notify-on-command-finish`, this internal signal is never gated by the
+    /// user's notification preferences; companion lifecycle fallback needs the
+    /// semantic command boundary even when banners and bells are disabled.
+    static let gaiSurfaceCommandDidFinish =
+        Notification.Name("com.sipiyou.gaiterm.surfaceCommandDidFinish")
+    static let GaiSurfaceCommandExitCodeKey =
+        "com.sipiyou.gaiterm.surfaceCommandDidFinish.exitCode"
+    static let GaiSurfaceCommandDurationNanosecondsKey =
+        "com.sipiyou.gaiterm.surfaceCommandDidFinish.durationNanoseconds"
+
     /// The active selection changed
     static let ghosttySelectionDidChange = Notification.Name("com.sipiyou.gaiterm.ghosttySelectionDidChange")
 

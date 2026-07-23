@@ -137,7 +137,9 @@ struct WorkspaceDrawerView: View {
             // swallow clicks in that extra transparent area — only the glass
             // slab is interactive.
             Color.clear.allowsHitTesting(false)
-            slab.offset(x: slide)
+            if panelIsOut {
+                slab.offset(x: slide)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .onReceive(ui.$isExpanded.removeDuplicates().dropFirst()) { expanded in

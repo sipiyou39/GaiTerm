@@ -925,6 +925,13 @@ pub const Surface = struct {
         };
     }
 
+    pub fn highRefreshCallback(self: *Surface, enabled: bool) void {
+        self.core_surface.highRefreshCallback(enabled) catch |err| {
+            log.err("error in high refresh callback err={}", .{err});
+            return;
+        };
+    }
+
     fn queueInspectorRender(self: *Surface) void {
         _ = self.app.performAction(
             .{ .surface = &self.core_surface },
@@ -1795,6 +1802,12 @@ pub const CAPI = struct {
     /// Update the occlusion state of a surface.
     export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
         surface.occlusionCallback(visible);
+    }
+
+    /// Request display-synchronised high-frequency rendering independently
+    /// from terminal input focus. Invisible surfaces remain suspended.
+    export fn ghostty_surface_set_high_refresh(surface: *Surface, enabled: bool) void {
+        surface.highRefreshCallback(enabled);
     }
 
     /// Filter the mods if necessary. This handles settings such as
