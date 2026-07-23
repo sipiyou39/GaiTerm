@@ -38,18 +38,22 @@ private final class GaiCompanionDragClickHostingView<Content: View>: NSHostingVi
         let startPointer = NSEvent.mouseLocation
         let startOrigin = window.frame.origin
         var exceededDragThreshold = false
-        let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) {
-            [weak self] nextEvent in
-            let pointer = NSEvent.mouseLocation
-            if !exceededDragThreshold,
-               hypot(pointer.x - startPointer.x, pointer.y - startPointer.y) >= 6 {
-                exceededDragThreshold = true
-                self?.onDragBegan?()
-            }
-            return nextEvent
+        let notificationCenter = NotificationCenter.default
+        let movementObserver = notificationCenter.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window,
+            queue: .main
+        ) { [weak self, weak window] _ in
+            guard !exceededDragThreshold,
+                  let origin = window?.frame.origin,
+                  hypot(origin.x - startOrigin.x, origin.y - startOrigin.y) >= 6
+            else { return }
+
+            exceededDragThreshold = true
+            self?.onDragBegan?()
         }
         defer {
-            if let monitor { NSEvent.removeMonitor(monitor) }
+            notificationCenter.removeObserver(movementObserver)
         }
 
         window.performDrag(with: event)

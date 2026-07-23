@@ -34,6 +34,18 @@ private enum GaiUpdateReleaseNotes {
 
     static let sections: [GaiReleaseNoteSection] = [
         .init(
+            id: "agent-drag-and-shortcut",
+            introducedVersion: "2.0.1",
+            icon: "hand.draw.fill",
+            title: "Des déplacements sans surprise",
+            summary: "Le terminal s'efface pendant le geste et reste fermé ensuite.",
+            points: [
+                "Dès qu'un agent commence réellement à bouger, son terminal se ferme en douceur.",
+                "Relâcher l'agent ne rouvre rien : un nouveau clic sur le doudou est nécessaire.",
+                "Presse puis relâche Shift + Option (⇧⌥) pour masquer ou afficher tous les agents, depuis n'importe quelle application.",
+            ],
+            color: Color(red: 0.57, green: 0.38, blue: 0.90)),
+        .init(
             id: "doudou-company",
             introducedVersion: "2.0.0",
             icon: "building.2.fill",
@@ -55,7 +67,7 @@ private enum GaiUpdateReleaseNotes {
                 "Clique sur un agent pour ouvrir ou refermer son terminal, deja pret a recevoir ta saisie.",
                 "Deplace un agent librement : son terminal se ferme en douceur pendant le geste et se replace proprement.",
                 "Un agent s'anime pendant son travail, puis saute et devient vert lorsque sa reponse est terminee.",
-                "Le raccourci Controle + Option + Commande + D masque ou affiche toute l'equipe.",
+                "Le raccourci Shift + Option masque ou affiche toute l'equipe.",
             ],
             color: Color(red: 0.45, green: 0.78, blue: 0.67)),
         .init(
@@ -183,12 +195,12 @@ private enum GaiUpdateReleaseNotes {
             }
         }
 
-        // A fresh install should introduce the current product, not replay
-        // release notes for workspaces and panes that no longer exist.
-        guard let newestVersion = available.map(\.introducedVersion).max(by: {
-            versionCompare($0, $1) < 0
-        }) else { return [] }
-        return available.filter { $0.introducedVersion == newestVersion }
+        // A fresh install should introduce every section from the current
+        // product generation without replaying obsolete 1.x workspace notes.
+        let currentMajor = versionParts(currentVersion).first ?? 0
+        return available.filter {
+            versionParts($0.introducedVersion).first == currentMajor
+        }
     }
 
     private static func versionCompare(_ lhs: String, _ rhs: String) -> Int {

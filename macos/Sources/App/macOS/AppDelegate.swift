@@ -4,7 +4,6 @@ import UserNotifications
 import OSLog
 import Sparkle
 import GhosttyKit
-import Carbon
 
 private extension NSWindow.Level {
     static let gaiCriticalDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 30)
@@ -103,10 +102,11 @@ class AppDelegate: NSObject,
     /// coexist safely with the installed release.
     lazy var gaiWorkspaceManager = GaiCompanionManager(ghostty: ghostty)
     private var gaiAgentEventSocketServer: GaiCompanionEventSocketServer?
-    private var gaiAgentHotKey: EventHotKeyRef?
-    private var gaiAgentHotKeyHandler: EventHandlerRef?
-    private static let gaiAgentHotKeySignature: OSType = 0x4444434F // "DDCO"
-    private static let gaiAgentHotKeyIdentifier: UInt32 = 1
+    private lazy var gaiAgentVisibilityShortcutMonitor =
+        GaiAgentVisibilityShortcutMonitor { [weak self] in
+            guard let self else { return }
+            toggleVisibility(self)
+        }
     var gaiAgentEventSocketPath: String? {
         gaiAgentEventSocketServer?.socketPath
     }
@@ -302,7 +302,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
-        registerGaiAgentHotKey()
+        gaiAgentVisibilityShortcutMonitor.start()
 
         // Setup signal handlers
         setupSignals()
@@ -406,7 +406,7 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        unregisterGaiAgentHotKey()
+        gaiAgentVisibilityShortcutMonitor.stop()
         gaiAgentEventSocketServer?.stop()
         gaiAgentEventSocketServer = nil
         // We have no notifications we want to persist after death,
@@ -541,90 +541,6 @@ class AppDelegate: NSObject,
             title: value("title", maxLength: 80),
             body: value("body", maxLength: 240))
         return true
-    }
-
-    /// Registers a real system-wide shortcut. Unlike an AppKit key equivalent,
-    /// this keeps working while DouDou Company is in the background.
-    private func registerGaiAgentHotKey() {
-        guard gaiAgentHotKey == nil, gaiAgentHotKeyHandler == nil else { return }
-
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed))
-        let handlerStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, userData -> OSStatus in
-                guard let event, let userData else {
-                    return OSStatus(eventNotHandledErr)
-                }
-
-                var hotKeyID = EventHotKeyID()
-                let parameterStatus = GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID)
-                guard parameterStatus == noErr,
-                      hotKeyID.signature == AppDelegate.gaiAgentHotKeySignature,
-                      hotKeyID.id == AppDelegate.gaiAgentHotKeyIdentifier
-                else {
-                    return OSStatus(eventNotHandledErr)
-                }
-
-                let appDelegate = Unmanaged<AppDelegate>
-                    .fromOpaque(userData)
-                    .takeUnretainedValue()
-                DispatchQueue.main.async {
-                    appDelegate.toggleVisibility(appDelegate)
-                }
-                return noErr
-            },
-            1,
-            &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
-            &gaiAgentHotKeyHandler)
-        guard handlerStatus == noErr else {
-            Ghostty.logger.warning(
-                "could not install DouDou Company global hot-key handler: \(handlerStatus)")
-            gaiAgentHotKeyHandler = nil
-            return
-        }
-
-        let hotKeyID = EventHotKeyID(
-            signature: Self.gaiAgentHotKeySignature,
-            id: Self.gaiAgentHotKeyIdentifier)
-        let modifiers = UInt32(cmdKey | optionKey | controlKey)
-        let registrationStatus = RegisterEventHotKey(
-            UInt32(kVK_ANSI_D),
-            modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &gaiAgentHotKey)
-        guard registrationStatus == noErr else {
-            Ghostty.logger.warning(
-                "could not register DouDou Company global hot key: \(registrationStatus)")
-            if let handler = gaiAgentHotKeyHandler {
-                RemoveEventHandler(handler)
-                gaiAgentHotKeyHandler = nil
-            }
-            gaiAgentHotKey = nil
-            return
-        }
-    }
-
-    private func unregisterGaiAgentHotKey() {
-        if let hotKey = gaiAgentHotKey {
-            UnregisterEventHotKey(hotKey)
-            gaiAgentHotKey = nil
-        }
-        if let handler = gaiAgentHotKeyHandler {
-            RemoveEventHandler(handler)
-            gaiAgentHotKeyHandler = nil
-        }
     }
 
     /// Setup signal handlers
@@ -1287,8 +1203,10 @@ extension AppDelegate {
     private func configureGaiAgentVisibilityMenuItem() {
         menuToggleVisibility?.title =
             gaiWorkspaceManager.agentWindowsAreVisible ? "Hide Agents" : "Show Agents"
-        menuToggleVisibility?.keyEquivalent = "d"
-        menuToggleVisibility?.keyEquivalentModifierMask = [.command, .option, .control]
+        // AppKit cannot render a modifier-only key equivalent. The global
+        // Shift + Option gesture is shown in Settings and release notes.
+        menuToggleVisibility?.keyEquivalent = ""
+        menuToggleVisibility?.keyEquivalentModifierMask = []
     }
 
     @MainActor func performGhosttyBindingMenuKeyEquivalent(with event: NSEvent) -> Bool {

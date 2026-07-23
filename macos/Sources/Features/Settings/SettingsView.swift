@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import ServiceManagement
 import SwiftUI
 import UserNotifications
@@ -511,7 +510,6 @@ private struct EditorSettings: View {
 
 private struct PermissionsSettings: View {
     @State private var fullDisk = false
-    @State private var accessibilityTrusted = false
     @State private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
     @State private var notificationAlertSetting: UNNotificationSetting = .notSupported
     @State private var notificationBadgeSetting: UNNotificationSetting = .notSupported
@@ -556,19 +554,21 @@ private struct PermissionsSettings: View {
 
             SettingsSection(title: "Keyboard shortcut") {
                 SettingsRow(
-                    title: "Global double Option",
-                    subtitle: "Required for opening and closing DouDou Company with a fast double Option tap while another app is active.",
+                    title: "Show or hide all agents",
+                    subtitle: "Press and release Shift + Option to toggle every agent, even while another app is active. No permission is required.",
                     first: true) {
-                    PermissionStatusBadge(
-                        title: accessibilityTrusted ? "Granted" : "Not granted",
-                        state: accessibilityTrusted ? .granted : .blocked)
-                }
-                SettingsRow(
-                    title: "Activate keyboard access",
-                    subtitle: "macOS requires Accessibility approval for global keyboard monitoring.") {
-                    actionButton(
-                        accessibilityTrusted ? "Open Accessibility Settings" : "Allow Accessibility",
-                        action: activateAccessibility)
+                    Text("⇧⌥")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule()
+                                .fill(Color.white.opacity(0.09))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)))
+                        .accessibilityLabel("Shift plus Option")
                 }
             }
 
@@ -658,23 +658,6 @@ private struct PermissionsSettings: View {
         }
     }
 
-    private func activateAccessibility() {
-        if !accessibilityTrusted {
-            let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString: true]
-            _ = AXIsProcessTrustedWithOptions(options)
-        }
-        openAccessibilitySettings()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            refreshPermissionStatus()
-        }
-    }
-
-    private func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     private func openFullDiskAccess() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
             NSWorkspace.shared.open(url)
@@ -683,7 +666,6 @@ private struct PermissionsSettings: View {
 
     private func refreshPermissionStatus() {
         fullDisk = Self.hasFullDiskAccess()
-        accessibilityTrusted = AXIsProcessTrusted()
         refreshNotificationStatus()
     }
 
