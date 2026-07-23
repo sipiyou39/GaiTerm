@@ -862,6 +862,11 @@ private struct GaiCompanionTerminalView: View {
                     onClose: onClose,
                     onChooseDirectory: onChooseDirectory,
                     onDirectoryDialogVisibilityChanged: onDirectoryDialogVisibilityChanged)
+                    // An agent keeps the same UUID when its working directory
+                    // changes, but Ghostty creates a new native surface. Key the
+                    // subtree by that concrete incarnation so AppKit never keeps
+                    // the scroll view which hosted the released terminal.
+                    .id(ObjectIdentifier(surface))
             } else {
                 ProgressView()
                     .controlSize(.small)

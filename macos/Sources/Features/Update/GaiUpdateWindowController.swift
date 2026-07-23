@@ -34,6 +34,18 @@ private enum GaiUpdateReleaseNotes {
 
     static let sections: [GaiReleaseNoteSection] = [
         .init(
+            id: "agent-terminal-directory",
+            introducedVersion: "2.0.2",
+            icon: "folder.fill",
+            title: "Change de dossier, garde ton terminal",
+            summary: "Le terminal reste visible et prêt à écrire après la sélection d'un dossier.",
+            points: [
+                "Le nouveau terminal remplace maintenant correctement l'ancienne instance dans la fenêtre de l'agent.",
+                "Le focus revient automatiquement pour reprendre le travail immédiatement.",
+                "Les événements tardifs de l'ancien terminal sont ignorés afin de ne jamais perturber le nouveau.",
+            ],
+            color: Color(red: 0.50, green: 0.66, blue: 1.0)),
+        .init(
             id: "agent-drag-and-shortcut",
             introducedVersion: "2.0.1",
             icon: "hand.draw.fill",

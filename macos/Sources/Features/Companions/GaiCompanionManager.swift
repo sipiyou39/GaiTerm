@@ -454,7 +454,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     func focusSurface(_ surface: Ghostty.SurfaceView) {
-        guard let runtime = runtime(id: surface.id) else { return }
+        guard let runtime = currentRuntime(for: surface) else { return }
         setPresentation(
             runtime.presentation == .maximized ? .maximized : .compact,
             for: runtime,
@@ -463,6 +463,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     func closeSurface(_ surface: Ghostty.SurfaceView) {
+        guard currentRuntime(for: surface) != nil else { return }
         requestCloseCompanion(id: surface.id)
     }
 
@@ -903,14 +904,20 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     private func reopenTerminal(_ runtime: GaiCompanionRuntime, directory: String) {
-        runtime.surfaceView?.gaiReleaseTerminalSurface()
-        runtime.surfaceView = nil
-        runtime.resetActivity()
-        runtime.rotateEventToken()
+        // Persist first: a failed lookup must leave the live terminal untouched.
         guard let record = store.update(id: runtime.id, {
             $0.directoryPath = directory
         }) else { return }
+
+        // Detach the old incarnation before releasing it. Its close callbacks
+        // may be delivered synchronously and must not target the replacement
+        // which deliberately shares the agent's stable UUID.
+        let previousSurface = runtime.surfaceView
+        runtime.surfaceView = nil
+        runtime.resetActivity()
+        runtime.rotateEventToken()
         runtime.replaceRecord(record)
+        previousSurface?.gaiReleaseTerminalSurface()
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = record.directoryPath
@@ -1234,7 +1241,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didRequestNewSplit(_ notification: Notification) {
         guard let parent = notification.object as? Ghostty.SurfaceView,
-              runtime(id: parent.id) != nil else { return }
+              currentRuntime(for: parent) != nil else { return }
         let config = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
             as? Ghostty.SurfaceConfiguration
         _ = openTerminal(baseConfig: config, parent: parent)
@@ -1242,7 +1249,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didRequestCloseSurface(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              runtime(id: surface.id) != nil else { return }
+              currentRuntime(for: surface) != nil else { return }
         if notification.userInfo?["process_alive"] as? Bool == false {
             handleNaturalTerminalExit(surface)
             return
@@ -1251,8 +1258,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     private func handleNaturalTerminalExit(_ surface: Ghostty.SurfaceView) {
-        guard let runtime = runtime(id: surface.id),
-              runtime.surfaceView === surface else { return }
+        guard let runtime = currentRuntime(for: surface) else { return }
 
         let provider = inferredProvider(for: runtime)
         let event = GaiCompanionEvent(
@@ -1295,13 +1301,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didRequestToggleMaximize(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              runtime(id: surface.id) != nil else { return }
+              currentRuntime(for: surface) != nil else { return }
         toggleMaximized(id: surface.id)
     }
 
     @objc private func didReceiveTerminalNotification(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              runtime(id: surface.id) != nil else { return }
+              currentRuntime(for: surface) != nil else { return }
         let title = notification.userInfo?[Notification.Name.GaiTerminalNotificationTitleKey]
             as? String ?? ""
         let body = notification.userInfo?[Notification.Name.GaiTerminalNotificationBodyKey]
@@ -1311,7 +1317,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didReceiveBell(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              let runtime = runtime(id: surface.id),
+              let runtime = currentRuntime(for: surface),
               !isCurrentlyViewed(runtime) else { return }
         let event = GaiCompanionEvent(
             surfaceID: runtime.id,
@@ -1329,7 +1335,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didFinishShellCommand(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              let runtime = runtime(id: surface.id),
+              let runtime = currentRuntime(for: surface),
               runtime.activity.phase.belongsToActiveGeneration else { return }
 
         let exitCode = notification.userInfo?[Notification.Name.GaiSurfaceCommandExitCodeKey]
@@ -1361,7 +1367,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didReceiveUserInput(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              let runtime = runtime(id: surface.id) else { return }
+              let runtime = currentRuntime(for: surface) else { return }
         runtime.acknowledgeCompletion()
         let provider = inferredProvider(for: runtime)
         guard let kind = GaiCompanionInputPolicy.eventKind(
@@ -1388,7 +1394,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didCancelAgentWork(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              let runtime = runtime(id: surface.id) else { return }
+              let runtime = currentRuntime(for: surface) else { return }
         switch runtime.activity.phase {
         case .working, .awaitingInput, .awaitingApproval:
             break
@@ -1412,7 +1418,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didRequestImmediateFocus(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              runtime(id: surface.id) != nil else { return }
+              currentRuntime(for: surface) != nil else { return }
         focusSurface(surface)
     }
 
@@ -1514,6 +1520,17 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func runtime(id: UUID) -> GaiCompanionRuntime? {
         runtimes.first { $0.id == id }
+    }
+
+    /// Surface UUIDs identify an agent and intentionally survive terminal
+    /// restarts. Object identity distinguishes the currently mounted PTY from
+    /// delayed notifications emitted by an incarnation which was just replaced.
+    private func currentRuntime(
+        for surface: Ghostty.SurfaceView
+    ) -> GaiCompanionRuntime? {
+        guard let runtime = runtime(id: surface.id),
+              runtime.surfaceView === surface else { return nil }
+        return runtime
     }
 
     private func isCurrentlyViewed(_ runtime: GaiCompanionRuntime) -> Bool {
