@@ -11,6 +11,202 @@ enum GaiCompanionPresentation: Equatable {
     case maximized
 }
 
+enum GaiCompanionMascotActivation: Equatable, Sendable {
+    case singleClick
+    case doubleClick
+
+    func targetPresentation(from current: GaiCompanionPresentation) -> GaiCompanionPresentation {
+        switch self {
+        case .singleClick:
+            current == .collapsed ? .compact : .collapsed
+        case .doubleClick:
+            .maximized
+        }
+    }
+}
+
+/// Reusable window arrangements for the expanded companion terminal.
+/// `workArea` is already inset from the menu bar and screen edges.
+enum GaiCompanionTerminalLayoutPreset: String, CaseIterable, Equatable, Sendable {
+    case fullScreen
+    case leftHalf
+    case rightHalf
+    case topHalf
+    case bottomHalf
+    case topLeftQuarter
+    case topRightQuarter
+    case bottomLeftQuarter
+    case bottomRightQuarter
+
+    func frame(in workArea: NSRect, gap requestedGap: CGFloat = 8) -> NSRect {
+        guard workArea.width > 0, workArea.height > 0 else { return workArea }
+        let gap = min(max(requestedGap, 0), min(workArea.width, workArea.height))
+        let halfWidth = max((workArea.width - gap) / 2, 0)
+        let halfHeight = max((workArea.height - gap) / 2, 0)
+        let rightX = workArea.maxX - halfWidth
+        let topY = workArea.maxY - halfHeight
+
+        switch self {
+        case .fullScreen:
+            return workArea
+        case .leftHalf:
+            return NSRect(
+                x: workArea.minX,
+                y: workArea.minY,
+                width: halfWidth,
+                height: workArea.height)
+        case .rightHalf:
+            return NSRect(
+                x: rightX,
+                y: workArea.minY,
+                width: halfWidth,
+                height: workArea.height)
+        case .topHalf:
+            return NSRect(
+                x: workArea.minX,
+                y: topY,
+                width: workArea.width,
+                height: halfHeight)
+        case .bottomHalf:
+            return NSRect(
+                x: workArea.minX,
+                y: workArea.minY,
+                width: workArea.width,
+                height: halfHeight)
+        case .topLeftQuarter:
+            return NSRect(
+                x: workArea.minX,
+                y: topY,
+                width: halfWidth,
+                height: halfHeight)
+        case .topRightQuarter:
+            return NSRect(
+                x: rightX,
+                y: topY,
+                width: halfWidth,
+                height: halfHeight)
+        case .bottomLeftQuarter:
+            return NSRect(
+                x: workArea.minX,
+                y: workArea.minY,
+                width: halfWidth,
+                height: halfHeight)
+        case .bottomRightQuarter:
+            return NSRect(
+                x: rightX,
+                y: workArea.minY,
+                width: halfWidth,
+                height: halfHeight)
+        }
+    }
+}
+
+/// Converts Finder drops into one safe, editable input fragment. Nothing is
+/// executed: the text is only sent to the foreground terminal application.
+enum GaiCompanionDroppedPathInsertion {
+    static func text(for urls: [URL]) -> String {
+        text(forPaths: urls.filter(\.isFileURL).map { $0.standardizedFileURL.path })
+    }
+
+    static func text(forPaths paths: [String]) -> String {
+        let escaped = paths.filter { !$0.isEmpty }.map(shellEscapedPath)
+        guard !escaped.isEmpty else { return "" }
+        return escaped.joined(separator: " ") + " "
+    }
+
+    private static func shellEscapedPath(_ path: String) -> String {
+        let safeCharacters = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "/._-+,:@%="))
+        if path.unicodeScalars.allSatisfy(safeCharacters.contains) {
+            return path
+        }
+
+        if path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            var escaped = ""
+            for scalar in path.unicodeScalars {
+                switch scalar.value {
+                case 0x09: escaped += "\\t"
+                case 0x0A: escaped += "\\n"
+                case 0x0D: escaped += "\\r"
+                case 0x27: escaped += "\\'"
+                case 0x5C: escaped += "\\\\"
+                case 0x00...0x1F, 0x7F:
+                    escaped += String(format: "\\x%02X", scalar.value)
+                default:
+                    escaped.unicodeScalars.append(scalar)
+                }
+            }
+            return "$'\(escaped)'"
+        }
+
+        // Ordinary spaces and punctuation stay readable with POSIX single
+        // quotes. Embedded quotes use the standard close/escape/reopen form.
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+enum GaiCompanionFileDropPayload {
+    static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    static let itemType = NSPasteboard.PasteboardType("public.item")
+    static let dataType = NSPasteboard.PasteboardType("public.data")
+    static let readableTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL,
+        .URL,
+        .string,
+        legacyFilenamesType,
+        itemType,
+        dataType,
+    ] + NSFilePromiseReceiver.readableDraggedTypes.map {
+        NSPasteboard.PasteboardType($0)
+    }
+
+    static func isAdvertised(on pasteboard: NSPasteboard) -> Bool {
+        guard let types = pasteboard.types else { return false }
+        return !Set(types).isDisjoint(with: Set(readableTypes))
+    }
+
+    static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        var candidates: [URL] = []
+
+        if let objects = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) {
+            candidates.append(contentsOf: objects.compactMap { object in
+                guard let url = object as? NSURL, url.isFileURL else { return nil }
+                return url as URL
+            })
+        }
+
+        if let items = pasteboard.pasteboardItems {
+            candidates.append(contentsOf: items.compactMap { item in
+                guard let value = item.string(forType: .fileURL),
+                      let url = URL(string: value),
+                      url.isFileURL else { return nil }
+                return url
+            })
+        }
+
+        if let paths = pasteboard.propertyList(forType: legacyFilenamesType) as? [String] {
+            candidates.append(contentsOf: paths.map(URL.init(fileURLWithPath:)))
+        }
+
+        if candidates.isEmpty,
+           let text = pasteboard.string(forType: .string) {
+            let paths = text.components(separatedBy: .newlines).filter {
+                $0.hasPrefix("/") && FileManager.default.fileExists(atPath: $0)
+            }
+            candidates.append(contentsOf: paths.map(URL.init(fileURLWithPath:)))
+        }
+
+        var seenPaths = Set<String>()
+        return candidates.compactMap { candidate in
+            let url = candidate.standardizedFileURL
+            guard seenPaths.insert(url.path).inserted else { return nil }
+            return url
+        }
+    }
+}
+
 /// Keeps opening the company library independent from the user's explicit
 /// desktop-agent visibility choice. Presenting a terminal is different: that
 /// action promises visible, focused output and therefore lifts the global gate.
@@ -286,8 +482,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private let ghostty: Ghostty.App
     private let store: GaiCompanionStore
+    private let userDefaults: UserDefaults
     private var panelControllers: [UUID: GaiCompanionPanelController] = [:]
     private var managerWindowController: GaiCompanionLibraryWindowController?
+    private var expandedTerminalSize: GaiCompanionExpandedTerminalSize?
+    private var expandedTerminalPosition: GaiCompanionExpandedTerminalPosition?
     private var started = false
     private var eventSequence: UInt64 = 0
     private var focusGeneration: UInt64 = 0
@@ -297,11 +496,31 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var provisionalExpiryTasks: [
         UUID: (nonce: UUID, workItem: DispatchWorkItem)
     ] = [:]
+    private var globalFileDragMonitor: Any?
+    private var globalFileDragPollTimer: DispatchSourceTimer?
+    private var globalFileDragPollingIsActive = false
+    private var globalFileDropTargetID: UUID?
+    private var globalFileDropURLs: [URL] = []
+    private var activeGlobalFileDragChangeCount: Int?
+    private var settledGlobalFileDragChangeCount = 0
+    private var mostRecentFileDrop: (
+        id: UUID,
+        paths: [String],
+        timestamp: TimeInterval
+    )?
+    private var terminalFocusLossProtectionUntil: [UUID: TimeInterval] = [:]
+    private var fileDropFocusGeneration: [UUID: UInt64] = [:]
     private static let provisionalStartLifetime: TimeInterval = 3
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
-        store = GaiCompanionStore(userDefaults: .ghostty, loadImmediately: false)
+        let userDefaults = UserDefaults.ghostty
+        self.userDefaults = userDefaults
+        store = GaiCompanionStore(userDefaults: userDefaults, loadImmediately: false)
+        expandedTerminalSize = GaiCompanionExpandedTerminalSize(
+            userDefaults: userDefaults)
+        expandedTerminalPosition = GaiCompanionExpandedTerminalPosition(
+            userDefaults: userDefaults)
         super.init()
         registerObservers()
     }
@@ -310,6 +529,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for task in provisionalExpiryTasks.values {
             task.workItem.cancel()
         }
+        if let globalFileDragMonitor {
+            NSEvent.removeMonitor(globalFileDragMonitor)
+        }
+        globalFileDragPollTimer?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -347,6 +570,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             ensurePanel(for: runtime)
             setPresentation(.collapsed, for: runtime, animated: false, focus: false)
         }
+        installGlobalFileDropFallback()
 
         // A fresh installation opens its first live terminal immediately. A
         // migrated/restored set stays mascot-only until explicitly opened, so
@@ -590,21 +814,34 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     func toggleTerminal(id: UUID) {
+        activateCompanion(id: id, activation: .singleClick)
+    }
+
+    func openMaximizedTerminal(id: UUID) {
+        activateCompanion(id: id, activation: .doubleClick)
+    }
+
+    private func activateCompanion(
+        id: UUID,
+        activation: GaiCompanionMascotActivation
+    ) {
         guard let runtime = runtime(id: id) else { return }
         guard terminalTransientCounts[id, default: 0] == 0 else { return }
         if runtime.activity.phase == .exited {
-            restartExitedTerminal(runtime)
+            restartExitedTerminal(
+                runtime,
+                presentation: activation.targetPresentation(from: .collapsed))
             return
         }
         // Mascot clicks are explicit acknowledgement actions. Merely focusing
         // a window is not, because macOS can restore focus automatically.
         runtime.acknowledgeCompletion()
-        switch runtime.presentation {
-        case .collapsed:
-            setPresentation(.compact, for: runtime, animated: true, focus: true)
-        case .compact, .maximized:
-            setPresentation(.collapsed, for: runtime, animated: true, focus: false)
-        }
+        let target = activation.targetPresentation(from: runtime.presentation)
+        setPresentation(
+            target,
+            for: runtime,
+            animated: true,
+            focus: target != .collapsed)
     }
 
     /// A real mascot drag always dismisses its terminal. The drag recognizer
@@ -629,10 +866,252 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         setPresentation(target, for: runtime, animated: true, focus: true)
     }
 
+    func applyExpandedTerminalLayout(
+        id: UUID,
+        preset: GaiCompanionTerminalLayoutPreset
+    ) {
+        guard let runtime = runtime(id: id),
+              terminalTransientCounts[id, default: 0] == 0 else { return }
+        ensurePanel(for: runtime)
+        guard let controller = panelControllers[id] else { return }
+
+        let fallbackScreen = controller.companionPanel.screen ?? targetScreen(for: runtime)
+        let screen = runtime.presentation == .maximized
+            ? (controller.terminalPanel.screen ?? fallbackScreen)
+            : fallbackScreen
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.expandedTerminalScreenMargin,
+            dy: Self.expandedTerminalScreenMargin)
+        persistExpandedTerminalGeometry(
+            frame: preset.frame(in: workArea),
+            screen: screen)
+        setPresentation(.maximized, for: runtime, animated: true, focus: true)
+    }
+
+    @MainActor
+    func insertDroppedFileURLs(_ urls: [URL], into id: UUID) {
+        let paths = urls.filter(\.isFileURL).map { $0.standardizedFileURL.path }
+        let timestamp = Date.timeIntervalSinceReferenceDate
+        if let mostRecentFileDrop,
+           mostRecentFileDrop.id == id,
+           mostRecentFileDrop.paths == paths,
+           timestamp - mostRecentFileDrop.timestamp < 0.75 {
+            return
+        }
+        mostRecentFileDrop = (id: id, paths: paths, timestamp: timestamp)
+
+        let insertion = GaiCompanionDroppedPathInsertion.text(for: urls)
+        guard !insertion.isEmpty,
+              let runtime = runtime(id: id),
+              terminalTransientCounts[id, default: 0] == 0 else { return }
+        protectTerminalFromFocusLoss(id: id, duration: 1.25)
+
+        if runtime.activity.phase == .exited {
+            restartExitedTerminal(runtime)
+        } else {
+            runtime.acknowledgeCompletion()
+            let target = runtime.presentation == .collapsed
+                ? GaiCompanionPresentation.compact
+                : runtime.presentation
+            setPresentation(target, for: runtime, animated: true, focus: true)
+        }
+
+        guard let surface = runtime.surfaceView?.surfaceModel else {
+            Ghostty.logger.error("companion file drop has no terminal surface")
+            return
+        }
+        surface.sendText(insertion)
+        stabilizeTerminalFocusAfterFileDrop(id: id)
+    }
+
+    private func installGlobalFileDropFallback() {
+        guard globalFileDragMonitor == nil,
+              globalFileDragPollTimer == nil else { return }
+        settledGlobalFileDragChangeCount = NSPasteboard(name: .drag).changeCount
+        globalFileDragMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            let eventType = event.type
+            let location = NSEvent.mouseLocation
+            DispatchQueue.main.async { [weak self] in
+                self?.handleGlobalFileDragEvent(
+                    type: eventType,
+                    location: location)
+            }
+        }
+
+        let pollTimer = DispatchSource.makeTimerSource(queue: .main)
+        pollTimer.schedule(
+            deadline: .now(),
+            repeating: .milliseconds(125),
+            leeway: .milliseconds(25))
+        pollTimer.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.pollGlobalFileDragFallback()
+            }
+        }
+        globalFileDragPollTimer = pollTimer
+        pollTimer.resume()
+    }
+
+    @MainActor
+    private func pollGlobalFileDragFallback() {
+        let leftButtonIsPressed = NSEvent.pressedMouseButtons & 1 != 0
+        updateGlobalFileDragPolling(active: leftButtonIsPressed)
+        if leftButtonIsPressed {
+            handleGlobalFileDragEvent(
+                type: .leftMouseDragged,
+                location: NSEvent.mouseLocation)
+        } else if activeGlobalFileDragChangeCount != nil
+                    || globalFileDropTargetID != nil {
+            handleGlobalFileDragEvent(
+                type: .leftMouseUp,
+                location: NSEvent.mouseLocation)
+        } else {
+            // The drag pasteboard can be cleared or rewritten just after mouse
+            // release. Keep the idle value as the baseline so a later ordinary
+            // click can never reuse stale file data.
+            settledGlobalFileDragChangeCount = NSPasteboard(name: .drag).changeCount
+        }
+    }
+
+    @MainActor
+    private func handleGlobalFileDragEvent(
+        type: NSEvent.EventType,
+        location: NSPoint
+    ) {
+        updateGlobalFileDragPolling(active: type == .leftMouseDragged)
+        switch type {
+        case .leftMouseDragged:
+            let target = panelControllers.first { _, controller in
+                agentWindowsAreVisible
+                    && controller.companionPanel.isVisible
+                    && controller.companionPanel.frame.contains(location)
+            }
+            guard let (targetID, controller) = target else {
+                clearGlobalFileDropTarget()
+                return
+            }
+
+            let pasteboard = NSPasteboard(name: .drag)
+            let changeCount = pasteboard.changeCount
+            guard activeGlobalFileDragChangeCount != nil
+                    || changeCount != settledGlobalFileDragChangeCount
+            else {
+                clearGlobalFileDropTarget()
+                return
+            }
+            let urls = GaiCompanionFileDropPayload.fileURLs(from: pasteboard)
+            guard !urls.isEmpty
+                    || GaiCompanionFileDropPayload.isAdvertised(on: pasteboard)
+            else {
+                clearGlobalFileDropTarget()
+                return
+            }
+            activeGlobalFileDragChangeCount = changeCount
+
+            if globalFileDropTargetID != targetID {
+                clearGlobalFileDropTarget()
+                globalFileDropTargetID = targetID
+                controller.setFallbackFileDropTargeted(true)
+            }
+            if !urls.isEmpty {
+                globalFileDropURLs = urls
+            }
+
+        case .leftMouseUp:
+            let pasteboard = NSPasteboard(name: .drag)
+            settledGlobalFileDragChangeCount = pasteboard.changeCount
+            activeGlobalFileDragChangeCount = nil
+            guard let targetID = globalFileDropTargetID,
+                  let controller = panelControllers[targetID],
+                  controller.companionPanel.frame.contains(location)
+            else {
+                clearGlobalFileDropTarget()
+                return
+            }
+            let liveURLs = GaiCompanionFileDropPayload.fileURLs(
+                from: pasteboard)
+            let urls = liveURLs.isEmpty ? globalFileDropURLs : liveURLs
+            clearGlobalFileDropTarget()
+            guard !urls.isEmpty else { return }
+            controller.showFallbackFileDropAccepted(fileCount: urls.count)
+            // Finder can briefly reclaim activation while its drag session is
+            // unwinding. Open only after that final hand-off has completed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.insertDroppedFileURLs(urls, into: targetID)
+            }
+
+        default:
+            break
+        }
+    }
+
+    /// Keep the reliability poll inexpensive while idle, then follow an active
+    /// drag at display cadence. The global event monitor remains the immediate
+    /// path; this timer only covers Finder/AppKit sessions that skip events.
+    private func updateGlobalFileDragPolling(active: Bool) {
+        guard globalFileDragPollingIsActive != active,
+              let timer = globalFileDragPollTimer else { return }
+        globalFileDragPollingIsActive = active
+        timer.schedule(
+            deadline: .now(),
+            repeating: active ? .milliseconds(8) : .milliseconds(125),
+            leeway: active ? .milliseconds(1) : .milliseconds(25))
+    }
+
+    private func clearGlobalFileDropTarget() {
+        if let targetID = globalFileDropTargetID {
+            panelControllers[targetID]?.setFallbackFileDropTargeted(false)
+        }
+        globalFileDropTargetID = nil
+        globalFileDropURLs = []
+    }
+
+    private func protectTerminalFromFocusLoss(
+        id: UUID,
+        duration: TimeInterval
+    ) {
+        let deadline = Date.timeIntervalSinceReferenceDate + duration
+        terminalFocusLossProtectionUntil[id] = max(
+            terminalFocusLossProtectionUntil[id] ?? 0,
+            deadline)
+    }
+
+    private func terminalIsProtectedFromFocusLoss(id: UUID) -> Bool {
+        guard let deadline = terminalFocusLossProtectionUntil[id] else { return false }
+        if Date.timeIntervalSinceReferenceDate < deadline {
+            return true
+        }
+        terminalFocusLossProtectionUntil.removeValue(forKey: id)
+        return false
+    }
+
+    private func stabilizeTerminalFocusAfterFileDrop(id: UUID) {
+        let generation = fileDropFocusGeneration[id, default: 0] &+ 1
+        fileDropFocusGeneration[id] = generation
+        let delays: [TimeInterval] = [0.08, 0.26, 0.52]
+
+        for (index, delay) in delays.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.fileDropFocusGeneration[id] == generation,
+                      let runtime = self.runtime(id: id),
+                      runtime.presentation != .collapsed else { return }
+                self.refocusTerminalIfVisible(id: id)
+                if index == delays.indices.last {
+                    self.fileDropFocusGeneration.removeValue(forKey: id)
+                }
+            }
+        }
+    }
+
     private func closeCompanion(id: UUID) {
         guard let index = runtimes.firstIndex(where: { $0.id == id }) else { return }
         focusGeneration &+= 1
         terminalTransientCounts.removeValue(forKey: id)
+        terminalFocusLossProtectionUntil.removeValue(forKey: id)
+        fileDropFocusGeneration.removeValue(forKey: id)
         activeCloseConfirmationIDs.remove(id)
         provisionalExpiryTasks.removeValue(forKey: id)?.workItem.cancel()
         let runtime = runtimes.remove(at: index)
@@ -858,6 +1337,17 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
     }
 
+    func rememberExpandedTerminalFrame(
+        id: UUID,
+        frame: NSRect,
+        screen: NSScreen?
+    ) {
+        guard let runtime = runtime(id: id),
+              runtime.presentation == .maximized,
+              let screen else { return }
+        persistExpandedTerminalGeometry(frame: frame, screen: screen)
+    }
+
     // MARK: Surface lifecycle
 
     private func ensureSurface(
@@ -979,12 +1469,15 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             runtime.acknowledgeCompletion()
         }
         guard let controller = panelControllers[runtime.id] else { return }
-        let screen = controller.companionPanel.isVisible
+        let companionScreen = controller.companionPanel.isVisible
             ? (controller.companionPanel.screen ?? targetScreen(for: runtime))
             : targetScreen(for: runtime)
         let companionFrame = controller.companionPanel.isVisible
             ? controller.companionPanel.frame
-            : companionFrame(for: runtime, screen: screen)
+            : companionFrame(for: runtime, screen: companionScreen)
+        let screen = presentation == .maximized
+            ? expandedTerminalScreen(fallback: companionScreen)
+            : companionScreen
         let geometry = panelGeometry(
             for: runtime,
             presentation: presentation,
@@ -1027,6 +1520,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     func panelDidResignKey(for id: UUID) {
         guard agentWindowsAreVisible, runtime(id: id) != nil else { return }
+        if terminalIsProtectedFromFocusLoss(id: id) {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateSurfacePerformanceState()
+            }
+            return
+        }
         focusGeneration &+= 1
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1040,6 +1539,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
               agentWindowsAreVisible,
               runtime.presentation != .collapsed,
               !runtime.isTerminalLocked,
+              !terminalIsProtectedFromFocusLoss(id: id),
               terminalTransientCounts[id, default: 0] == 0,
               let terminalPanel = panelControllers[id]?.terminalPanel,
               terminalPanel.isVisible,
@@ -1181,10 +1681,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             terminalFrame: runtime.presentation == .compact ? geometry.terminalFrame : nil,
             placement: geometry.placement,
             screen: screen)
-        if runtime.presentation == .maximized,
-           let terminalFrame = geometry.terminalFrame {
-            panelControllers[id]?.moveMaximizedTerminal(to: terminalFrame)
-        }
     }
 
     private func updateSurfacePerformanceState(focused preferred: Ghostty.SurfaceView? = nil) {
@@ -1193,7 +1689,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             guard let view = runtime.surfaceView, let surface = view.surface else { continue }
             let visible = agentWindowsAreVisible
                 && runtime.presentation != .collapsed
-                && panelControllers[runtime.id]?.terminalPanel.isVisible == true
             ghostty_surface_set_occlusion(surface, visible)
             ghostty_surface_set_high_refresh(surface, visible)
             view.focusDidChange(visible && view === focused)
@@ -1290,13 +1785,16 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
     }
 
-    private func restartExitedTerminal(_ runtime: GaiCompanionRuntime) {
+    private func restartExitedTerminal(
+        _ runtime: GaiCompanionRuntime,
+        presentation: GaiCompanionPresentation = .compact
+    ) {
         runtime.resetActivity()
         // Natural exit already rotates after releasing the old PTY. Rotating
         // again makes an immediate relaunch safe even if a delayed hook exists.
         runtime.rotateEventToken()
         guard ensureSurface(for: runtime) != nil else { return }
-        setPresentation(.compact, for: runtime, animated: true, focus: true)
+        setPresentation(presentation, for: runtime, animated: true, focus: true)
     }
 
     @objc private func didRequestToggleMaximize(_ notification: Notification) {
@@ -1790,9 +2288,65 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         case .compact:
             terminalFrame = preview.terminalFrame
         case .maximized:
-            terminalFrame = screen.visibleFrame.insetBy(dx: 10, dy: 10)
+            terminalFrame = expandedTerminalFrame(for: screen)
         }
         return (preview.placement, terminalFrame)
+    }
+
+    private func expandedTerminalFrame(for screen: NSScreen) -> NSRect {
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.expandedTerminalScreenMargin,
+            dy: Self.expandedTerminalScreenMargin)
+        guard let expandedTerminalSize else { return workArea }
+
+        let width = min(CGFloat(expandedTerminalSize.width), workArea.width)
+        let height = min(CGFloat(expandedTerminalSize.height), workArea.height)
+        let center = expandedTerminalPosition?.normalizedCenter ?? .center
+        let frame = NSRect(
+            x: workArea.minX + workArea.width * CGFloat(center.x) - width / 2,
+            y: workArea.minY + workArea.height * CGFloat(center.y) - height / 2,
+            width: width,
+            height: height)
+        return clamped(frame, to: workArea)
+    }
+
+    private func expandedTerminalScreen(fallback: NSScreen) -> NSScreen {
+        guard let displayID = expandedTerminalPosition?.displayID,
+              let screen = NSScreen.screens.first(where: {
+                  self.displayID(for: $0) == displayID
+              }) else { return fallback }
+        return screen
+    }
+
+    private func persistExpandedTerminalGeometry(
+        frame: NSRect,
+        screen: NSScreen
+    ) {
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.expandedTerminalScreenMargin,
+            dy: Self.expandedTerminalScreenMargin)
+        let boundedFrame = clamped(frame, to: workArea)
+        let rememberedSize = GaiCompanionExpandedTerminalSize(
+            width: Double(boundedFrame.width),
+            height: Double(boundedFrame.height))
+        let rememberedPosition = GaiCompanionExpandedTerminalPosition(
+            normalizedCenter: GaiCompanionNormalizedPosition(
+                x: Double((boundedFrame.midX - workArea.minX) / max(workArea.width, 1)),
+                y: Double((boundedFrame.midY - workArea.minY) / max(workArea.height, 1))),
+            displayID: displayID(for: screen))
+
+        if rememberedSize != expandedTerminalSize {
+            expandedTerminalSize = rememberedSize
+            if !rememberedSize.persist(to: userDefaults) {
+                Ghostty.logger.error("could not persist expanded terminal size")
+            }
+        }
+        if rememberedPosition != expandedTerminalPosition {
+            expandedTerminalPosition = rememberedPosition
+            if !rememberedPosition.persist(to: userDefaults) {
+                Ghostty.logger.error("could not persist expanded terminal position")
+            }
+        }
     }
 
     /// Native/AppKit port of GaiWork's `chooseCompanionPreviewGeometry`.
@@ -1937,6 +2491,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private static let screenMargin: CGFloat = 12
     private static let terminalGap: CGFloat = 8
+    private static let expandedTerminalScreenMargin: CGFloat = 10
 
     private func targetScreen(for runtime: GaiCompanionRuntime) -> NSScreen {
         if let displayID = runtime.record.displayID,

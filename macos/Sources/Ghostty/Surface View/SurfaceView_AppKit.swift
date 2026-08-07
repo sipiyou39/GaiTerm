@@ -773,6 +773,17 @@ extension Ghostty {
         @objc private func windowDidChangeScreen(notification: SwiftUI.Notification) {
             guard let window = self.window else { return }
             guard let object = notification.object as? NSWindow, window == object else { return }
+            synchronizeDisplayLinkAndBackingScale()
+        }
+
+        /// A newly mounted embedded surface does not necessarily receive
+        /// `NSWindow.didChangeScreenNotification`: its window may already be on
+        /// the target display before SwiftUI attaches the native view. Sync at
+        /// mount time as well so the renderer's display link immediately uses
+        /// the real 60/120 Hz cadence instead of whichever display was active
+        /// when the surface was created.
+        private func synchronizeDisplayLinkAndBackingScale() {
+            guard let window = self.window else { return }
             guard let screen = window.screen else { return }
             guard let surface = self.surface else { return }
 
@@ -790,6 +801,11 @@ extension Ghostty {
         }
 
         // MARK: - NSView
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            synchronizeDisplayLinkAndBackingScale()
+        }
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()

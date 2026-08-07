@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import GaiTerm
 
 @MainActor
 struct GaiCompanionStoreTests {
@@ -72,6 +72,66 @@ struct GaiCompanionStoreTests {
         #expect(decoded.compactSize == .init(width: 320, height: 1_200))
         #expect(decoded.scalePercent == .init(200))
         #expect(decoded.completionSoundEnabled == false)
+    }
+
+    @Test func loadingTheOldCompactDefaultMigratesToTheLargerTerminal() throws {
+        let context = defaultsContext()
+        defer { context.clear() }
+        let payload: [[String: Any]] = [[
+            "id": UUID().uuidString,
+            "name": "Legacy terminal",
+            "colorway": "blue",
+            "directoryPath": "/tmp",
+            "normalizedPosition": ["x": 0.5, "y": 0.5],
+            "compactSize": ["width": 480, "height": 300],
+        ]]
+        context.defaults.set(
+            try JSONSerialization.data(withJSONObject: payload),
+            forKey: GaiCompanionStore.defaultPersistenceKey)
+
+        let store = GaiCompanionStore(userDefaults: context.defaults, loadImmediately: false)
+        #expect(store.load() == .loaded(1))
+        #expect(store.companions.first?.compactSize == .standard)
+        #expect(GaiCompanionCompactSize.standard == .init(width: 720, height: 440))
+
+        let persistedData = try #require(
+            context.defaults.data(forKey: GaiCompanionStore.defaultPersistenceKey))
+        let persistedObject = try #require(
+            JSONSerialization.jsonObject(with: persistedData) as? [[String: Any]])
+        let persistedSize = try #require(
+            persistedObject.first?["compactSize"] as? [String: Any])
+        #expect(persistedSize["width"] as? Double == 720)
+        #expect(persistedSize["height"] as? Double == 440)
+    }
+
+    @Test func expandedTerminalSizeNormalizesAndPersistsAsTheSharedDefault() {
+        let context = defaultsContext()
+        defer { context.clear() }
+
+        #expect(GaiCompanionExpandedTerminalSize(userDefaults: context.defaults) == nil)
+        let size = GaiCompanionExpandedTerminalSize(width: 1_140, height: 760)
+        #expect(size.persist(to: context.defaults))
+        #expect(GaiCompanionExpandedTerminalSize(userDefaults: context.defaults) == size)
+
+        let tooSmall = GaiCompanionExpandedTerminalSize(width: 1, height: 2)
+        #expect(tooSmall.width == GaiCompanionExpandedTerminalSize.minimumWidth)
+        #expect(tooSmall.height == GaiCompanionExpandedTerminalSize.minimumHeight)
+    }
+
+    @Test func expandedTerminalPositionPersistsAcrossDisplaysAndRelaunches() {
+        let context = defaultsContext()
+        defer { context.clear() }
+
+        #expect(GaiCompanionExpandedTerminalPosition(userDefaults: context.defaults) == nil)
+        let position = GaiCompanionExpandedTerminalPosition(
+            normalizedCenter: .init(x: 1.4, y: -0.2),
+            displayID: " 42 ")
+        #expect(position.normalizedCenter == .init(x: 1, y: 0))
+        #expect(position.displayID == "42")
+        #expect(position.persist(to: context.defaults))
+        #expect(
+            GaiCompanionExpandedTerminalPosition(userDefaults: context.defaults)
+                == position)
     }
 
     @Test func recordNameNormalizesAndCapsAtFortyCharacters() {

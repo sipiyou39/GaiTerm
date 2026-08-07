@@ -16,12 +16,67 @@ private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingV
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+private final class GaiCompanionDropFeedback: ObservableObject {
+    @Published private(set) var isTargeted = false
+    @Published private(set) var acceptedFileCount: Int?
+    private var feedbackGeneration: UInt64 = 0
+
+    func setTargeted(_ targeted: Bool) {
+        guard targeted != isTargeted else { return }
+        isTargeted = targeted
+        if targeted {
+            feedbackGeneration &+= 1
+            acceptedFileCount = nil
+        }
+    }
+
+    func showAccepted(fileCount: Int) {
+        guard fileCount > 0 else { return }
+        feedbackGeneration &+= 1
+        let generation = feedbackGeneration
+        isTargeted = false
+        acceptedFileCount = fileCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+            guard let self, self.feedbackGeneration == generation else { return }
+            self.acceptedFileCount = nil
+        }
+    }
+}
+
 /// Owns both click recognition and native Window Server dragging for the
 /// mascot. Tracking the maximum pointer distance prevents a drag that returns
 /// to its starting point from being mistaken for a click.
-private final class GaiCompanionDragClickHostingView<Content: View>: NSHostingView<Content> {
+/// A plain AppKit container owns the drag destination. Keeping registration off
+/// `NSHostingView` matters: SwiftUI rebuilds its internal dragging views and can
+/// replace registrations made directly on the hosting view.
+private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     var onClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
     var onDragBegan: (() -> Void)?
+
+    private let hostingView: NSHostingView<Content>
+    private var clickGeneration: UInt64 = 0
+
+    init(rootView: Content) {
+        hostingView = NSHostingView(rootView: rootView)
+        super.init(frame: .zero)
+        autoresizesSubviews = true
+        hostingView.sizingOptions = []
+        hostingView.autoresizingMask = [.width, .height]
+        addSubview(hostingView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Preserve a responsive single click while still giving a genuinely fast
+    /// second click enough time to replace it without flashing the compact
+    /// terminal first.
+    private static var singleClickDelay: TimeInterval {
+        min(NSEvent.doubleClickInterval, 0.28)
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -29,8 +84,28 @@ private final class GaiCompanionDragClickHostingView<Content: View>: NSHostingVi
         bounds.contains(point) ? self : nil
     }
 
+    override func layout() {
+        super.layout()
+        hostingView.frame = bounds
+    }
+
     override func mouseDown(with event: NSEvent) {
-        guard event.buttonNumber == 0, event.clickCount == 1, let window else {
+        guard event.buttonNumber == 0, let window else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        if event.clickCount >= 2 {
+            clickGeneration &+= 1
+            let point = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(point) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.onDoubleClick?()
+            }
+            return
+        }
+
+        guard event.clickCount == 1 else {
             super.mouseDown(with: event)
             return
         }
@@ -72,10 +147,43 @@ private final class GaiCompanionDragClickHostingView<Content: View>: NSHostingVi
               windowDistance < 6,
               bounds.contains(endInView) else { return }
 
-        DispatchQueue.main.async { [weak self] in
-            self?.onClick?()
+        clickGeneration &+= 1
+        let generation = clickGeneration
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.singleClickDelay
+        ) { [weak self] in
+            guard let self, self.clickGeneration == generation else { return }
+            self.onClick?()
         }
     }
+
+}
+
+/// An explicit empty strip in the custom borderless header. It gives AppKit a
+/// native Window Server drag without making terminal text or header controls
+/// draggable by accident.
+private struct GaiCompanionWindowDragArea: NSViewRepresentable {
+    final class DragView: NSView {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            guard event.buttonNumber == 0, let window else {
+                super.mouseDown(with: event)
+                return
+            }
+            window.performDrag(with: event)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+
+    func makeNSView(context: Context) -> DragView {
+        DragView()
+    }
+
+    func updateNSView(_ view: DragView, context: Context) {}
 }
 
 /// Display-synchronised main-thread ticks with coalescing. `CVDisplayLink`
@@ -198,18 +306,23 @@ private enum GaiCompanionPlacementTiming {
     }
 }
 
-final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
+final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingDestination {
     let companionPanel: NSPanel
     let terminalPanel: NSPanel
 
     private let runtimeID: UUID
     private weak var manager: GaiCompanionManager?
+    private let dropFeedback: GaiCompanionDropFeedback
+    private var dropIsTargeted = false
     private var applyingCompanionFrame = false
+    private var applyingTerminalFrame = false
     private var presentation: GaiCompanionPresentation = .collapsed
     private var visibilityGeneration = 0
     private var previousCompanionFrame: NSRect?
     private var moveSettleWorkItem: DispatchWorkItem?
     private var moveSettleGeneration = 0
+    private var terminalMoveSettleWorkItem: DispatchWorkItem?
+    private var terminalMoveSettleGeneration = 0
     private var livePlacement: GaiCompanionTerminalPlacement = .top
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
@@ -226,6 +339,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     init(runtime: GaiCompanionRuntime, manager: GaiCompanionManager) {
         runtimeID = runtime.id
         self.manager = manager
+        let dropFeedback = GaiCompanionDropFeedback()
+        self.dropFeedback = dropFeedback
 
         let companionPanel = GaiCompanionPanel(
             contentRect: NSRect(x: 0, y: 0, width: 142, height: 158),
@@ -275,11 +390,18 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         super.init()
         companionPanel.delegate = self
         terminalPanel.delegate = self
+        companionPanel.registerForDraggedTypes(
+            GaiCompanionFileDropPayload.readableTypes)
 
-        let mascotRoot = GaiCompanionMascotView(runtime: runtime)
-        let mascotHost = GaiCompanionDragClickHostingView(rootView: mascotRoot)
+        let mascotRoot = GaiCompanionMascotView(
+            runtime: runtime,
+            dropFeedback: dropFeedback)
+        let mascotHost = GaiCompanionDragClickContainerView(rootView: mascotRoot)
         mascotHost.onClick = { [weak manager] in
             manager?.toggleTerminal(id: runtime.id)
+        }
+        mascotHost.onDoubleClick = { [weak manager] in
+            manager?.openMaximizedTerminal(id: runtime.id)
         }
         mascotHost.onDragBegan = { [weak manager] in
             manager?.companionDragDidBegin(id: runtime.id)
@@ -290,6 +412,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         let terminalRoot = GaiCompanionTerminalView(
             runtime: runtime,
             onToggleMaximized: { [weak manager] in manager?.toggleMaximized(id: runtime.id) },
+            onApplyLayoutPreset: { [weak manager] preset in
+                manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
+            },
             onToggleLock: { [weak manager] in manager?.toggleTerminalLock(id: runtime.id) },
             onRename: { [weak manager] name in manager?.updateName(id: runtime.id, name: name) },
             onClose: { [weak manager] in manager?.requestCloseCompanion(id: runtime.id) },
@@ -326,6 +451,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         visibilityGeneration += 1
         let generation = visibilityGeneration
         self.presentation = presentation
+        if presentation != .maximized {
+            terminalMoveSettleGeneration += 1
+            terminalMoveSettleWorkItem?.cancel()
+            terminalMoveSettleWorkItem = nil
+        }
+        configureTerminalResizing(for: presentation, screen: screen)
         resetLivePlacementAnimation()
         livePlacement = placement
         placementScreenNumber = screenNumber(for: screen)
@@ -348,7 +479,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         guard agentWindowsAreVisible else {
             if let terminalFrame {
                 terminalPanel.alphaValue = 1
-                terminalPanel.setFrame(terminalFrame, display: false, animate: false)
+                setTerminalFrame(terminalFrame, display: false, animate: false)
                 if presentation == .compact {
                     updateTerminalWindowRelationship(for: presentation)
                 }
@@ -370,7 +501,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         } else {
             terminalPanel.alphaValue = 1
         }
-        terminalPanel.setFrame(terminalFrame, display: true, animate: animated && wasVisible)
+        setTerminalFrame(
+            terminalFrame,
+            display: true,
+            animate: animated && wasVisible)
         if presentation == .compact {
             updateTerminalWindowRelationship(for: presentation)
         }
@@ -424,6 +558,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         moveSettleGeneration += 1
         moveSettleWorkItem?.cancel()
         moveSettleWorkItem = nil
+        terminalMoveSettleGeneration += 1
+        terminalMoveSettleWorkItem?.cancel()
+        terminalMoveSettleWorkItem = nil
         livePlacement = placement
         placementScreenNumber = screenNumber(for: screen)
 
@@ -450,6 +587,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         let generation = visibilityGeneration
         presentation = .collapsed
         resetLivePlacementAnimation()
+        terminalMoveSettleGeneration += 1
+        terminalMoveSettleWorkItem?.cancel()
+        terminalMoveSettleWorkItem = nil
         detachTerminalWindow()
         hideTerminal(animated: true, generation: generation)
     }
@@ -459,6 +599,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         moveSettleGeneration += 1
         moveSettleWorkItem?.cancel()
         moveSettleWorkItem = nil
+        terminalMoveSettleGeneration += 1
+        terminalMoveSettleWorkItem?.cancel()
+        terminalMoveSettleWorkItem = nil
         if terminalPanel.parent === companionPanel {
             companionPanel.removeChildWindow(terminalPanel)
         }
@@ -481,7 +624,14 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard notification.object as? NSWindow === companionPanel,
+        guard let window = notification.object as? NSWindow else { return }
+        if window === terminalPanel {
+            guard presentation == .maximized, !applyingTerminalFrame else { return }
+            scheduleTerminalMoveSettle()
+            return
+        }
+
+        guard window === companionPanel,
               !applyingCompanionFrame else { return }
 
         let frame = companionPanel.frame
@@ -504,6 +654,79 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             frame: frame,
             screen: companionPanel.screen)
         scheduleMoveSettle()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === terminalPanel,
+              presentation == .maximized else { return }
+        terminalMoveSettleGeneration += 1
+        terminalMoveSettleWorkItem?.cancel()
+        terminalMoveSettleWorkItem = nil
+        manager?.rememberExpandedTerminalFrame(
+            id: runtimeID,
+            frame: terminalPanel.frame,
+            screen: terminalPanel.screen)
+    }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === terminalPanel,
+              presentation == .maximized,
+              let screen = terminalPanel.screen else { return }
+        configureTerminalResizing(for: presentation, screen: screen)
+    }
+
+    func setFallbackFileDropTargeted(_ targeted: Bool) {
+        updateDropTarget(targeted)
+    }
+
+    func showFallbackFileDropAccepted(fileCount: Int) {
+        updateDropTarget(false)
+        dropFeedback.showAccepted(fileCount: fileCount)
+    }
+
+    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let accepted = GaiCompanionFileDropPayload.isAdvertised(
+            on: sender.draggingPasteboard)
+        updateDropTarget(accepted)
+        return accepted ? .copy : []
+    }
+
+    func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let accepted = GaiCompanionFileDropPayload.isAdvertised(
+            on: sender.draggingPasteboard)
+        updateDropTarget(accepted)
+        return accepted ? .copy : []
+    }
+
+    func draggingExited(_ sender: NSDraggingInfo?) {
+        updateDropTarget(false)
+    }
+
+    func draggingEnded(_ sender: NSDraggingInfo) {
+        updateDropTarget(false)
+    }
+
+    func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        GaiCompanionFileDropPayload.isAdvertised(on: sender.draggingPasteboard)
+    }
+
+    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = GaiCompanionFileDropPayload.fileURLs(
+            from: sender.draggingPasteboard)
+        updateDropTarget(false)
+        guard !urls.isEmpty else { return false }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.manager?.insertDroppedFileURLs(urls, into: self.runtimeID)
+        }
+        dropFeedback.showAccepted(fileCount: urls.count)
+        return true
+    }
+
+    private func updateDropTarget(_ targeted: Bool) {
+        guard targeted != dropIsTargeted else { return }
+        dropIsTargeted = targeted
+        dropFeedback.setTargeted(targeted)
     }
 
     /// Starts one bounded FLIP only when the selected side changes. During all
@@ -569,12 +792,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    func moveMaximizedTerminal(to frame: NSRect) {
-        guard presentation == .maximized,
-              !NSEqualRects(terminalPanel.frame, frame) else { return }
-        terminalPanel.setFrame(frame, display: true, animate: false)
-    }
-
     private func advanceLivePlacementAnimation(at timestamp: CFTimeInterval) {
         guard let transition = placementTransition else {
             placementDisplayLink.stop()
@@ -631,7 +848,21 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private func setWindowFrame(_ window: NSWindow, to frame: NSRect) {
         guard !NSEqualRects(window.frame, frame) else { return }
+        if window === terminalPanel {
+            setTerminalFrame(frame, display: false, animate: false)
+            return
+        }
         window.setFrame(frame, display: false, animate: false)
+    }
+
+    private func setTerminalFrame(
+        _ frame: NSRect,
+        display: Bool,
+        animate: Bool
+    ) {
+        applyingTerminalFrame = true
+        terminalPanel.setFrame(frame, display: display, animate: animate)
+        applyingTerminalFrame = false
     }
 
     private func screenNumber(for screen: NSScreen) -> NSNumber? {
@@ -674,6 +905,31 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         terminalPanel.level = GaiFloatingPanels.overlayLevel
     }
 
+    private func configureTerminalResizing(
+        for presentation: GaiCompanionPresentation,
+        screen: NSScreen
+    ) {
+        guard presentation == .maximized else {
+            terminalPanel.styleMask.remove(.resizable)
+            terminalPanel.minSize = .zero
+            terminalPanel.maxSize = NSSize(
+                width: CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude)
+            return
+        }
+
+        terminalPanel.styleMask.insert(.resizable)
+        let workArea = screen.visibleFrame.insetBy(dx: 10, dy: 10)
+        terminalPanel.minSize = NSSize(
+            width: min(
+                CGFloat(GaiCompanionExpandedTerminalSize.minimumWidth),
+                workArea.width),
+            height: min(
+                CGFloat(GaiCompanionExpandedTerminalSize.minimumHeight),
+                workArea.height))
+        terminalPanel.maxSize = workArea.size
+    }
+
     private func detachTerminalWindow() {
         if terminalPanel.parent === companionPanel {
             companionPanel.removeChildWindow(terminalPanel)
@@ -697,6 +953,30 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 screen: self.companionPanel.screen)
         }
         moveSettleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.moveSettleDelay,
+            execute: workItem)
+    }
+
+    private func scheduleTerminalMoveSettle() {
+        terminalMoveSettleGeneration += 1
+        let generation = terminalMoveSettleGeneration
+        terminalMoveSettleWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.terminalMoveSettleGeneration == generation,
+                  self.presentation == .maximized else { return }
+            self.terminalMoveSettleWorkItem = nil
+            guard NSEvent.pressedMouseButtons & 1 == 0 else {
+                self.scheduleTerminalMoveSettle()
+                return
+            }
+            self.manager?.rememberExpandedTerminalFrame(
+                id: self.runtimeID,
+                frame: self.terminalPanel.frame,
+                screen: self.terminalPanel.screen)
+        }
+        terminalMoveSettleWorkItem = workItem
         DispatchQueue.main.asyncAfter(
             deadline: .now() + Self.moveSettleDelay,
             execute: workItem)
@@ -803,6 +1083,7 @@ final class GaiCompanionLibraryWindowController: NSObject, NSWindowDelegate {
 
 private struct GaiCompanionMascotView: View {
     @ObservedObject var runtime: GaiCompanionRuntime
+    @ObservedObject var dropFeedback: GaiCompanionDropFeedback
 
     private var accent: Color { Color(gaiRGB: runtime.record.colorway.palette.baseRGB) }
     private var scaleFactor: CGFloat {
@@ -817,14 +1098,70 @@ private struct GaiCompanionMascotView: View {
             Color.clear
                 .contentShape(Rectangle())
 
+            if dropFeedback.isTargeted {
+                RoundedRectangle(cornerRadius: 22 * scaleFactor, style: .continuous)
+                    .fill(accent.opacity(0.16))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22 * scaleFactor, style: .continuous)
+                            .stroke(
+                                accent.opacity(0.95),
+                                style: StrokeStyle(
+                                    lineWidth: max(2, 2 * scaleFactor),
+                                    dash: [6 * scaleFactor, 4 * scaleFactor]))
+                    }
+                    .shadow(color: accent.opacity(0.72), radius: 16 * scaleFactor)
+                    .padding(4 * scaleFactor)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
+
             GaiCompanionSpriteView(
                 colorway: runtime.renderedColorway,
                 animation: runtime.animation,
                 size: spriteWidth)
                 .shadow(color: phaseGlow.opacity(0.85), radius: 11 * scaleFactor)
+                .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
+
+            if dropFeedback.isTargeted {
+                dropBadge(
+                    title: "Déposer ici",
+                    symbol: "arrow.down.doc.fill",
+                    color: accent)
+            } else if let fileCount = dropFeedback.acceptedFileCount {
+                dropBadge(
+                    title: fileCount == 1
+                        ? "Chemin inséré"
+                        : "\(fileCount) chemins insérés",
+                    symbol: "checkmark.circle.fill",
+                    color: .green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
+        .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
+    }
+
+    private func dropBadge(title: String, symbol: String, color: Color) -> some View {
+        VStack {
+            Label(title, systemImage: symbol)
+                .font(.system(size: max(9, 10 * scaleFactor), weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .padding(.horizontal, 8 * scaleFactor)
+                .padding(.vertical, 5 * scaleFactor)
+                .background(
+                    Capsule()
+                        .fill(Color.black.opacity(0.76))
+                        .overlay(Capsule().stroke(color.opacity(0.85), lineWidth: 1)))
+                .shadow(color: color.opacity(0.55), radius: 7 * scaleFactor)
+                .padding(.horizontal, 5 * scaleFactor)
+                .padding(.top, 5 * scaleFactor)
+            Spacer(minLength: 0)
+        }
+        .allowsHitTesting(false)
     }
 
     private var phaseGlow: Color {
@@ -844,6 +1181,7 @@ private struct GaiCompanionTerminalView: View {
     @ObservedObject var runtime: GaiCompanionRuntime
 
     let onToggleMaximized: () -> Void
+    let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
@@ -857,6 +1195,7 @@ private struct GaiCompanionTerminalView: View {
                     runtime: runtime,
                     surfaceView: surface,
                     onToggleMaximized: onToggleMaximized,
+                    onApplyLayoutPreset: onApplyLayoutPreset,
                     onToggleLock: onToggleLock,
                     onRename: onRename,
                     onClose: onClose,
@@ -884,6 +1223,7 @@ private struct GaiCompanionLiveTerminalView: View {
     @ObservedObject var surfaceView: Ghostty.SurfaceView
 
     let onToggleMaximized: () -> Void
+    let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
@@ -921,7 +1261,15 @@ private struct GaiCompanionLiveTerminalView: View {
                     onDialogVisibilityChanged: onDirectoryDialogVisibilityChanged)
                     .frame(maxWidth: 110, alignment: .leading)
 
-                Spacer(minLength: 0)
+                GaiCompanionWindowDragArea()
+                    .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay {
+                        Capsule()
+                            .fill(Color.white.opacity(0.16))
+                            .frame(width: 22, height: 2)
+                            .allowsHitTesting(false)
+                    }
+                    .help("Move terminal window")
 
                 GaiCompanionHeaderIconButton(
                     symbol: runtime.isTerminalLocked ? "lock.fill" : "lock.open",
@@ -934,6 +1282,7 @@ private struct GaiCompanionLiveTerminalView: View {
                     accessibilityLabel: "Keep terminal open",
                     accessibilityValue: runtime.isTerminalLocked ? "On" : "Off",
                     action: onToggleLock)
+                GaiCompanionLayoutPresetMenu(onSelect: onApplyLayoutPreset)
                 GaiCompanionHeaderIconButton(
                     symbol: runtime.presentation == .maximized
                         ? "arrow.down.right.and.arrow.up.left"
@@ -1081,6 +1430,78 @@ private struct GaiCompanionHeaderIconButton: View {
             .help(help)
             .accessibilityLabel(accessibilityLabel ?? help)
             .accessibilityValue(accessibilityValue ?? "")
+    }
+}
+
+private struct GaiCompanionLayoutPresetMenu: View {
+    let onSelect: (GaiCompanionTerminalLayoutPreset) -> Void
+
+    var body: some View {
+        Menu {
+            presetButton(.fullScreen)
+            Divider()
+            Section("Halves") {
+                presetButton(.leftHalf)
+                presetButton(.rightHalf)
+                presetButton(.topHalf)
+                presetButton(.bottomHalf)
+            }
+            Section("Quarters") {
+                presetButton(.topLeftQuarter)
+                presetButton(.topRightQuarter)
+                presetButton(.bottomLeftQuarter)
+                presetButton(.bottomRightQuarter)
+            }
+        } label: {
+            Image(systemName: "rectangle.split.2x1")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.62))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Arrange terminal window")
+        .accessibilityLabel("Arrange terminal window")
+    }
+
+    private func presetButton(_ preset: GaiCompanionTerminalLayoutPreset) -> some View {
+        Button {
+            onSelect(preset)
+        } label: {
+            Label(preset.title, systemImage: preset.symbol)
+        }
+    }
+}
+
+private extension GaiCompanionTerminalLayoutPreset {
+    var title: String {
+        switch self {
+        case .fullScreen: "Full screen"
+        case .leftHalf: "Left half"
+        case .rightHalf: "Right half"
+        case .topHalf: "Top half"
+        case .bottomHalf: "Bottom half"
+        case .topLeftQuarter: "Top-left quarter"
+        case .topRightQuarter: "Top-right quarter"
+        case .bottomLeftQuarter: "Bottom-left quarter"
+        case .bottomRightQuarter: "Bottom-right quarter"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .fullScreen: "rectangle.inset.filled"
+        case .leftHalf: "rectangle.lefthalf.inset.filled"
+        case .rightHalf: "rectangle.righthalf.inset.filled"
+        case .topHalf: "rectangle.tophalf.inset.filled"
+        case .bottomHalf: "rectangle.bottomhalf.inset.filled"
+        case .topLeftQuarter: "arrow.up.left.square.fill"
+        case .topRightQuarter: "arrow.up.right.square.fill"
+        case .bottomLeftQuarter: "arrow.down.left.square.fill"
+        case .bottomRightQuarter: "arrow.down.right.square.fill"
+        }
     }
 }
 
@@ -1829,6 +2250,7 @@ private struct GaiCompanionCompactRow: View {
     let onSelect: () -> Void
     @State private var isChoosingColor = false
     @State private var isHovering = false
+    @StateObject private var dropFeedback = GaiCompanionDropFeedback()
 
     private var selectionAccent: Color {
         Color(gaiRGB: GaiCompanionColorway.purple.palette.baseRGB)
@@ -1837,6 +2259,33 @@ private struct GaiCompanionCompactRow: View {
     var body: some View {
         HStack(spacing: 9) {
             avatarControl
+                .overlay {
+                    if dropFeedback.isTargeted {
+                        Circle()
+                            .fill(selectionAccent.opacity(0.16))
+                            .overlay {
+                                Circle()
+                                    .stroke(
+                                        selectionAccent,
+                                        style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+                            }
+                            .allowsHitTesting(false)
+                    } else if dropFeedback.acceptedFileCount != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.green)
+                            .padding(3)
+                            .background(Circle().fill(Color.black.opacity(0.72)))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
+                .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
+                .dropDestination(for: URL.self) { urls, _ in
+                    acceptDroppedFileURLs(urls)
+                } isTargeted: { targeted in
+                    dropFeedback.setTargeted(targeted)
+                }
 
             VStack(alignment: .leading, spacing: 2) {
                 GaiAgentNameEditor(
@@ -1991,6 +2440,14 @@ private struct GaiCompanionCompactRow: View {
             }
         }
         .frame(width: 42, height: 42)
+    }
+
+    private func acceptDroppedFileURLs(_ urls: [URL]) -> Bool {
+        let fileURLs = urls.filter(\.isFileURL)
+        guard !fileURLs.isEmpty else { return false }
+        manager.insertDroppedFileURLs(fileURLs, into: runtime.id)
+        dropFeedback.showAccepted(fileCount: fileURLs.count)
+        return true
     }
 
     private var avatar: some View {

@@ -75,9 +75,14 @@ struct GaiCompanionCompactSize: Codable, Equatable, Sendable {
     var width: Double
     var height: Double
 
-    static let standard = Self(width: 480, height: 300)
+    static let standard = Self(width: 720, height: 440)
+    static let legacyStandard = Self(width: 480, height: 300)
     static let minimum = Self(width: 320, height: 200)
     static let maximum = Self(width: 1_600, height: 1_200)
+
+    var migratingLegacyStandard: Self {
+        self == Self.legacyStandard ? Self.standard : self
+    }
 
     init(width: Double, height: Double) {
         self.width = Self.normalize(
@@ -97,8 +102,8 @@ struct GaiCompanionCompactSize: Codable, Equatable, Sendable {
         case height
     }
 
-    private static let standardWidth = 480.0
-    private static let standardHeight = 300.0
+    private static let standardWidth = 720.0
+    private static let standardHeight = 440.0
     private static let minimumWidth = 320.0
     private static let minimumHeight = 200.0
     private static let maximumWidth = 1_600.0
@@ -121,6 +126,90 @@ struct GaiCompanionCompactSize: Codable, Equatable, Sendable {
     ) -> Double {
         guard value.isFinite else { return fallback }
         return min(max(value, minimum), maximum)
+    }
+}
+
+/// The shared size used whenever a terminal opens in its expanded state.
+///
+/// A missing value deliberately means "fit the active display". Once the
+/// user resizes any expanded terminal, that exact size becomes the default for
+/// every agent and survives relaunches. Position is persisted independently so
+/// moving the window never changes this shared size default.
+struct GaiCompanionExpandedTerminalSize: Codable, Equatable, Sendable {
+    nonisolated static let persistenceKey = "gai.companion.expanded-terminal-size.v1"
+    nonisolated static let minimumWidth = 560.0
+    nonisolated static let minimumHeight = 360.0
+
+    var width: Double
+    var height: Double
+
+    init(width: Double, height: Double) {
+        self.width = Self.normalize(
+            width,
+            fallback: Self.minimumWidth,
+            minimum: Self.minimumWidth)
+        self.height = Self.normalize(
+            height,
+            fallback: Self.minimumHeight,
+            minimum: Self.minimumHeight)
+    }
+
+    init?(userDefaults: UserDefaults) {
+        guard let data = userDefaults.data(forKey: Self.persistenceKey),
+              let decoded = try? JSONDecoder().decode(Self.self, from: data)
+        else { return nil }
+        self.init(width: decoded.width, height: decoded.height)
+    }
+
+    func persist(to userDefaults: UserDefaults) -> Bool {
+        guard let data = try? JSONEncoder().encode(self) else { return false }
+        userDefaults.set(data, forKey: Self.persistenceKey)
+        return true
+    }
+
+    private static func normalize(
+        _ value: Double,
+        fallback: Double,
+        minimum: Double
+    ) -> Double {
+        guard value.isFinite else { return fallback }
+        return max(value, minimum)
+    }
+}
+
+/// Display-independent placement of the shared expanded terminal window.
+///
+/// The center is normalized inside the usable display work area. This keeps a
+/// user-chosen placement stable across resolution changes, while `displayID`
+/// lets a terminal moved to another monitor reopen on that same monitor.
+struct GaiCompanionExpandedTerminalPosition: Codable, Equatable, Sendable {
+    nonisolated static let persistenceKey = "gai.companion.expanded-terminal-position.v1"
+
+    var normalizedCenter: GaiCompanionNormalizedPosition
+    var displayID: String?
+
+    init(
+        normalizedCenter: GaiCompanionNormalizedPosition,
+        displayID: String?
+    ) {
+        self.normalizedCenter = normalizedCenter
+        let cleanedDisplayID = displayID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayID = cleanedDisplayID?.isEmpty == false ? cleanedDisplayID : nil
+    }
+
+    init?(userDefaults: UserDefaults) {
+        guard let data = userDefaults.data(forKey: Self.persistenceKey),
+              let decoded = try? JSONDecoder().decode(Self.self, from: data)
+        else { return nil }
+        self.init(
+            normalizedCenter: decoded.normalizedCenter,
+            displayID: decoded.displayID)
+    }
+
+    func persist(to userDefaults: UserDefaults) -> Bool {
+        guard let data = try? JSONEncoder().encode(self) else { return false }
+        userDefaults.set(data, forKey: Self.persistenceKey)
+        return true
     }
 }
 
@@ -273,7 +362,7 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
             launchCommand: launchCommand,
             normalizedPosition: normalizedPosition,
             displayID: displayID,
-            compactSize: compactSize,
+            compactSize: compactSize.migratingLegacyStandard,
             scalePercent: scalePercent,
             completionSoundEnabled: completionSoundEnabled)
     }
