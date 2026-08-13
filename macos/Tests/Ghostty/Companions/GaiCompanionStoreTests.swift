@@ -165,7 +165,7 @@ struct GaiCompanionStoreTests {
         #expect(decodedBelowRange.value == 50)
         #expect(decodedAboveRange.value == 200)
         #expect(GaiCompanionVisualMetrics.scaledPanelWidth(for: .init(50)) == 71)
-        #expect(GaiCompanionVisualMetrics.scaledPanelHeight(for: .init(100)) == 158)
+        #expect(GaiCompanionVisualMetrics.scaledPanelHeight(for: .init(100)) == 174)
         #expect(GaiCompanionVisualMetrics.scaledSpriteWidth(for: .init(200)) == 224)
     }
 

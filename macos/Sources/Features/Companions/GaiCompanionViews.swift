@@ -5,11 +5,49 @@ import GhosttyKit
 import QuartzCore
 import SwiftUI
 
-private final class GaiCompanionPanel: NSPanel {
+private final class GaiCompanionPanel: NSPanel, NSDraggingDestination {
     var acceptsKeyWindow = false
+    var onFileDropTargetChanged: ((Bool) -> Void)?
+    var onFileDrop: (([URL]) -> Void)?
 
     override var canBecomeKey: Bool { acceptsKeyWindow }
     override var canBecomeMain: Bool { acceptsKeyWindow }
+
+    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dragOperation(for: sender)
+    }
+
+    func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dragOperation(for: sender)
+    }
+
+    func draggingExited(_ sender: NSDraggingInfo?) {
+        onFileDropTargetChanged?(false)
+    }
+
+    func draggingEnded(_ sender: NSDraggingInfo) {
+        onFileDropTargetChanged?(false)
+    }
+
+    func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        GaiCompanionFileDropPayload.isAdvertised(on: sender.draggingPasteboard)
+    }
+
+    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = GaiCompanionFileDropPayload.fileURLs(
+            from: sender.draggingPasteboard)
+        onFileDropTargetChanged?(false)
+        guard !urls.isEmpty else { return false }
+        onFileDrop?(urls)
+        return true
+    }
+
+    private func dragOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        let accepted = GaiCompanionFileDropPayload.isAdvertised(
+            on: sender.draggingPasteboard)
+        onFileDropTargetChanged?(accepted)
+        return accepted ? .copy : []
+    }
 }
 
 private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingView<Content> {
@@ -53,6 +91,9 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     var onClick: (() -> Void)?
     var onDoubleClick: (() -> Void)?
     var onDragBegan: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    var onFileDropTargetChanged: ((Bool) -> Void)?
+    var onFileDrop: (([URL]) -> Void)?
 
     private let hostingView: NSHostingView<Content>
     private var clickGeneration: UInt64 = 0
@@ -87,6 +128,49 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     override func layout() {
         super.layout()
         hostingView.frame = bounds
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        unregisterDraggedTypes()
+        guard window != nil else { return }
+        registerForDraggedTypes(GaiCompanionFileDropPayload.readableTypes)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dragOperation(for: sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dragOperation(for: sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onFileDropTargetChanged?(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        onFileDropTargetChanged?(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        GaiCompanionFileDropPayload.isAdvertised(on: sender.draggingPasteboard)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = GaiCompanionFileDropPayload.fileURLs(
+            from: sender.draggingPasteboard)
+        onFileDropTargetChanged?(false)
+        guard !urls.isEmpty else { return false }
+        onFileDrop?(urls)
+        return true
+    }
+
+    private func dragOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        let accepted = GaiCompanionFileDropPayload.isAdvertised(
+            on: sender.draggingPasteboard)
+        onFileDropTargetChanged?(accepted)
+        return accepted ? .copy : []
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -140,12 +224,19 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let windowDistance = hypot(
             window.frame.minX - startOrigin.x,
             window.frame.minY - startOrigin.y)
+        let completedDrag = exceededDragThreshold
+            || pointerDistance >= 6
+            || windowDistance >= 6
+        if completedDrag {
+            if !exceededDragThreshold {
+                onDragBegan?()
+            }
+            onDragEnded?()
+            return
+        }
         let endInWindow = window.convertPoint(fromScreen: endPointer)
         let endInView = convert(endInWindow, from: nil)
-        guard !exceededDragThreshold,
-              pointerDistance < 6,
-              windowDistance < 6,
-              bounds.contains(endInView) else { return }
+        guard bounds.contains(endInView) else { return }
 
         clickGeneration &+= 1
         let generation = clickGeneration
@@ -306,7 +397,7 @@ private enum GaiCompanionPlacementTiming {
     }
 }
 
-final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingDestination {
+final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     let companionPanel: NSPanel
     let terminalPanel: NSPanel
 
@@ -319,8 +410,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
     private var presentation: GaiCompanionPresentation = .collapsed
     private var visibilityGeneration = 0
     private var previousCompanionFrame: NSRect?
-    private var moveSettleWorkItem: DispatchWorkItem?
-    private var moveSettleGeneration = 0
+    private var interceptingExternalFileDrag = false
     private var terminalMoveSettleWorkItem: DispatchWorkItem?
     private var terminalMoveSettleGeneration = 0
     private var livePlacement: GaiCompanionTerminalPlacement = .top
@@ -335,6 +425,15 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
     /// and perform one exact final layout once the pointer has settled.
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
+    private static let restingCompanionLevel = NSWindow.Level(
+        rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+    // AppKit's drag image lives at CGWindowLevelKey.draggingWindow. A panel
+    // above that level remains visible, but is skipped as a native destination
+    // and the drop reaches the application underneath. During a file drag,
+    // keep the mascot above ordinary/status windows and immediately below the
+    // system drag layer so it becomes the one true destination.
+    private static let fileDragInterceptionLevel = NSWindow.Level(
+        rawValue: Int(CGWindowLevelForKey(.draggingWindow)) - 1)
 
     init(runtime: GaiCompanionRuntime, manager: GaiCompanionManager) {
         runtimeID = runtime.id
@@ -343,12 +442,15 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         self.dropFeedback = dropFeedback
 
         let companionPanel = GaiCompanionPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 142, height: 158),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: GaiCompanionVisualMetrics.basePanelWidth,
+                height: GaiCompanionVisualMetrics.basePanelHeight),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false)
-        companionPanel.level = NSWindow.Level(
-            rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+        companionPanel.level = Self.restingCompanionLevel
         companionPanel.collectionBehavior = [
             .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
         ]
@@ -390,8 +492,16 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         super.init()
         companionPanel.delegate = self
         terminalPanel.delegate = self
-        companionPanel.registerForDraggedTypes(
-            GaiCompanionFileDropPayload.readableTypes)
+        companionPanel.onFileDropTargetChanged = { [weak self] targeted in
+            self?.updateDropTarget(targeted)
+        }
+        companionPanel.onFileDrop = { [weak self, weak manager] urls in
+            guard let self else { return }
+            self.dropFeedback.showAccepted(fileCount: urls.count)
+            Task { @MainActor in
+                manager?.insertDroppedFileURLs(urls, into: runtime.id)
+            }
+        }
 
         let mascotRoot = GaiCompanionMascotView(
             runtime: runtime,
@@ -406,8 +516,31 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         mascotHost.onDragBegan = { [weak manager] in
             manager?.companionDragDidBegin(id: runtime.id)
         }
+        mascotHost.onDragEnded = { [weak self, weak manager] in
+            guard let self else { return }
+            manager?.panelDidMove(
+                for: runtime.id,
+                frame: self.companionPanel.frame,
+                screen: self.companionPanel.screen)
+        }
+        mascotHost.onFileDropTargetChanged = { [weak self] targeted in
+            self?.updateDropTarget(targeted)
+        }
+        mascotHost.onFileDrop = { [weak self, weak manager] urls in
+            guard let self else { return }
+            self.dropFeedback.showAccepted(fileCount: urls.count)
+            Task { @MainActor in
+                manager?.insertDroppedFileURLs(urls, into: runtime.id)
+            }
+        }
         mascotHost.autoresizingMask = [.width, .height]
         companionPanel.contentView = mascotHost
+        // Installing an NSHostingView hierarchy can replace native drag
+        // registrations. Register both concrete destinations only after the
+        // final content view is attached to the panel.
+        companionPanel.unregisterDraggedTypes()
+        companionPanel.registerForDraggedTypes(
+            GaiCompanionFileDropPayload.readableTypes)
 
         let terminalRoot = GaiCompanionTerminalView(
             runtime: runtime,
@@ -555,9 +688,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         screen: NSScreen
     ) {
         resetLivePlacementAnimation()
-        moveSettleGeneration += 1
-        moveSettleWorkItem?.cancel()
-        moveSettleWorkItem = nil
         terminalMoveSettleGeneration += 1
         terminalMoveSettleWorkItem?.cancel()
         terminalMoveSettleWorkItem = nil
@@ -596,9 +726,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
 
     func close() {
         resetLivePlacementAnimation()
-        moveSettleGeneration += 1
-        moveSettleWorkItem?.cancel()
-        moveSettleWorkItem = nil
         terminalMoveSettleGeneration += 1
         terminalMoveSettleWorkItem?.cancel()
         terminalMoveSettleWorkItem = nil
@@ -607,6 +734,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         }
         companionPanel.delegate = nil
         terminalPanel.delegate = nil
+        if let companionPanel = companionPanel as? GaiCompanionPanel {
+            companionPanel.onFileDropTargetChanged = nil
+            companionPanel.onFileDrop = nil
+        }
+        companionPanel.unregisterDraggedTypes()
         companionPanel.orderOut(nil)
         terminalPanel.orderOut(nil)
         companionPanel.close()
@@ -637,7 +769,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         let frame = companionPanel.frame
         guard let previousFrame = previousCompanionFrame else {
             previousCompanionFrame = frame
-            scheduleMoveSettle()
             return
         }
         previousCompanionFrame = frame
@@ -653,7 +784,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
             for: runtimeID,
             frame: frame,
             screen: companionPanel.screen)
-        scheduleMoveSettle()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -684,43 +814,15 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         dropFeedback.showAccepted(fileCount: fileCount)
     }
 
-    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let accepted = GaiCompanionFileDropPayload.isAdvertised(
-            on: sender.draggingPasteboard)
-        updateDropTarget(accepted)
-        return accepted ? .copy : []
-    }
-
-    func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let accepted = GaiCompanionFileDropPayload.isAdvertised(
-            on: sender.draggingPasteboard)
-        updateDropTarget(accepted)
-        return accepted ? .copy : []
-    }
-
-    func draggingExited(_ sender: NSDraggingInfo?) {
-        updateDropTarget(false)
-    }
-
-    func draggingEnded(_ sender: NSDraggingInfo) {
-        updateDropTarget(false)
-    }
-
-    func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        GaiCompanionFileDropPayload.isAdvertised(on: sender.draggingPasteboard)
-    }
-
-    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let urls = GaiCompanionFileDropPayload.fileURLs(
-            from: sender.draggingPasteboard)
-        updateDropTarget(false)
-        guard !urls.isEmpty else { return false }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.manager?.insertDroppedFileURLs(urls, into: self.runtimeID)
+    func setExternalFileDragInterceptionActive(_ active: Bool) {
+        guard interceptingExternalFileDrag != active else { return }
+        interceptingExternalFileDrag = active
+        companionPanel.level = active
+            ? Self.fileDragInterceptionLevel
+            : Self.restingCompanionLevel
+        if companionPanel.isVisible {
+            companionPanel.orderFrontRegardless()
         }
-        dropFeedback.showAccepted(fileCount: urls.count)
-        return true
     }
 
     private func updateDropTarget(_ targeted: Bool) {
@@ -936,28 +1038,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate, NSDraggingD
         }
     }
 
-    private func scheduleMoveSettle() {
-        moveSettleGeneration += 1
-        let generation = moveSettleGeneration
-        moveSettleWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.moveSettleGeneration == generation else { return }
-            self.moveSettleWorkItem = nil
-            guard NSEvent.pressedMouseButtons & 1 == 0 else {
-                self.scheduleMoveSettle()
-                return
-            }
-            self.manager?.panelDidMove(
-                for: self.runtimeID,
-                frame: self.companionPanel.frame,
-                screen: self.companionPanel.screen)
-        }
-        moveSettleWorkItem = workItem
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.moveSettleDelay,
-            execute: workItem)
-    }
-
     private func scheduleTerminalMoveSettle() {
         terminalMoveSettleGeneration += 1
         let generation = terminalMoveSettleGeneration
@@ -1114,12 +1194,17 @@ private struct GaiCompanionMascotView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
 
-            GaiCompanionSpriteView(
-                colorway: runtime.renderedColorway,
-                animation: runtime.animation,
-                size: spriteWidth)
-                .shadow(color: phaseGlow.opacity(0.85), radius: 11 * scaleFactor)
-                .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
+            VStack(spacing: -4 * scaleFactor) {
+                GaiCompanionSpriteView(
+                    colorway: runtime.renderedColorway,
+                    animation: runtime.animation,
+                    size: spriteWidth)
+                    .shadow(color: phaseGlow.opacity(0.85), radius: 11 * scaleFactor)
+                    .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
+
+                nameBadge
+            }
+            .padding(.bottom, max(1, 2 * scaleFactor))
 
             if dropFeedback.isTargeted {
                 dropBadge(
@@ -1141,6 +1226,52 @@ private struct GaiCompanionMascotView: View {
         .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
         .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
+    }
+
+    private var nameBadge: some View {
+        Text(runtime.record.displayName)
+            .font(.system(
+                size: 13 * scaleFactor,
+                weight: .semibold,
+                design: .rounded))
+            .foregroundStyle(Color.white.opacity(0.94))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 8 * scaleFactor)
+            .padding(.vertical, 3.5 * scaleFactor)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .fill(Color.gray.opacity(0.16))
+                    }
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .stroke(
+                                Color.white.opacity(0.28),
+                                lineWidth: 0.8 * scaleFactor)
+                    }
+            }
+            .overlay(alignment: .top) {
+                Capsule(style: .continuous)
+                    .stroke(
+                        Color.white.opacity(0.12),
+                        lineWidth: 0.6 * scaleFactor)
+                    .mask {
+                        LinearGradient(
+                            colors: [.white, .clear],
+                            startPoint: .top,
+                            endPoint: .bottom)
+                    }
+            }
+            .shadow(
+                color: Color.black.opacity(0.28),
+                radius: 5 * scaleFactor,
+                y: 2 * scaleFactor)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     private func dropBadge(title: String, symbol: String, color: Color) -> some View {

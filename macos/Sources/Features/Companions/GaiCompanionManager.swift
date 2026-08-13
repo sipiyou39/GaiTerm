@@ -1013,6 +1013,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             if globalFileDropTargetID != targetID {
                 clearGlobalFileDropTarget()
                 globalFileDropTargetID = targetID
+                controller.setExternalFileDragInterceptionActive(true)
                 controller.setFallbackFileDropTargeted(true)
             }
             if !urls.isEmpty {
@@ -1062,6 +1063,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func clearGlobalFileDropTarget() {
         if let targetID = globalFileDropTargetID {
+            panelControllers[targetID]?.setExternalFileDragInterceptionActive(false)
             panelControllers[targetID]?.setFallbackFileDropTargeted(false)
         }
         globalFileDropTargetID = nil

@@ -239,7 +239,9 @@ struct GaiCompanionScalePercent: Codable, Equatable, Sendable {
 /// One source of truth for the clickable panel and rendered mascot scale.
 enum GaiCompanionVisualMetrics {
     static let basePanelWidth = 142.0
-    static let basePanelHeight = 158.0
+    // The sprite keeps its original dimensions. The additional transparent
+    // height belongs to the floating name badge beneath the mascot's feet.
+    static let basePanelHeight = 174.0
     static let baseSpriteWidth = 112.0
 
     static func scaleFactor(for scalePercent: GaiCompanionScalePercent) -> Double {
