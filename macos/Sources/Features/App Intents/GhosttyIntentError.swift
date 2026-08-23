@@ -5,9 +5,9 @@ enum GhosttyIntentError: Error, CustomLocalizedStringResourceConvertible {
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case .appUnavailable: "DouDou Company isn't properly initialized."
+        case .appUnavailable: "Teddy CLI isn't properly initialized."
         case .surfaceNotFound: "The terminal no longer exists."
-        case .permissionDenied: "DouDou Company doesn't allow Shortcuts."
+        case .permissionDenied: "Teddy CLI doesn't allow Shortcuts."
         }
     }
 }

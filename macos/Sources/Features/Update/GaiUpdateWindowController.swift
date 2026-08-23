@@ -61,7 +61,7 @@ private enum GaiUpdateReleaseNotes {
             id: "doudou-company",
             introducedVersion: "2.0.0",
             icon: "building.2.fill",
-            title: "Bienvenue chez DouDou Company",
+            title: "Bienvenue chez Teddy CLI",
             summary: "GaiTerm devient une petite entreprise d'agents numeriques.",
             points: [
                 "Chaque agent possede son propre terminal, son nom, sa couleur, sa taille et son dossier de travail.",
@@ -100,7 +100,7 @@ private enum GaiUpdateReleaseNotes {
             introducedVersion: "2.0.0",
             icon: "waveform.path.ecg",
             title: "Suivi de travail robuste",
-            summary: "DouDou Company comprend le cycle de travail de tes CLI.",
+            summary: "Teddy CLI comprend le cycle de travail de tes CLI.",
             points: [
                 "Codex, Claude Code, Agy et OpenCode signalent leur activite par des evenements authentifies et ordonnes.",
                 "Les sous-agents et les evenements repetes ne declenchent plus de fausses fins de travail.",
@@ -114,7 +114,7 @@ private enum GaiUpdateReleaseNotes {
             title: "Reprise Codex et Claude",
             summary: "Tes conversations CLI peuvent repartir au bon endroit.",
             points: [
-                "Au lancement, DouDou Company detecte les sessions Codex et Claude liees aux panes restaurees.",
+                "Au lancement, Teddy CLI detecte les sessions Codex et Claude liees aux panes restaurees.",
                 "Tu peux reprendre une session precise, tout reprendre d'un coup, ou ignorer la reprise.",
                 "Les panes se restaurent sans relancer automatiquement une ancienne conversation : rien ne repart sans ton clic.",
                 "La fenetre de reprise reste au premier plan et s'ouvre au centre de l'ecran.",
@@ -128,7 +128,7 @@ private enum GaiUpdateReleaseNotes {
             summary: "Chaque pane garde son identite agent meme si tu changes son dossier.",
             points: [
                 "Changer le dossier d'un pane Codex ou Claude ne casse plus son lien avec la reprise de session.",
-                "Au redemarrage, DouDou Company peut matcher chaque conversation avec le dossier propre a son pane, pas seulement avec le dossier du workspace.",
+                "Au redemarrage, Teddy CLI peut matcher chaque conversation avec le dossier propre a son pane, pas seulement avec le dossier du workspace.",
                 "Le terminal est toujours rouvert proprement, mais l'identite Codex/Claude reste attachee au pane.",
             ],
             color: Color(red: 0.58, green: 0.78, blue: 1.0)),
@@ -162,7 +162,7 @@ private enum GaiUpdateReleaseNotes {
             introducedVersion: "1.0.9",
             icon: "externaldrive.fill",
             title: "Memoire de session",
-            summary: "DouDou Company revient avec ton espace de travail au lieu de repartir a zero.",
+            summary: "Teddy CLI revient avec ton espace de travail au lieu de repartir a zero.",
             points: [
                 "Les workspaces se rouvrent par defaut au lancement.",
                 "La disposition des panes, leurs noms, dossiers, commandes CLI et options de notification sont restaurees.",
@@ -189,7 +189,7 @@ private enum GaiUpdateReleaseNotes {
             title: "Notifications et mises a jour",
             summary: "Les alertes restent utiles sans polluer ton flux.",
             points: [
-                "Les sons CLI sont joues par DouDou Company, meme quand les bannieres macOS ne suffisent pas.",
+                "Les sons CLI sont joues par Teddy CLI, meme quand les bannieres macOS ne suffisent pas.",
                 "Rouge signale une reponse non lue, orange signale une CLI qui attend ton input.",
                 "La confirmation de fermeture passe au premier plan, devant la stage, pour pouvoir terminer les processus sans blocage.",
                 "La fenetre de mise a jour reste simple; les notes detaillees apparaissent seulement apres installation.",
@@ -287,7 +287,7 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
                 install()
             })
         let window = makeWindow(
-            title: "DouDou Company Update",
+            title: "Teddy CLI Update",
             size: NSSize(width: 430, height: 230),
             rootView: view)
         updateWindow = window
@@ -340,7 +340,7 @@ final class GaiUpdateWindowController: NSObject, NSWindowDelegate {
             sections: sections,
             close: { [weak self] in self?.closeNotesWindow() })
         let window = makeWindow(
-            title: "DouDou Company Release Notes",
+            title: "Teddy CLI Release Notes",
             size: NSSize(width: 760, height: 690),
             rootView: view)
         notesWindow = window
@@ -443,13 +443,13 @@ private struct GaiUpdateAvailableWindow: View {
                     Text("Mise a jour disponible")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
-                    Text("DouDou Company \(version) est pret a etre installe.")
+                    Text("Teddy CLI \(version) est pret a etre installe.")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.white.opacity(0.68))
                 }
             }
 
-            Text("DouDou Company peut l'installer maintenant, ou te le rappeler plus tard.")
+            Text("Teddy CLI peut l'installer maintenant, ou te le rappeler plus tard.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.58))
                 .fixedSize(horizontal: false, vertical: true)
@@ -514,7 +514,7 @@ private struct GaiReleaseNotesWindow: View {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(.white.opacity(0.075)))
 
-            Text("DouDou Company \(version)")
+            Text("Teddy CLI \(version)")
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
 

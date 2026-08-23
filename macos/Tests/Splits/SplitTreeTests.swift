@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import Ghostty
+@testable import TeddyCLI
 
 class MockView: NSView, Codable, Identifiable {
     let id: UUID

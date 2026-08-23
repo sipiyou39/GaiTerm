@@ -44,8 +44,8 @@ func requestIntentPermission() async -> Bool {
             }
 
             PermissionRequest.show(
-                "com.sipiyou.gaiterm.shortcutsPermission",
-                message: "Allow Shortcuts to interact with DouDou Company?",
+                "com.sipiyou.teddycli.shortcutsPermission",
+                message: "Allow Shortcuts to interact with Teddy CLI?",
                 allowDuration: .forever,
                 rememberDuration: nil,
             ) { response in

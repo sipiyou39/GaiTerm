@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_ROOT="$ROOT_DIR/perf-logs"
 LATEST_FILE="$LOG_ROOT/latest"
-PROC_MATCH='GaiTerm.app/Contents/MacOS/ghostty'
+PROC_MATCH='Teddy CLI.app/Contents/MacOS/teddycli'
 
 usage() {
   cat <<'USAGE'
@@ -17,7 +17,7 @@ Default interval is 2s. Default spike thresholds: app 120%, child 80%.
 USAGE
 }
 
-find_gaiterm_pid() {
+find_teddycli_pid() {
   local pids
   pids="$(pgrep -f "$PROC_MATCH" 2>/dev/null || true)"
   awk 'NF { print; exit }' <<<"$pids"
@@ -81,7 +81,7 @@ start_capture() {
   fi
   ln -sfn "$run_dir" "$LATEST_FILE"
 
-  echo "Started GaiTerm perf capture"
+  echo "Started Teddy CLI perf capture"
   echo "Run dir: $run_dir"
   echo "Collector PID: ${pid:-pending}"
   if [[ -f "$run_dir/tmux.session" ]]; then
@@ -153,7 +153,7 @@ EOF
 
   local log_pid=""
   log stream --style compact \
-    --predicate 'process == "ghostty" OR process == "GaiTerm" OR process CONTAINS "gaiterm"' \
+    --predicate 'process == "teddycli" OR process == "Teddy CLI" OR process CONTAINS "teddycli"' \
     >"$run_dir/unified-log.txt" 2>"$run_dir/unified-log.err" &
   log_pid="$!"
 
@@ -175,7 +175,7 @@ EOF
   while true; do
     local ts pid
     ts="$(now_iso)"
-    pid="$(find_gaiterm_pid)"
+    pid="$(find_teddycli_pid)"
 
     if [[ -z "$pid" ]]; then
       local load1 load5 load15
@@ -298,7 +298,7 @@ summary() {
 
   local out="$run_dir/summary.txt"
   {
-    echo "GaiTerm perf summary"
+    echo "Teddy CLI perf summary"
     echo "Run dir: $run_dir"
     echo
     if [[ -f "$run_dir/run.env" ]]; then

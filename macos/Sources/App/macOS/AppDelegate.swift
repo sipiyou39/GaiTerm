@@ -97,7 +97,7 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
-    /// DouDou Company uses one stable terminal surface per agent in every
+    /// Teddy CLI uses one stable terminal surface per agent in every
     /// macOS configuration. Debug keeps a separate bundle identity so it can
     /// coexist safely with the installed release.
     lazy var gaiWorkspaceManager = GaiCompanionManager(ghostty: ghostty)
@@ -433,7 +433,7 @@ class AppDelegate: NSObject,
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
         }
-        // DouDou Company's home is the agent library, not a classic terminal
+        // Teddy CLI's home is the agent library, not a classic terminal
         // window. Reopening it preserves the independent Hide Agents choice.
         gaiWorkspaceManager.reveal()
         teddyVoiceWindowController.show(activate: true)
@@ -490,7 +490,7 @@ class AppDelegate: NSObject,
             // may want to show this as a sheet on the focused window (especially if we're
             // opening a tab). I'm not sure.
             let alert = NSAlert()
-            alert.messageText = "Allow DouDou Company to execute \"\(filename)\"?"
+            alert.messageText = "Allow Teddy CLI to execute \"\(filename)\"?"
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Cancel")
             alert.alertStyle = .warning
@@ -966,7 +966,7 @@ class AppDelegate: NSObject,
 
     @IBAction func showAbout(_ sender: Any?) {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "DouDou Company",
+            .applicationName: "Teddy CLI",
         ])
     }
 
@@ -1072,7 +1072,7 @@ extension AppDelegate {
 
     private func reloadDockMenu() {
         let reveal = NSMenuItem(
-            title: "Open DouDou Company",
+            title: "Open Teddy CLI",
             action: #selector(showGaiTerm),
             keyEquivalent: "")
         let toggleAgents = NSMenuItem(
@@ -1129,13 +1129,13 @@ extension AppDelegate {
 
         // The agent UI has no split tree; each terminal owns one stable agent.
         // Keep the legacy outlets connected while removing those commands from
-        // the public DouDou Company menus.
-        menuAbout?.title = "About DouDou Company"
-        menuQuit?.title = "Quit DouDou Company"
+        // the public Teddy CLI menus.
+        menuAbout?.title = "About Teddy CLI"
+        menuQuit?.title = "Quit Teddy CLI"
         menuNewWindow?.title = "Hire Agent"
         menuNewTab?.isHidden = true
         menuCloseAllWindows?.title = "Remove All Agents"
-        menuShowGaiTerm?.title = "Open DouDou Company"
+        menuShowGaiTerm?.title = "Open Teddy CLI"
         configureGaiAgentVisibilityMenuItem()
         [
             menuSplitRight, menuSplitLeft, menuSplitUp, menuSplitDown,
@@ -1264,7 +1264,7 @@ extension AppDelegate {
                 let alert = NSAlert()
                 alert.messageText = "Failed to Set Default Terminal"
                 alert.informativeText = """
-                DouDou Company could not be set as the default terminal application.
+                Teddy CLI could not be set as the default terminal application.
 
                 Error: \(error.localizedDescription)
                 """
@@ -1323,7 +1323,7 @@ extension AppDelegate {
         }
 
         let alert = NSAlert()
-        alert.messageText = "Quit DouDou Company?"
+        alert.messageText = "Quit Teddy CLI?"
         alert.informativeText = "At least one terminal process is still running. If you quit, those processes will be terminated."
         alert.addButton(withTitle: "Terminate")
         alert.addButton(withTitle: "Cancel")

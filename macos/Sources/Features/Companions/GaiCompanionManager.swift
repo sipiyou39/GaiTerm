@@ -244,11 +244,11 @@ struct GaiCompanionBulkRemovalPlan: Equatable, Sendable {
     var explanation: String {
         if agentIDs.count == 1 {
             return "This permanently ends the running terminal and removes the "
-                + "agent from DouDou Company. This cannot be undone. To only "
+                + "agent from Teddy CLI. This cannot be undone. To only "
                 + "hide it, cancel and use Hide Agents."
         }
         return "This permanently ends every running terminal and removes all "
-            + "\(agentIDs.count) agents from DouDou Company. This cannot be "
+            + "\(agentIDs.count) agents from Teddy CLI. This cannot be "
             + "undone. To only hide them, cancel and use Hide Agents."
     }
 
@@ -558,7 +558,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private let store: GaiCompanionStore
     private let userDefaults: UserDefaults
     private var panelControllers: [UUID: GaiCompanionPanelController] = [:]
-    private var managerWindowController: GaiCompanionLibraryWindowController?
     private var expandedTerminalSize: GaiCompanionExpandedTerminalSize?
     private var expandedTerminalPosition: GaiCompanionExpandedTerminalPosition?
     private var started = false
@@ -641,15 +640,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         started = true
 
         let loadResult = store.load()
-        let createdFreshCompanion: Bool
-        if loadResult == .empty {
-            _ = store.create()
-            createdFreshCompanion = true
-        } else {
-            createdFreshCompanion = false
-            if loadResult == .failed {
-                Ghostty.logger.error("could not load persisted agents")
-            }
+        if loadResult == .failed {
+            Ghostty.logger.error("could not load persisted agents")
         }
 
         runtimes = store.companions.map(GaiCompanionRuntime.init)
@@ -670,22 +662,15 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
         installGlobalFileDropFallback()
 
-        // A fresh installation opens its first live terminal immediately. A
-        // migrated/restored set stays mascot-only until explicitly opened, so
-        // launching Debug never starts dozens of old CLI commands at once.
-        if createdFreshCompanion,
-           let first = runtimes.first {
-            setPresentation(.compact, for: first, animated: false, focus: true)
-        }
-
-        showLibrary(activate: NSApp.isActive)
         updateSurfacePerformanceState()
     }
 
     func reveal() {
         start()
         applyVisibilityPolicy(.revealLibrary)
-        showLibrary(activate: true)
+        NotificationCenter.default.post(
+            name: .gaiCompanionOpenTeddyRequested,
+            object: self)
     }
 
     /// Shows or hides only the desktop agent layer. Runtime presentation and
@@ -755,7 +740,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
         selectCompanion(id: runtime.id)
         setPresentation(.compact, for: runtime, animated: true, focus: true)
-        showLibrary(activate: false)
         return surface
     }
 
@@ -1632,7 +1616,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         alert.alertStyle = .critical
         alert.messageText = "Kill \(runtime.record.displayName) and its terminal?"
         alert.informativeText = "This permanently ends the running terminal "
-            + "and removes the agent from DouDou Company. To only hide the "
+            + "and removes the agent from Teddy CLI. To only hide the "
             + "terminal, cancel and click the agent on your desktop."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Kill Agent")
@@ -1835,9 +1819,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             config.environmentVariables["GAITERM_EVENT_SOCKET"] = socketPath
         }
         #if DEBUG
-        let fallbackBundleIdentifier = "com.sipiyou.gaiterm.debug"
+        let fallbackBundleIdentifier = "com.sipiyou.teddycli.debug"
         #else
-        let fallbackBundleIdentifier = "com.sipiyou.gaiterm"
+        let fallbackBundleIdentifier = "com.sipiyou.teddycli"
         #endif
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? fallbackBundleIdentifier
         config.environmentVariables["GAITERM_NOTIFY_BUNDLE_ID"] = bundleIdentifier
@@ -1968,13 +1952,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             requestTerminalFocus(for: runtime, surface: surface)
         }
         updateDockBadge()
-    }
-
-    private func showLibrary(activate: Bool) {
-        if managerWindowController == nil {
-            managerWindowController = GaiCompanionLibraryWindowController(manager: self)
-        }
-        managerWindowController?.show(activate: activate)
     }
 
     func panelDidBecomeKey(for id: UUID) {
@@ -2871,7 +2848,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func notificationTitle(for runtime: GaiCompanionRuntime, fallback: String) -> String {
         let name = runtime.record.displayName
         if !name.isEmpty { return name }
-        return fallback.isEmpty ? "DouDou Company" : fallback
+        return fallback.isEmpty ? "Teddy CLI" : fallback
     }
 
     private func suggestedPosition(for index: Int) -> GaiCompanionNormalizedPosition {

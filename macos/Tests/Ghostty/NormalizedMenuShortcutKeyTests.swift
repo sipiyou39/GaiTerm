@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import Ghostty
+@testable import TeddyCLI
 
 @Suite
 struct NormalizedMenuShortcutKeyTests {

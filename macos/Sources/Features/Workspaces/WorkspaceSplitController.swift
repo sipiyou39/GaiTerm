@@ -111,11 +111,11 @@ final class GaiSplitController {
         let surfaceID = UUID()
         config.environmentVariables["GAITERM_WORKSPACE_ID"] = workspace.id.uuidString
         config.environmentVariables["GAITERM_SURFACE_ID"] = surfaceID.uuidString
-        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.sipiyou.gaiterm"
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.sipiyou.teddycli"
         config.environmentVariables["GAITERM_NOTIFY_BUNDLE_ID"] = bundleIdentifier
         config.environmentVariables["GAITERM_NOTIFY_APP_PATH"] = Bundle.main.bundlePath
         config.environmentVariables["GAITERM_NOTIFY_URL_SCHEME"] =
-            bundleIdentifier == "com.sipiyou.gaiterm.debug" ? "gaiterm-debug" : "gaiterm"
+            bundleIdentifier == "com.sipiyou.teddycli.debug" ? "teddycli-debug" : "teddycli"
 
         let view = Ghostty.SurfaceView(app, baseConfig: config, uuid: surfaceID)
         store.attachSession(

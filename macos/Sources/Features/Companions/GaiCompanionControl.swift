@@ -5,29 +5,29 @@ extension Notification.Name {
     /// Posted only after an accepted lifecycle boundary produced a new bounded
     /// response. Observers receive the response under `responseUserInfoKey`.
     static let gaiCompanionLastResponseDidChange = Notification.Name(
-        "com.sipiyou.gaiterm.companionLastResponseDidChange")
+        "com.sipiyou.teddycli.companionLastResponseDidChange")
     /// Lightweight invalidation for consumers such as Teddy's sidebar. It
     /// carries no terminal text and is emitted only on semantic state changes.
     static let gaiCompanionStateDidChange = Notification.Name(
-        "com.sipiyou.gaiterm.companionStateDidChange")
+        "com.sipiyou.teddycli.companionStateDidChange")
     /// Requests Teddy to release an inline-hosted terminal before the same
     /// native surface is shown again in its floating doudou window.
     static let gaiCompanionInlineTerminalDidDetach = Notification.Name(
-        "com.sipiyou.gaiterm.companionInlineTerminalDidDetach")
+        "com.sipiyou.teddycli.companionInlineTerminalDidDetach")
     /// Emitted by the terminal's unified inline header when the user switches
     /// back to Teddy's vocal presentation. The surface is released by the
     /// voice controller's normal collapse lifecycle, never duplicated.
     static let gaiCompanionInlineTerminalRequestedVoice = Notification.Name(
-        "com.sipiyou.gaiterm.companionInlineTerminalRequestedVoice")
+        "com.sipiyou.teddycli.companionInlineTerminalRequestedVoice")
     /// The desktop mascot and Teddy's sidebar share one lightweight selection.
     static let gaiCompanionDesktopSelectionDidChange = Notification.Name(
-        "com.sipiyou.gaiterm.companionDesktopSelectionDidChange")
+        "com.sipiyou.teddycli.companionDesktopSelectionDidChange")
     /// Requests the full Teddy workspace for one doudou and one presentation.
     static let gaiCompanionOpenTeddyRequested = Notification.Name(
-        "com.sipiyou.gaiterm.companionOpenTeddyRequested")
+        "com.sipiyou.teddycli.companionOpenTeddyRequested")
     /// Requests replay of the latest archived Teddy answer for one doudou.
     static let gaiCompanionReplayVoiceRequested = Notification.Name(
-        "com.sipiyou.gaiterm.companionReplayVoiceRequested")
+        "com.sipiyou.teddycli.companionReplayVoiceRequested")
 }
 
 /// Small, stable projection exposed to Teddy. It contains no terminal view,

@@ -1,14 +1,14 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 struct GaiCompanionEventTransportTests {
     private let receivedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
     @Test func decodesACompleteVersionOneEvent() throws {
         let url = try #require(URL(string:
-            "gaiterm-debug://agent-event?v=1" +
+            "teddycli-debug://agent-event?v=1" +
                 "&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
                 "&token=0123456789abcdef0123456789abcdef" +
                 "&provider=codex&kind=stop&event=event-42" +
@@ -90,8 +90,8 @@ struct GaiCompanionEventTransportTests {
     @Test func rejectsWrongRouteAndUnsupportedVersion() throws {
         let releaseURL = try #require(URL(string:
             validURL().absoluteString.replacingOccurrences(
-                of: "gaiterm-debug",
-                with: "gaiterm")))
+                of: "teddycli-debug",
+                with: "teddycli")))
         #expect(throws: GaiCompanionEventTransportError.invalidRoute) {
             try GaiCompanionEventEnvelope(url: releaseURL)
         }
@@ -166,7 +166,7 @@ struct GaiCompanionEventTransportTests {
 
     private func validURL() -> URL {
         URL(string:
-            "gaiterm-debug://agent-event?v=1" +
+            "teddycli-debug://agent-event?v=1" +
                 "&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
                 "&token=0123456789abcdef0123456789abcdef" +
                 "&provider=claude&kind=started&event=event-1")!

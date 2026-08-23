@@ -227,11 +227,11 @@ struct GaiTerminalPaneRGB: Equatable {
 
 extension Notification.Name {
     static let gaiSurfaceDidRequestImmediateFocus =
-        Notification.Name("com.sipiyou.gaiterm.surfaceDidRequestImmediateFocus")
+        Notification.Name("com.sipiyou.teddycli.surfaceDidRequestImmediateFocus")
     static let gaiSurfaceDidReceiveUserInput =
-        Notification.Name("com.sipiyou.gaiterm.surfaceDidReceiveUserInput")
+        Notification.Name("com.sipiyou.teddycli.surfaceDidReceiveUserInput")
     static let gaiSurfaceDidCancelAgentWork =
-        Notification.Name("com.sipiyou.gaiterm.surfaceDidCancelAgentWork")
+        Notification.Name("com.sipiyou.teddycli.surfaceDidCancelAgentWork")
 }
 
 /// Stage hosting view: takes over hit-testing at the root so header controls
@@ -1978,7 +1978,7 @@ final class GaiWorkspaceManager {
         fallbackTitle: String
     ) -> String {
         let cleanFallback = fallbackTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let workspace else { return cleanFallback.isEmpty ? "DouDou Company" : cleanFallback }
+        guard let workspace else { return cleanFallback.isEmpty ? "Teddy CLI" : cleanFallback }
         let workspaceName = workspace.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let folderName = systemNotificationFolderName(surface: surface, workspace: workspace)
 
@@ -1990,7 +1990,7 @@ final class GaiWorkspaceManager {
         case (true, false):
             return folderName
         case (true, true):
-            return cleanFallback.isEmpty ? "DouDou Company" : cleanFallback
+            return cleanFallback.isEmpty ? "Teddy CLI" : cleanFallback
         }
     }
 
@@ -2283,8 +2283,8 @@ enum GaiAgentHookInstaller {
             "if [ -n \"$turn\" ]; then turn=\"session:$turn\"; fi; fi; fi; fi; " +
             "case \"$turn\" in *[!A-Za-z0-9._:-]*) turn= ;; esac; " +
             "event=$(/usr/bin/uuidgen | /usr/bin/tr \"[:upper:]\" \"[:lower:]\"); " +
-            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-teddycli}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.teddycli}\"; " +
             "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) exit 0 ;; esac; " +
             "url=\"$scheme://agent-event?v=1&surface=$surface&token=$token" +
             "&provider=\(provider)&kind=\(kind)&event=\(provider)-\(kind)-$event\"; " +
@@ -2323,8 +2323,8 @@ enum GaiAgentHookInstaller {
             "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
             "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
             "if [ -n \"$token\" ]; then exit 0; fi; " +
-            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-teddycli}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.teddycli}\"; " +
             "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) exit 0 ;; esac; " +
             "url=\"$scheme://notify?surface=$surface&title=\(title)&body=Turn%20complete\"; " +
             "/usr/bin/open -g -b \"$bundle\" \"$url\" || true; exit 0'"
@@ -2361,8 +2361,8 @@ enum GaiAgentHookInstaller {
         let invalidTokenAction: String
         if includesLegacyStopFallback {
             invalidTokenAction =
-                "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-                "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+                "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-teddycli}\"; " +
+                "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.teddycli}\"; " +
                 "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) respond; exit 0 ;; esac; " +
                 "legacy_url=\"$scheme://notify?surface=$surface&title=Agy&body=Turn%20complete\"; " +
                 "/usr/bin/open -g -b \"$bundle\" \"$legacy_url\" >/dev/null 2>&1 || true; " +
@@ -2385,8 +2385,8 @@ enum GaiAgentHookInstaller {
             "turn=; if [ -n \"$conversation\" ]; then turn=\"session:$conversation\"; fi; " +
             "case \"$turn\" in *[!A-Za-z0-9._:-]*) turn= ;; esac; " +
             "event=$(/usr/bin/uuidgen | /usr/bin/tr \"[:upper:]\" \"[:lower:]\"); " +
-            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-gaiterm}\"; " +
-            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.gaiterm}\"; " +
+            "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-teddycli}\"; " +
+            "bundle=\"${GAITERM_NOTIFY_BUNDLE_ID:-com.sipiyou.teddycli}\"; " +
             "case \"$scheme:$bundle\" in *[!A-Za-z0-9._:+-]*) respond; exit 0 ;; esac; " +
             "url=\"$scheme://agent-event?v=1&surface=$surface&token=$token" +
             "&provider=agy&kind=$kind&event=agy-$kind-$event\"; " +
@@ -2816,8 +2816,8 @@ enum GaiAgentHookInstaller {
       const surface = process.env.GAITERM_SURFACE_ID ?? "";
       const token = process.env.GAITERM_EVENT_TOKEN ?? "";
       const socket = process.env.GAITERM_EVENT_SOCKET ?? "";
-      const scheme = process.env.GAITERM_NOTIFY_URL_SCHEME ?? "gaiterm";
-      const bundle = process.env.GAITERM_NOTIFY_BUNDLE_ID ?? "com.sipiyou.gaiterm";
+      const scheme = process.env.GAITERM_NOTIFY_URL_SCHEME ?? "teddycli";
+      const bundle = process.env.GAITERM_NOTIFY_BUNDLE_ID ?? "com.sipiyou.teddycli";
       const safe = /^[A-Za-z0-9._:-]{1,256}$/;
       const routeSafe = /^[A-Za-z0-9._:+-]{1,256}$/;
       if (!safe.test(surface)

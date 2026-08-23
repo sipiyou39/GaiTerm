@@ -68,7 +68,11 @@ enum GaiSyntax {
     // MARK: Regexes
 
     private static func re(_ pattern: String) -> NSRegularExpression {
-        try! NSRegularExpression(pattern: pattern, options: [])
+        do {
+            return try NSRegularExpression(pattern: pattern, options: [])
+        } catch {
+            preconditionFailure("Invalid built-in syntax-highlighting regex: \(error)")
+        }
     }
 
     private static let numberRE = re(#"\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?\b"#)

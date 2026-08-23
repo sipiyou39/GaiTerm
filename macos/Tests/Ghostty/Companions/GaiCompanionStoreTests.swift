@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 @MainActor
 struct GaiCompanionStoreTests {
@@ -391,7 +391,7 @@ struct GaiCompanionStoreTests {
     }
 
     private func defaultsContext() -> DefaultsContext {
-        let suite = "com.sipiyou.gaiterm.tests.companions.\(UUID().uuidString)"
+        let suite = "com.sipiyou.teddycli.tests.companions.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
             fatalError("Unable to create isolated UserDefaults suite")
         }

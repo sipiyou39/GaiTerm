@@ -147,7 +147,7 @@ final class GaiAgentVisibilityShortcutMonitor {
     private static let activeInterval = DispatchTimeInterval.milliseconds(8)
 
     private let queue = DispatchQueue(
-        label: "com.sipiyou.gaiterm.agent-visibility-shortcut",
+        label: "com.sipiyou.teddycli.agent-visibility-shortcut",
         qos: .userInitiated)
     private let action: () -> Void
     private var recognizer = GaiAgentVisibilityShortcutRecognizer()

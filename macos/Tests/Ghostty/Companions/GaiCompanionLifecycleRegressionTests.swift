@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 struct GaiCompanionLifecycleRegressionTests {
     private let surfaceID = UUID(uuidString: "F14702E7-12B4-4478-B458-5DC61CEAEABC")!

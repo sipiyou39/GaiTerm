@@ -2,7 +2,7 @@
 import Darwin
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 @MainActor
 struct GaiCompanionEventSocketServerTests {
@@ -162,10 +162,10 @@ struct GaiCompanionEventSocketServerTests {
 }
 
 private let socketTestFirstURL =
-    "gaiterm-debug://agent-event?v=1&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
+    "teddycli-debug://agent-event?v=1&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
     "&token=0123456789abcdef0123456789abcdef&provider=codex&kind=started&event=one"
 private let socketTestSecondURL =
-    "gaiterm-debug://agent-event?v=1&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
+    "teddycli-debug://agent-event?v=1&surface=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" +
     "&token=0123456789abcdef0123456789abcdef&provider=codex&kind=stop&event=two"
 
 @MainActor

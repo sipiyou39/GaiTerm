@@ -49,9 +49,9 @@ pub fn init(
     };
 
     const env = try std.process.getEnvMap(b.allocator);
-    const app_path = b.fmt("macos/build/{s}/GaiTerm.app", .{xc_config});
+    const app_path = b.fmt("macos/build/{s}/Teddy CLI.app", .{xc_config});
 
-    // Our step to build the GaiTerm macOS app.
+    // Our step to build the Teddy CLI macOS app.
     const build = build: {
         // External environment variables can mess up xcodebuild, so
         // we create a new empty environment.
@@ -124,7 +124,7 @@ pub fn init(
         break :xctest step;
     };
 
-    // Our step to open the resulting GaiTerm app.
+    // Our step to open the resulting Teddy CLI app.
     const open = open: {
         const disable_save_state = RunStep.create(b, "disable save state");
         disable_save_state.has_side_effects = true;
@@ -139,11 +139,11 @@ pub fn init(
         disable_save_state.expectExitCode(0);
         disable_save_state.step.dependOn(&build.step);
 
-        const open = RunStep.create(b, "run GaiTerm app");
+        const open = RunStep.create(b, "run Teddy CLI app");
         open.has_side_effects = true;
         open.cwd = b.path("");
         open.addArgs(&.{b.fmt(
-            "{s}/Contents/MacOS/ghostty",
+            "{s}/Contents/MacOS/teddycli",
             .{app_path},
         )});
 

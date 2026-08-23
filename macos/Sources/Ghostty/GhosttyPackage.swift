@@ -13,10 +13,10 @@ extension ghostty_surface_t: @unchecked @retroactive Sendable {}
 
 extension Ghostty {
     // The user notification category identifier
-    static let userNotificationCategory = "com.sipiyou.gaiterm.userNotification"
+    static let userNotificationCategory = "com.sipiyou.teddycli.userNotification"
 
     // The user notification "Show" action
-    static let userNotificationActionShow = "com.sipiyou.gaiterm.userNotification.Show"
+    static let userNotificationActionShow = "com.sipiyou.teddycli.userNotification.Show"
 }
 
 // MARK: Build Info
@@ -331,124 +331,124 @@ extension Ghostty {
 
 extension Notification.Name {
     /// Configuration change. If the object is nil then it is app-wide. Otherwise its surface-specific.
-    static let ghosttyConfigDidChange = Notification.Name("com.sipiyou.gaiterm.configDidChange")
+    static let ghosttyConfigDidChange = Notification.Name("com.sipiyou.teddycli.configDidChange")
     static let GhosttyConfigChangeKey = ghosttyConfigDidChange.rawValue
 
     /// Color change. Object is the surface changing.
-    static let ghosttyColorDidChange = Notification.Name("com.sipiyou.gaiterm.ghosttyColorDidChange")
+    static let ghosttyColorDidChange = Notification.Name("com.sipiyou.teddycli.ghosttyColorDidChange")
     static let GhosttyColorChangeKey = ghosttyColorDidChange.rawValue
 
     /// Goto tab. Has tab index in the userinfo.
-    static let ghosttyMoveTab = Notification.Name("com.sipiyou.gaiterm.moveTab")
+    static let ghosttyMoveTab = Notification.Name("com.sipiyou.teddycli.moveTab")
     static let GhosttyMoveTabKey = ghosttyMoveTab.rawValue
 
     /// Resize the window to a default size.
-    static let ghosttyResetWindowSize = Notification.Name("com.sipiyou.gaiterm.resetWindowSize")
+    static let ghosttyResetWindowSize = Notification.Name("com.sipiyou.teddycli.resetWindowSize")
 
     /// Ring the bell
-    static let ghosttyBellDidRing = Notification.Name("com.sipiyou.gaiterm.ghosttyBellDidRing")
+    static let ghosttyBellDidRing = Notification.Name("com.sipiyou.teddycli.ghosttyBellDidRing")
 
     /// A terminal surface emitted a desktop notification (OSC 9 / OSC 777, or
     /// Ghostty command-finished notification). Object is the `SurfaceView`.
     static let gaiTerminalNotificationDidArrive =
-        Notification.Name("com.sipiyou.gaiterm.terminalNotificationDidArrive")
+        Notification.Name("com.sipiyou.teddycli.terminalNotificationDidArrive")
     static let GaiTerminalNotificationTitleKey =
-        "com.sipiyou.gaiterm.terminalNotification.title"
+        "com.sipiyou.teddycli.terminalNotification.title"
     static let GaiTerminalNotificationBodyKey =
-        "com.sipiyou.gaiterm.terminalNotification.body"
+        "com.sipiyou.teddycli.terminalNotification.body"
 
     /// Shell integration reported that the foreground command exited. Unlike
     /// `notify-on-command-finish`, this internal signal is never gated by the
     /// user's notification preferences; companion lifecycle fallback needs the
     /// semantic command boundary even when banners and bells are disabled.
     static let gaiSurfaceCommandDidFinish =
-        Notification.Name("com.sipiyou.gaiterm.surfaceCommandDidFinish")
+        Notification.Name("com.sipiyou.teddycli.surfaceCommandDidFinish")
     static let GaiSurfaceCommandExitCodeKey =
-        "com.sipiyou.gaiterm.surfaceCommandDidFinish.exitCode"
+        "com.sipiyou.teddycli.surfaceCommandDidFinish.exitCode"
     static let GaiSurfaceCommandDurationNanosecondsKey =
-        "com.sipiyou.gaiterm.surfaceCommandDidFinish.durationNanoseconds"
+        "com.sipiyou.teddycli.surfaceCommandDidFinish.durationNanoseconds"
 
     /// The active selection changed
-    static let ghosttySelectionDidChange = Notification.Name("com.sipiyou.gaiterm.ghosttySelectionDidChange")
+    static let ghosttySelectionDidChange = Notification.Name("com.sipiyou.teddycli.ghosttySelectionDidChange")
 
     /// Readonly mode changed
-    static let ghosttyDidChangeReadonly = Notification.Name("com.sipiyou.gaiterm.didChangeReadonly")
+    static let ghosttyDidChangeReadonly = Notification.Name("com.sipiyou.teddycli.didChangeReadonly")
     static let ReadonlyKey = ghosttyDidChangeReadonly.rawValue + ".readonly"
     /// Toggle maximize of current window
-    static let ghosttyMaximizeDidToggle = Notification.Name("com.sipiyou.gaiterm.maximizeDidToggle")
+    static let ghosttyMaximizeDidToggle = Notification.Name("com.sipiyou.teddycli.maximizeDidToggle")
 
     /// Notification sent when scrollbar updates
-    static let ghosttyDidUpdateScrollbar = Notification.Name("com.sipiyou.gaiterm.didUpdateScrollbar")
+    static let ghosttyDidUpdateScrollbar = Notification.Name("com.sipiyou.teddycli.didUpdateScrollbar")
     static let ScrollbarKey = ghosttyDidUpdateScrollbar.rawValue + ".scrollbar"
 
     /// Focus the search field
-    static let ghosttySearchFocus = Notification.Name("com.sipiyou.gaiterm.searchFocus")
+    static let ghosttySearchFocus = Notification.Name("com.sipiyou.teddycli.searchFocus")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This
 // namespace was the old namespace.
 extension Ghostty.Notification {
     /// Used to pass a configuration along when creating a new tab/window/split.
-    static let NewSurfaceConfigKey = "com.sipiyou.gaiterm.newSurfaceConfig"
+    static let NewSurfaceConfigKey = "com.sipiyou.teddycli.newSurfaceConfig"
 
     /// Posted when a new split is requested. The sending object will be the surface that had focus. The
     /// userdata has one key "direction" with the direction to split to.
-    static let ghosttyNewSplit = Notification.Name("com.sipiyou.gaiterm.newSplit")
+    static let ghosttyNewSplit = Notification.Name("com.sipiyou.teddycli.newSplit")
 
     /// Close the calling surface.
-    static let ghosttyCloseSurface = Notification.Name("com.sipiyou.gaiterm.closeSurface")
+    static let ghosttyCloseSurface = Notification.Name("com.sipiyou.teddycli.closeSurface")
 
     /// Focus previous/next split. Has a SplitFocusDirection in the userinfo.
-    static let ghosttyFocusSplit = Notification.Name("com.sipiyou.gaiterm.focusSplit")
+    static let ghosttyFocusSplit = Notification.Name("com.sipiyou.teddycli.focusSplit")
     static let SplitDirectionKey = ghosttyFocusSplit.rawValue
 
     /// Goto tab. Has tab index in the userinfo.
-    static let ghosttyGotoTab = Notification.Name("com.sipiyou.gaiterm.gotoTab")
+    static let ghosttyGotoTab = Notification.Name("com.sipiyou.teddycli.gotoTab")
     static let GotoTabKey = ghosttyGotoTab.rawValue
 
     /// New tab. Has base surface config requested in userinfo.
-    static let ghosttyNewTab = Notification.Name("com.sipiyou.gaiterm.newTab")
+    static let ghosttyNewTab = Notification.Name("com.sipiyou.teddycli.newTab")
 
     /// New window. Has base surface config requested in userinfo.
-    static let ghosttyNewWindow = Notification.Name("com.sipiyou.gaiterm.newWindow")
+    static let ghosttyNewWindow = Notification.Name("com.sipiyou.teddycli.newWindow")
 
     /// Present terminal. Bring the surface's window to focus without activating the app.
-    static let ghosttyPresentTerminal = Notification.Name("com.sipiyou.gaiterm.presentTerminal")
+    static let ghosttyPresentTerminal = Notification.Name("com.sipiyou.teddycli.presentTerminal")
 
     /// Toggle fullscreen of current window
-    static let ghosttyToggleFullscreen = Notification.Name("com.sipiyou.gaiterm.toggleFullscreen")
+    static let ghosttyToggleFullscreen = Notification.Name("com.sipiyou.teddycli.toggleFullscreen")
     static let FullscreenModeKey = ghosttyToggleFullscreen.rawValue
 
     /// Notification sent to toggle split maximize/unmaximize.
-    static let didToggleSplitZoom = Notification.Name("com.sipiyou.gaiterm.didToggleSplitZoom")
+    static let didToggleSplitZoom = Notification.Name("com.sipiyou.teddycli.didToggleSplitZoom")
 
     /// Notification
-    static let didReceiveInitialWindowFrame = Notification.Name("com.sipiyou.gaiterm.didReceiveInitialWindowFrame")
-    static let FrameKey = "com.sipiyou.gaiterm.frame"
+    static let didReceiveInitialWindowFrame = Notification.Name("com.sipiyou.teddycli.didReceiveInitialWindowFrame")
+    static let FrameKey = "com.sipiyou.teddycli.frame"
 
-    static let confirmClipboard = Notification.Name("com.sipiyou.gaiterm.confirmClipboard")
+    static let confirmClipboard = Notification.Name("com.sipiyou.teddycli.confirmClipboard")
     static let ConfirmClipboardStrKey = confirmClipboard.rawValue + ".str"
     static let ConfirmClipboardStateKey = confirmClipboard.rawValue + ".state"
     static let ConfirmClipboardRequestKey = confirmClipboard.rawValue + ".request"
 
     /// Notification sent to the active split view to resize the split.
-    static let didResizeSplit = Notification.Name("com.sipiyou.gaiterm.didResizeSplit")
+    static let didResizeSplit = Notification.Name("com.sipiyou.teddycli.didResizeSplit")
     static let ResizeSplitDirectionKey = didResizeSplit.rawValue + ".direction"
     static let ResizeSplitAmountKey = didResizeSplit.rawValue + ".amount"
 
     /// Notification sent to the split root to equalize split sizes
-    static let didEqualizeSplits = Notification.Name("com.sipiyou.gaiterm.didEqualizeSplits")
+    static let didEqualizeSplits = Notification.Name("com.sipiyou.teddycli.didEqualizeSplits")
 
     /// Notification that renderer health changed
-    static let didUpdateRendererHealth = Notification.Name("com.sipiyou.gaiterm.didUpdateRendererHealth")
+    static let didUpdateRendererHealth = Notification.Name("com.sipiyou.teddycli.didUpdateRendererHealth")
 
     /// Notifications related to key sequences
-    static let didContinueKeySequence = Notification.Name("com.sipiyou.gaiterm.didContinueKeySequence")
-    static let didEndKeySequence = Notification.Name("com.sipiyou.gaiterm.didEndKeySequence")
+    static let didContinueKeySequence = Notification.Name("com.sipiyou.teddycli.didContinueKeySequence")
+    static let didEndKeySequence = Notification.Name("com.sipiyou.teddycli.didEndKeySequence")
     static let KeySequenceKey = didContinueKeySequence.rawValue + ".key"
 
     /// Notifications related to key tables
-    static let didChangeKeyTable = Notification.Name("com.sipiyou.gaiterm.didChangeKeyTable")
+    static let didChangeKeyTable = Notification.Name("com.sipiyou.teddycli.didChangeKeyTable")
     static let KeyTableKey = didChangeKeyTable.rawValue + ".action"
 }
 

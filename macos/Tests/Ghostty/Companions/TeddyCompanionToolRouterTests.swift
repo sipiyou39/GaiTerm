@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 struct TeddyCompanionToolRouterTests {
     @Test func resolverAcceptsUUIDAndHumanName() {

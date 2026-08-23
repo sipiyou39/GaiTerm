@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import TeddyCLI
 
 struct GaiCompanionProviderClassifierTests {
     @Test func parsesBoundedKernProcargsPayload() {

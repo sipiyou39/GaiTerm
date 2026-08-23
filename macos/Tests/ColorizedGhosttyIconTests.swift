@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import TeddyCLI
 
 struct ColorizedGhosttyIconTests {
     private func makeIcon(

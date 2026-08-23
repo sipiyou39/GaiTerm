@@ -47,7 +47,7 @@ extension Ghostty.SurfaceView: Transferable {
 extension UTType {
     /// A format that encodes the bare UUID only for the surface. This can be used if you have
     /// a way to look up a surface by ID.
-    static let ghosttySurfaceId = UTType(exportedAs: "com.sipiyou.gaitermSurfaceId")
+    static let ghosttySurfaceId = UTType(exportedAs: "com.sipiyou.teddycli.surface-id")
 }
 
 #if canImport(AppKit)

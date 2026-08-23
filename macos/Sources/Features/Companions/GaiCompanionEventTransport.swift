@@ -8,9 +8,9 @@ import Foundation
 /// before the provider-independent event reaches the activity reducer.
 struct GaiCompanionEventEnvelope: Equatable, Sendable {
     #if DEBUG
-    static let scheme = "gaiterm-debug"
+    static let scheme = "teddycli-debug"
     #else
-    static let scheme = "gaiterm"
+    static let scheme = "teddycli"
     #endif
     static let host = "agent-event"
     static let currentVersion = 1

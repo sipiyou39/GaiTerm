@@ -1,7 +1,7 @@
 import AppKit
 import GhosttyKit
 import Testing
-@testable import Ghostty
+@testable import TeddyCLI
 
 @MainActor struct SurfaceView_SearchStateTests {
     typealias SearchState = Ghostty.OSSurfaceView.SearchState

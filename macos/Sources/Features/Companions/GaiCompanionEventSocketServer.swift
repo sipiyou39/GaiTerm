@@ -25,7 +25,7 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
     private let handler: Handler
     private let clientDeadline: TimeInterval
     private let queue = DispatchQueue(
-        label: "com.sipiyou.gaiterm.agent-event-socket",
+        label: "com.sipiyou.teddycli.agent-event-socket",
         qos: .userInitiated)
 
     private var listenerFileDescriptor: Int32 = -1

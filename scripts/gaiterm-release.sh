@@ -1,37 +1,35 @@
 #!/usr/bin/env bash
 #
-# DouDou Company release & auto-update publisher.
+# Teddy CLI release & auto-update publisher.
 #
 #   ./scripts/gaiterm-release.sh 1.0.1 ["release notes"]
 #
-# Builds the app, stamps the version, zips it, signs it with your Sparkle
-# EdDSA key (from your Keychain), writes appcast.xml, and publishes both as a
-# GitHub Release. Existing GaiTerm installations then see the update in-app.
+# Builds the app, stamps the version, signs it with Developer ID, notarizes and
+# staples it, signs the archive with Sparkle's EdDSA key, writes appcast.xml,
+# and publishes both artifacts as a GitHub Release.
 #
-# Requirements: zig, gh (authenticated), Sparkle's sign_update (already on disk
-# via Xcode's DerivedData).
+# Requirements: zig, gh (authenticated), a Developer ID Application identity,
+# a notarytool Keychain profile, and Sparkle's sign_update in DerivedData.
 set -euo pipefail
 
 VERSION="${1:?usage: gaiterm-release.sh <version> [notes]}"
-NOTES="${2:-DouDou Company $VERSION}"
-APPCAST_NOTES="DouDou Company $VERSION est disponible. Les notes detaillees s'afficheront au premier lancement apres installation."
+NOTES="${2:-Teddy CLI $VERSION}"
+APPCAST_NOTES="Teddy CLI $VERSION est disponible. Les notes detaillees s'afficheront au premier lancement apres installation."
 REPO="sipiyou39/GaiTerm"
-# Stable self-signed code-signing identity. Gives every build the same code
-# identity so macOS keeps a user's granted permissions (Full Disk Access, folder
-# access) across updates instead of re-prompting. Created once in the login
-# keychain; see GAITERM.md. A release must fail closed if it is unavailable:
-# Sparkle and macOS permissions both rely on this stable signing identity.
-SIGN_ID="GaiTerm Self-Signed"
-EXPECTED_BUNDLE_ID="com.sipiyou.gaiterm"
+PUBLIC_REMOTE="${TEDDYCLI_PUBLIC_REMOTE:-gaiterm-public}"
+NOTARY_PROFILE="${TEDDYCLI_NOTARY_PROFILE:-teddycli-notary}"
+SIGN_ID="${TEDDYCLI_SIGN_ID:-Developer ID Application: younes boukobaa (JPC779B3N5)}"
+EXPECTED_BUNDLE_ID="com.sipiyou.teddycli"
 EXPECTED_PUBLIC_ED_KEY="XE4x4lbdwUmG/1EdTnS8u/uIbEnIVIlVA4jSo+dNdd0="
-EXPECTED_TECHNICAL_NAME="GaiTerm"
-EXPECTED_DISPLAY_NAME="DouDou Company"
+EXPECTED_TECHNICAL_NAME="TeddyCLI"
+EXPECTED_DISPLAY_NAME="Teddy CLI"
 TAG="v$VERSION"
 BUILD="$(date +%Y%m%d%H%M)"           # monotonic build number for Sparkle
-ZIP="GaiTerm-$VERSION.zip"
+ZIP="TeddyCLI-$VERSION.zip"
 URL="https://github.com/$REPO/releases/download/$TAG/$ZIP"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/macos/build/ReleaseLocal/GaiTerm.app"
+APP="$ROOT/macos/build/ReleaseLocal/Teddy CLI.app"
+ENTITLEMENTS="$ROOT/macos/GhosttyReleaseLocal.entitlements"
 OUT="$ROOT/build/release"
 
 cd "$ROOT"
@@ -63,11 +61,24 @@ UNTRACKED_PRODUCT_FILES="$(git ls-files --others --exclude-standard -- . \
   exit 1
 }
 
-git fetch origin main --quiet
+REMOTE_URL="$(git remote get-url "$PUBLIC_REMOTE" 2>/dev/null || true)"
+[ -n "$REMOTE_URL" ] || {
+  echo "✗ public remote '$PUBLIC_REMOTE' is not configured"
+  exit 1
+}
+case "$REMOTE_URL" in
+  https://github.com/sipiyou39/GaiTerm.git|git@github.com:sipiyou39/GaiTerm.git) ;;
+  *)
+    echo "✗ '$PUBLIC_REMOTE' points to an unexpected repository: $REMOTE_URL"
+    exit 1
+    ;;
+esac
+
+git fetch "$PUBLIC_REMOTE" main --quiet
 LOCAL_HEAD="$(git rev-parse HEAD)"
-REMOTE_HEAD="$(git rev-parse origin/main)"
+REMOTE_HEAD="$(git rev-parse "$PUBLIC_REMOTE/main")"
 [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ] || {
-  echo "✗ local main is not identical to origin/main"
+  echo "✗ local main is not identical to $PUBLIC_REMOTE/main"
   exit 1
 }
 
@@ -75,7 +86,7 @@ SIGN_UPDATE="$(find "$HOME/Library/Developer/Xcode/DerivedData" \
   -ipath "*artifacts/sparkle/Sparkle/bin/sign_update" 2>/dev/null | head -1)"
 [ -x "$SIGN_UPDATE" ] || { echo "✗ sign_update not found (open the project in Xcode once)"; exit 1; }
 
-echo "▸ Building DouDou Company…"
+echo "▸ Building Teddy CLI…"
 zig build -Doptimize=ReleaseFast -Dversion-string="$VERSION" >/dev/null
 [ -d "$APP" ] || { echo "✗ build product missing: $APP"; exit 1; }
 
@@ -101,13 +112,10 @@ require_plist_value() {
   fi
 }
 
-# These legacy technical identities are the migration contract. The public
-# product name changes, but existing installations must remain on the same
-# Sparkle channel and keep trusting the same signing key.
 require_plist_value "CFBundleIdentifier" "$EXPECTED_BUNDLE_ID"
 require_plist_value "SUPublicEDKey" "$EXPECTED_PUBLIC_ED_KEY"
 require_plist_value "CFBundleName" "$EXPECTED_TECHNICAL_NAME"
-require_plist_value "CFBundleDisplayName" "$EXPECTED_TECHNICAL_NAME"
+require_plist_value "CFBundleDisplayName" "$EXPECTED_DISPLAY_NAME"
 require_plist_value "LSHasLocalizedDisplayName" "true"
 
 LOCALIZED_INFO_PLIST="$APP/Contents/Resources/en.lproj/InfoPlist.strings"
@@ -126,12 +134,10 @@ for key in CFBundleName CFBundleDisplayName; do
   fi
 done
 
-# Sign last (after the Info.plist edits, which invalidate any prior signature).
-# A stable identity is what lets a recipient grant Full Disk Access once and keep
-# it across updates. Do not preflight with `security find-identity`: a usable
-# self-signed certificate may be omitted from its list of trusted identities.
+# Sign last because stamping Info.plist invalidates the build-time signature.
 echo "▸ Signing with '$SIGN_ID'…"
-codesign --force --deep --sign "$SIGN_ID" "$APP" || {
+codesign --force --options runtime --timestamp \
+  --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP" || {
   echo "✗ codesign failed with required identity '$SIGN_ID'; release aborted"
   exit 1
 }
@@ -144,9 +150,30 @@ grep -Fqx "Authority=$SIGN_ID" <<<"$SIGN_DETAILS" || {
   echo "✗ bundle was not signed by required identity '$SIGN_ID'"
   exit 1
 }
+grep -Eq '^CodeDirectory .* flags=.*runtime' <<<"$SIGN_DETAILS" || {
+  echo "✗ hardened runtime is missing from the signed bundle"
+  exit 1
+}
 
-echo "▸ Zipping…"
+echo "▸ Preparing notarization archive…"
 mkdir -p "$OUT"
+rm -f "$OUT/$ZIP"
+ditto -c -k --keepParent "$APP" "$OUT/$ZIP"
+
+echo "▸ Notarizing with Keychain profile '$NOTARY_PROFILE'…"
+xcrun notarytool submit "$OUT/$ZIP" \
+  --keychain-profile "$NOTARY_PROFILE" --wait || {
+  echo "✗ notarization failed; configure the profile with notarytool store-credentials"
+  exit 1
+}
+
+echo "▸ Stapling notarization ticket…"
+xcrun stapler staple "$APP"
+xcrun stapler validate "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+spctl --assess --type execute --verbose=2 "$APP"
+
+# The ticket is stapled to the app, so recreate the distributable archive.
 rm -f "$OUT/$ZIP"
 ditto -c -k --keepParent "$APP" "$OUT/$ZIP"
 LENGTH="$(stat -f%z "$OUT/$ZIP")"
@@ -162,7 +189,7 @@ cat > "$OUT/appcast.xml" <<XML
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
-    <title>DouDou Company</title>
+    <title>Teddy CLI</title>
     <item>
       <title>$VERSION</title>
       <description><![CDATA[$APPCAST_NOTES]]></description>
@@ -182,8 +209,8 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "$OUT/$ZIP" "$OUT/appcast.xml" --repo "$REPO" --clobber
 else
   gh release create "$TAG" "$OUT/$ZIP" "$OUT/appcast.xml" \
-    --repo "$REPO" --title "DouDou Company $VERSION" --notes "$NOTES"
+    --repo "$REPO" --title "Teddy CLI $VERSION" --notes "$NOTES"
 fi
 
 echo "✓ Released $VERSION → https://github.com/$REPO/releases/tag/$TAG"
-echo "  Existing GaiTerm installations will see DouDou Company via 'Check for Updates'."
+echo "  Teddy CLI installations will see it via 'Check for Updates'."

@@ -1,4 +1,4 @@
-@testable import Ghostty
+@testable import TeddyCLI
 import Testing
 
 struct SurfaceViewAppKitTests {

@@ -104,6 +104,11 @@ final class GaiTeddyCompanionRouter: TeddyCompanionRouting {
         manager?.makeTeddyCompanionAvatarView(id: companionID, width: width)
     }
 
+    func makeCompanionCreationView() -> AnyView? {
+        guard let manager else { return nil }
+        return AnyView(GaiCompanionCreationView(manager: manager))
+    }
+
     func execute(
         _ call: GrokTextToolCall,
         selectDirectory: @escaping TeddyDirectorySelectionPresenter
@@ -307,7 +312,7 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
             ],
             backing: .buffered,
             defer: false)
-        window.title = "Teddy"
+        window.title = "Teddy CLI"
         window.minSize = NSSize(width: 920, height: 640)
         window.isReleasedWhenClosed = false
         window.isRestorable = false
@@ -470,7 +475,11 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
     }
 
     @objc private func openTeddyRequested(_ notification: Notification) {
-        guard let companionID = companionID(from: notification) else { return }
+        guard notification.object as? GaiCompanionManager === manager else { return }
+        guard let companionID = companionID(from: notification) else {
+            show(activate: true)
+            return
+        }
         let rawPresentation = notification.userInfo?[
             GaiCompanionControl.teddyPresentationUserInfoKey
         ] as? String

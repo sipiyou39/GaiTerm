@@ -57,7 +57,7 @@ final class GaiSettingsWindowController {
         if window == nil {
             let host = NSHostingController(rootView: SettingsView())
             let window = NSWindow(contentViewController: host)
-            window.title = "DouDou Company Settings"
+            window.title = "Teddy CLI Settings"
             window.styleMask = [.titled, .closable, .fullSizeContentView]
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
@@ -142,7 +142,7 @@ struct SettingsView: View {
                 .frame(width: 34, height: 34)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 1) {
-                Text("DouDou Company")
+                Text("Teddy CLI")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
                 Text(appVersion)
@@ -369,8 +369,8 @@ private struct GeneralSettings: View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSection(title: "Startup") {
                 SettingsToggle(
-                    title: "Launch DouDou Company at login",
-                    subtitle: "Open DouDou Company automatically when you log in.",
+                    title: "Launch Teddy CLI at login",
+                    subtitle: "Open Teddy CLI automatically when you log in.",
                     first: true,
                     isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
             }
@@ -428,7 +428,7 @@ private struct NotificationsSettings: View {
             SettingsSection(title: "Sounds") {
                 SettingsToggle(
                     title: "Play notification sound",
-                    subtitle: "Use the selected DouDou Company sound for CLI completion notifications.",
+                    subtitle: "Use the selected Teddy CLI sound for CLI completion notifications.",
                     first: true,
                     isOn: $soundEnabled)
                 SettingsRow(title: "Sound", subtitle: "Choose the bundled completion sound.") {
@@ -538,14 +538,14 @@ private struct PermissionsSettings: View {
                 }
                 SettingsRow(
                     title: "Dock badge",
-                    subtitle: "Allows macOS notification badge support; DouDou Company also updates its Dock count directly.") {
+                    subtitle: "Allows macOS notification badge support; Teddy CLI also updates its Dock count directly.") {
                     PermissionStatusBadge(
                         title: notificationBadgeSetting == .enabled ? "Ready" : "Off",
                         state: notificationBadgeSetting == .enabled ? .granted : .blocked)
                 }
                 SettingsRow(
                     title: "Notification sound",
-                    subtitle: "Allows sound on macOS notifications. DouDou Company sounds are controlled in Notifications → Sounds.") {
+                    subtitle: "Allows sound on macOS notifications. Teddy CLI sounds are controlled in Notifications → Sounds.") {
                     PermissionStatusBadge(
                         title: notificationSoundSetting == .enabled ? "Ready" : "Off",
                         state: notificationSoundSetting == .enabled ? .granted : .blocked)
@@ -583,7 +583,7 @@ private struct PermissionsSettings: View {
                 }
                 SettingsRow(
                     title: "Open System Settings",
-                    subtitle: "Find DouDou Company in the list, switch it on. If it isn't listed, use “+” and pick DouDou Company.") {
+                    subtitle: "Find Teddy CLI in the list, switch it on. If it isn't listed, use “+” and pick Teddy CLI.") {
                     actionButton("Open Full Disk Access", action: openFullDiskAccess)
                 }
                 SettingsRow(
@@ -593,7 +593,7 @@ private struct PermissionsSettings: View {
                 }
             }
 
-            Text("After enabling Full Disk Access, quit and reopen DouDou Company once for it to take effect.")
+            Text("After enabling Full Disk Access, quit and reopen Teddy CLI once for it to take effect.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.white.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)
@@ -741,7 +741,7 @@ private struct UpdatesSettings: View {
             SettingsSection(title: "Software updates") {
                 SettingsToggle(
                     title: "Automatically check for updates",
-                    subtitle: "Periodically check for new versions of DouDou Company in the background.",
+                    subtitle: "Periodically check for new versions of Teddy CLI in the background.",
                     first: true,
                     isOn: Binding(get: { autoCheck }, set: { setAuto($0) }))
                 SettingsRow(title: "Check now", subtitle: "Look for an update right now.") {

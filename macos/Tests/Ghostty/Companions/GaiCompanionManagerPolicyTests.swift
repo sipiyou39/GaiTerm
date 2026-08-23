@@ -2,7 +2,7 @@
 import AppKit
 import Foundation
 import Testing
-@testable import GaiTerm
+@testable import TeddyCLI
 
 struct GaiCompanionManagerPolicyTests {
     @Test func mascotDoubleClickAlwaysOpensTheExpandedTerminal() {

@@ -4,7 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private extension UTType {
-    static let gaiPaneID = UTType(exportedAs: "com.sipiyou.gaiterm.pane-id")
+    static let gaiPaneID = UTType(exportedAs: "com.sipiyou.teddycli.pane-id")
 }
 
 // MARK: - Metrics
