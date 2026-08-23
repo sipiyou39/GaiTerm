@@ -183,7 +183,6 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     var onFileDrop: (([URL]) -> Void)?
 
     private let hostingView: NSHostingView<Content>
-    private var clickGeneration: UInt64 = 0
     private var quickActionButtons: [GaiCompanionQuickAction: GaiCompanionQuickActionButton] = [:]
     private var quickActionsAreVisible = false
 
@@ -199,13 +198,6 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    /// Preserve a responsive single click while still giving a genuinely fast
-    /// second click enough time to replace it without flashing the compact
-    /// terminal first.
-    private static var singleClickDelay: TimeInterval {
-        min(NSEvent.doubleClickInterval, 0.28)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -358,7 +350,6 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         }
 
         if event.clickCount >= 2 {
-            clickGeneration &+= 1
             let point = convert(event.locationInWindow, from: nil)
             guard bounds.contains(point) else { return }
             DispatchQueue.main.async { [weak self] in
@@ -415,15 +406,11 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let endInWindow = window.convertPoint(fromScreen: endPointer)
         let endInView = convert(endInWindow, from: nil)
         guard bounds.contains(endInView) else { return }
-
-        clickGeneration &+= 1
-        let generation = clickGeneration
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.singleClickDelay
-        ) { [weak self] in
-            guard let self, self.clickGeneration == generation else { return }
-            self.onClick?()
-        }
+        // A single click only selects now; it no longer opens the compact
+        // terminal. Apply that lightweight state immediately so the mascot and
+        // Option-right route feel native. A subsequent double-click can safely
+        // keep the selection and open Teddy without any visual flash.
+        onClick?()
     }
 
 }
@@ -771,7 +758,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func setDesktopSelected(_ selected: Bool) {
-        mascotHostView?.setQuickActionsVisible(selected)
+        mascotHostView?.setQuickActionsVisible(selected && !dropIsTargeted)
     }
 
     /// Moves the existing native terminal hierarchy into Teddy without
@@ -1060,6 +1047,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         guard targeted != dropIsTargeted else { return }
         dropIsTargeted = targeted
         dropFeedback.setTargeted(targeted)
+        mascotHostView?.setQuickActionsVisible(
+            !targeted && manager?.selectedCompanionID == runtimeID)
     }
 
     /// Starts one bounded FLIP only when the selected side changes. During all
@@ -1461,6 +1450,7 @@ private struct GaiCompanionMascotView: View {
         .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
         .animation(.easeOut(duration: 0.16), value: runtime.isDesktopSelected)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
+        .accessibilityValue(runtime.isDesktopSelected ? "Sélectionné" : "Non sélectionné")
     }
 
     private var keepsIdentityColor: Bool {
