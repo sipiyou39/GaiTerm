@@ -113,6 +113,7 @@ final class GaiSplitController {
         config.environmentVariables["GAITERM_SURFACE_ID"] = surfaceID.uuidString
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.sipiyou.gaiterm"
         config.environmentVariables["GAITERM_NOTIFY_BUNDLE_ID"] = bundleIdentifier
+        config.environmentVariables["GAITERM_NOTIFY_APP_PATH"] = Bundle.main.bundlePath
         config.environmentVariables["GAITERM_NOTIFY_URL_SCHEME"] =
             bundleIdentifier == "com.sipiyou.gaiterm.debug" ? "gaiterm-debug" : "gaiterm"
 

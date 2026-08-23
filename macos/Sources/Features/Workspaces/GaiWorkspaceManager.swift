@@ -2127,13 +2127,15 @@ enum GaiAgentHookInstaller {
             eventName: String,
             eventLabel: String? = nil,
             provider: String,
-            kind: String
+            kind: String,
+            includesLastAssistantMessage: Bool = false
         ) {
             self.eventName = eventName
             self.eventLabel = eventLabel ?? eventName
             self.command = GaiAgentHookInstaller.agentEventCommand(
                 provider: provider,
-                kind: kind)
+                kind: kind,
+                includesLastAssistantMessage: includesLastAssistantMessage)
         }
 
         init(
@@ -2180,7 +2182,8 @@ enum GaiAgentHookInstaller {
             eventName: "Stop",
             eventLabel: "stop",
             provider: "codex",
-            kind: "stop"),
+            kind: "stop",
+            includesLastAssistantMessage: true),
         HookSpec(
             eventName: "SessionEnd",
             eventLabel: "session_end",
@@ -2233,13 +2236,31 @@ enum GaiAgentHookInstaller {
     /// Only conservative URL-safe correlation identifiers leave the process.
     private static func agentEventCommand(
         provider: String,
-        kind: String
+        kind: String,
+        includesLastAssistantMessage: Bool = false
     ) -> String {
+        let outputSetup = includesLastAssistantMessage
+            ? "exec 3>&1 >/dev/null 2>&1; "
+                + "trap \"/usr/bin/printf {} >&3\" EXIT; "
+            : "exec >/dev/null 2>&1; "
+        let responseExtraction = includesLastAssistantMessage
+            ? "response=$(/usr/bin/printf \"%s\" \"$payload\" | "
+                + "/usr/bin/plutil -extract last_assistant_message raw -o - -- - "
+                + "2>/dev/null || true); "
+                + "response_query=; response_bytes=; if [ -n \"$response\" ]; then "
+                + "response=$(/usr/bin/printf \"%.65536s\" \"$response\"); "
+                + "response_bytes=$(/usr/bin/printf \"%s\" \"$response\" | "
+                + "/usr/bin/wc -c | /usr/bin/tr -d \" \" ); "
+                + "case \"$response_bytes\" in \"\"|*[!0-9]*) "
+                + "response=; response_bytes= ;; "
+                + "*) response_query=\"&response_bytes=$response_bytes\" ;; esac; fi; "
+            : "response=; response_query=; response_bytes=; "
         return
             "/bin/sh -c ': \(agentEventHookMarker)-\(provider)-\(kind); " +
-            "exec >/dev/null 2>&1; " +
+            outputSetup +
             "payload=$(/bin/cat || true); " +
             rootAgentPayloadGuard(provider: provider) +
+            responseExtraction +
             "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
             "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
             "case \"$token\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
@@ -2265,9 +2286,20 @@ enum GaiAgentHookInstaller {
             "if [ -n \"$turn\" ]; then url=\"$url&turn=$turn\"; fi; " +
             "socket=\"${GAITERM_EVENT_SOCKET:-}\"; " +
             "case \"$socket\" in /*) " +
-            "reply=$(/usr/bin/printf \"%s\\n\" \"$url\" | " +
+            "reply=$({ /usr/bin/printf \"%s\\n\" \"$url$response_query\"; " +
+            "if [ -n \"$response_bytes\" ]; then " +
+            "/usr/bin/printf \"%s\" \"$response\"; fi; } | " +
+            "/usr/bin/nc -U -w 2 \"$socket\" || true); " +
+            "if [ \"$reply\" = \"OK\" ]; then exit 0; fi; " +
+            "/bin/sleep 0.05; " +
+            "reply=$({ /usr/bin/printf \"%s\\n\" \"$url$response_query\"; " +
+            "if [ -n \"$response_bytes\" ]; then " +
+            "/usr/bin/printf \"%s\" \"$response\"; fi; } | " +
             "/usr/bin/nc -U -w 2 \"$socket\" || true); " +
             "if [ \"$reply\" = \"OK\" ]; then exit 0; fi ;; esac; " +
+            "app=\"${GAITERM_NOTIFY_APP_PATH:-}\"; " +
+            "case \"$app\" in /*.app) " +
+            "/usr/bin/open -g -a \"$app\" \"$url\" && exit 0 ;; esac; " +
             "/usr/bin/open -g -b \"$bundle\" \"$url\" || true; exit 0'"
     }
 

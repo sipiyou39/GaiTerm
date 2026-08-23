@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import GaiTerm
 
 struct GaiCompanionActivityReducerTests {
     private let surfaceID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
@@ -1623,6 +1623,77 @@ struct GaiCompanionActivityReducerTests {
         #expect(state.phase == .idle)
         #expect(state.pendingAcknowledgement == nil)
         #expect(state.source == .processLifecycle)
+    }
+
+    @Test func correlatedTerminalObservationRecoversAMissingProviderStop() {
+        var state = GaiCompanionActivityState(surfaceID: surfaceID)
+        GaiCompanionActivityReducer.apply(
+            .event(makeEvent(
+                id: "typed-start",
+                provider: .codex,
+                turnID: "turn:turn-1",
+                kind: .started,
+                source: .providerHook)),
+            to: &state)
+
+        let disposition = GaiCompanionActivityReducer.apply(
+            .event(makeEvent(
+                id: "settled-screen",
+                provider: .codex,
+                turnID: "turn:turn-1",
+                kind: .stop,
+                source: .terminalObservation,
+                offset: 1)),
+            to: &state)
+
+        #expect(disposition == .appliedEvent)
+        #expect(state.phase == .completedUnseen)
+        #expect(state.pendingAcknowledgement?.eventID == "settled-screen")
+    }
+
+    @Test func terminalObservationCannotFinishAnotherTurnOrAWait() {
+        var state = GaiCompanionActivityState(surfaceID: surfaceID)
+        GaiCompanionActivityReducer.apply(
+            .event(makeEvent(
+                id: "typed-start",
+                provider: .codex,
+                turnID: "turn:turn-1",
+                kind: .started,
+                source: .providerHook)),
+            to: &state)
+
+        #expect(
+            GaiCompanionActivityReducer.apply(
+                .event(makeEvent(
+                    id: "wrong-turn",
+                    provider: .codex,
+                    turnID: "turn:turn-2",
+                    kind: .stop,
+                    source: .terminalObservation,
+                    offset: 1)),
+                to: &state) == .ignoredStaleEvent)
+        #expect(state.phase == .working)
+
+        GaiCompanionActivityReducer.apply(
+            .event(makeEvent(
+                id: "needs-user",
+                provider: .codex,
+                turnID: "turn:turn-1",
+                kind: .awaitingInput,
+                source: .providerHook,
+                offset: 2)),
+            to: &state)
+        #expect(
+            GaiCompanionActivityReducer.apply(
+                .event(makeEvent(
+                    id: "settled-while-waiting",
+                    provider: .codex,
+                    turnID: "turn:turn-1",
+                    kind: .stop,
+                    source: .terminalObservation,
+                    offset: 3)),
+                to: &state) == .ignoredStaleEvent)
+        #expect(state.phase == .awaitingInput)
     }
 
     @Test func eventForAnotherSurfaceIsIgnoredWithoutPollutingDeduplication() {

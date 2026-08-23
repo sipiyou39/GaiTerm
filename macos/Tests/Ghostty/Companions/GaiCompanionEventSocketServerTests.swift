@@ -2,15 +2,16 @@
 import Darwin
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import GaiTerm
 
 @MainActor
 struct GaiCompanionEventSocketServerTests {
     @Test func deliversOneFrameOnMainActorBeforeAcknowledging() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { url in
+        let server = GaiCompanionEventSocketServer { frame in
             recorder.wasOnMainThread = Thread.isMainThread
-            recorder.urls.append(url)
+            recorder.urls.append(frame.url)
+            recorder.responseBodies.append(frame.responseBody)
             return true
         }
         let path = try server.start()
@@ -24,12 +25,13 @@ struct GaiCompanionEventSocketServerTests {
         #expect(response == GaiCompanionEventSocketServer.acknowledgement)
         #expect(recorder.wasOnMainThread)
         #expect(recorder.urls == [url])
+        #expect(recorder.responseBodies == [nil])
     }
 
     @Test func serializesHandlerAndAcknowledgementInAcceptOrder() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { url in
-            recorder.urls.append(url)
+        let server = GaiCompanionEventSocketServer { frame in
+            recorder.urls.append(frame.url)
             return true
         }
         let path = try server.start()
@@ -49,8 +51,8 @@ struct GaiCompanionEventSocketServerTests {
 
     @Test func rejectsOversizedAndMultipleFramesWithoutCallingHandler() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { url in
-            recorder.urls.append(url)
+        let server = GaiCompanionEventSocketServer { frame in
+            recorder.urls.append(frame.url)
             return true
         }
         let path = try server.start()
@@ -58,7 +60,9 @@ struct GaiCompanionEventSocketServerTests {
 
         let oversizedResponse = try await runSocketClient {
             let payload = Data(
-                (String(repeating: "a", count: 8_193) + "\n").utf8)
+                (String(
+                    repeating: "a",
+                    count: GaiCompanionEventSocketServer.maximumFrameByteCount + 1) + "\n").utf8)
             return try socketExchange(path: path, payload: payload)
         }
         let multipleResponse = try await runSocketClient {
@@ -73,8 +77,8 @@ struct GaiCompanionEventSocketServerTests {
 
     @Test func rejectsUnauthenticatedHandlerResultWithoutAcknowledging() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { url in
-            recorder.urls.append(url)
+        let server = GaiCompanionEventSocketServer { frame in
+            recorder.urls.append(frame.url)
             return false
         }
         let path = try server.start()
@@ -113,8 +117,8 @@ struct GaiCompanionEventSocketServerTests {
 
     @Test func incompleteClientIsClosedAtDeadline() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer(clientDeadline: 0.1) { url in
-            recorder.urls.append(url)
+        let server = GaiCompanionEventSocketServer(clientDeadline: 0.1) { frame in
+            recorder.urls.append(frame.url)
             return true
         }
         let path = try server.start()
@@ -131,6 +135,30 @@ struct GaiCompanionEventSocketServerTests {
         #expect(recorder.urls.isEmpty)
     }
 
+    @Test func deliversExactLengthRawResponseBody() async throws {
+        let recorder = EventRecorder()
+        let server = GaiCompanionEventSocketServer { frame in
+            recorder.urls.append(frame.url)
+            recorder.responseBodies.append(frame.responseBody)
+            return true
+        }
+        let path = try server.start()
+        defer { server.stop() }
+
+        let answer = Data("Réponse longue\navec plusieurs lignes 👌".utf8)
+        let header = socketTestSecondURL + "&response_bytes=\(answer.count)"
+        var payload = Data("\(header)\n".utf8)
+        payload.append(answer)
+
+        let response = try await runSocketClient {
+            try socketExchange(path: path, payload: payload)
+        }
+
+        #expect(response == GaiCompanionEventSocketServer.acknowledgement)
+        #expect(recorder.urls.map(\.absoluteString) == [header])
+        #expect(recorder.responseBodies == [answer])
+    }
+
 }
 
 private let socketTestFirstURL =
@@ -143,6 +171,7 @@ private let socketTestSecondURL =
 @MainActor
 private final class EventRecorder {
     var urls: [URL] = []
+    var responseBodies: [Data?] = []
     var wasOnMainThread = false
 }
 

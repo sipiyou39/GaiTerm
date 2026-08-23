@@ -18,8 +18,17 @@ struct GaiCompanionEventEnvelope: Equatable, Sendable {
     let version: Int
     let token: String
     let event: GaiCompanionEvent
+    /// A final-message payload is useful for Teddy, but it is never allowed to
+    /// poison the provider lifecycle. The authenticated Stop still settles the
+    /// doudou when an optional response cannot be decoded; the manager then
+    /// falls back to its bounded terminal capture.
+    let discardedMalformedResponse: Bool
 
-    init(url: URL, receivedAt: Date = Date()) throws {
+    init(
+        url: URL,
+        responseBody: Data? = nil,
+        receivedAt: Date = Date()
+    ) throws {
         guard url.absoluteString.utf8.count <= Self.maximumURLByteCount else {
             throw GaiCompanionEventTransportError.requestTooLarge
         }
@@ -96,9 +105,34 @@ struct GaiCompanionEventEnvelope: Equatable, Sendable {
         let message = try fields["message"].map {
             try Self.validatedMessage($0, field: "message")
         }
+        let encodedResponse = fields["response"]
+        let declaredResponseByteCount = try fields["response_bytes"].map {
+            guard let count = Int($0),
+                  count > 0,
+                  count <= Self.maximumResponseByteCount,
+                  String(count) == $0 else {
+                throw GaiCompanionEventTransportError.invalidField("response_bytes")
+            }
+            return count
+        }
+        let responseText: String?
+        if let responseBody,
+           declaredResponseByteCount == responseBody.count {
+            responseText = try? Self.decodedResponse(responseBody)
+        } else if responseBody == nil,
+                  declaredResponseByteCount == nil,
+                  let encodedResponse {
+            responseText = try? Self.decodedResponse(encodedResponse)
+        } else {
+            responseText = nil
+        }
+        let carriedResponse = encodedResponse != nil
+            || declaredResponseByteCount != nil
+            || responseBody != nil
 
         self.version = Self.currentVersion
         self.token = token
+        self.discardedMalformedResponse = carriedResponse && responseText == nil
         self.event = GaiCompanionEvent(
             surfaceID: surfaceID,
             provider: GaiCompanionProvider(rawValue: rawProvider),
@@ -106,12 +140,15 @@ struct GaiCompanionEventEnvelope: Equatable, Sendable {
             turnID: turnID,
             kind: kind,
             timestamp: receivedAt,
-            message: message)
+            message: message,
+            responseText: responseText)
     }
 
-    private static let maximumURLByteCount = 8_192
+    private static let maximumURLByteCount = GaiCompanionEventSocketServer.maximumFrameByteCount
+    static let maximumResponseByteCount = 65_536
     private static let allowedFieldNames: Set<String> = [
         "v", "surface", "token", "provider", "kind", "event", "turn", "message",
+        "response", "response_bytes",
     ]
 
     private static func requiredField(
@@ -153,6 +190,42 @@ struct GaiCompanionEventEnvelope: Equatable, Sendable {
         return value
     }
 
+    private static func decodedResponse(_ value: String) throws -> String {
+        guard !value.isEmpty,
+              value.utf8.count <= ((maximumResponseByteCount + 2) / 3) * 4,
+              value.unicodeScalars.allSatisfy(Self.isBase64URLScalar) else {
+            throw GaiCompanionEventTransportError.invalidField("response")
+        }
+
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.utf8.count % 4
+        if remainder != 0 {
+            base64 += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let data = Data(base64Encoded: base64) else {
+            throw GaiCompanionEventTransportError.invalidField("response")
+        }
+        return try decodedResponse(data)
+    }
+
+    private static func decodedResponse(_ data: Data) throws -> String {
+        guard !data.isEmpty,
+              data.count <= maximumResponseByteCount,
+              let decoded = String(data: data, encoding: .utf8) else {
+            throw GaiCompanionEventTransportError.invalidField("response")
+        }
+
+        let response = decoded
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !response.isEmpty,
+              !response.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw GaiCompanionEventTransportError.invalidField("response")
+        }
+        return response
+    }
+
     private static func isProviderIdentifier(_ value: String) -> Bool {
         guard value.utf8.count >= 1, value.utf8.count <= 64,
               let first = value.unicodeScalars.first,
@@ -173,6 +246,15 @@ struct GaiCompanionEventEnvelope: Equatable, Sendable {
         switch scalar.value {
         case 0x41...0x5A, 0x61...0x7A, 0x30...0x39,
              0x2D, 0x2E, 0x3A, 0x40, 0x5F, 0x7E:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isBase64URLScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x41...0x5A, 0x61...0x7A, 0x30...0x39, 0x2D, 0x5F:
             true
         default:
             false

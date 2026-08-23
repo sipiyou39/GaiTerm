@@ -282,6 +282,48 @@ enum GaiCompanionAgentEventReceipt: Equatable {
     }
 }
 
+/// Recovers an authenticated provider Stop only for the exact Teddy-owned turn
+/// which is still active. This path exists for a lost/rejected intermediate
+/// start event or a provider Stop whose optional final-message field could not
+/// be decoded. Explicit conflicting turn identifiers remain a hard boundary.
+enum GaiAuthenticatedStopRecoveryPolicy {
+    static func shouldRecover(
+        event: GaiCompanionEvent,
+        disposition: GaiCompanionReductionDisposition,
+        state: GaiCompanionActivityState,
+        pendingTurn: GaiCompanionLastResponseStore.PendingTurnContext?
+    ) -> Bool {
+        switch disposition {
+        case .ignoredStaleEvent, .ignoredStaleTurn, .ignoredLowerAuthority:
+            break
+        case .appliedEvent, .acknowledged, .duplicateEvent,
+             .ignoredInvalidEventID, .ignoredWrongSurface, .ignoredAfterExit,
+             .ignoredStaleAcknowledgement, .ignoredStaleProvisionalExpiry,
+             .expiredProvisionalStart:
+            return false
+        }
+
+        guard let pendingTurn,
+              event.source == .providerHook,
+              event.kind == .stop,
+              event.timestamp >= pendingTurn.beganAt,
+              pendingTurn.origin == .teddy,
+              state.phase == .working,
+              state.provider == event.provider else {
+            return false
+        }
+
+        guard let currentTurnID = state.turnID,
+              let eventTurnID = event.turnID else {
+            // A missing identifier is recoverable because the manager also
+            // correlates surface capability, active generation and Teddy's
+            // pending response token before this policy is called.
+            return true
+        }
+        return currentTurnID == eventTurnID
+    }
+}
+
 enum GaiCompanionTerminalPlacement: CaseIterable, Equatable {
     case top
     case bottom
@@ -428,7 +470,7 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
         if case .event(let event) = action,
            event.surfaceID == id,
            event.source == .providerHook,
-           (event.kind == .ready || event.kind == .started) {
+           event.kind == .ready || event.kind == .started {
             // A delivered authenticated hook is the runtime handshake. Until
             // this proof exists, Return remains an optimistic fallback so an
             // old/missing adapter cannot leave a visibly working CLI idle.
@@ -472,6 +514,35 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     }
 }
 
+/// One bounded settlement probe for one exact response turn. The probe exists
+/// only while that turn is active and is invalidated by the PTY incarnation,
+/// activity generation and response token together.
+private final class GaiCompanionResponseSettlementWatchdog {
+    let runtimeID: UUID
+    let incarnationToken: String
+    let generation: UInt64
+    let responseToken: GaiCompanionLastResponseStore.TurnToken
+    var observation = GaiResponseSettlementObservation()
+    var workItem: DispatchWorkItem?
+
+    init(
+        runtimeID: UUID,
+        incarnationToken: String,
+        generation: UInt64,
+        responseToken: GaiCompanionLastResponseStore.TurnToken
+    ) {
+        self.runtimeID = runtimeID
+        self.incarnationToken = incarnationToken
+        self.generation = generation
+        self.responseToken = responseToken
+    }
+
+    func cancel() {
+        workItem?.cancel()
+        workItem = nil
+    }
+}
+
 /// Agent-first replacement for `GaiWorkspaceManager`.
 ///
 /// It deliberately mirrors the old manager's public surface API so the rest of
@@ -493,6 +564,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var terminalTransientCounts: [UUID: Int] = [:]
     private var activeCloseConfirmationIDs: Set<UUID> = []
     private var closeAllConfirmationIsPresented = false
+    private let lastResponseStore = GaiCompanionLastResponseStore()
+    private var responseCaptureTasks: [UUID: DispatchWorkItem] = [:]
+    private var responseSettlementWatchdogs: [
+        UUID: GaiCompanionResponseSettlementWatchdog
+    ] = [:]
     private var provisionalExpiryTasks: [
         UUID: (nonce: UUID, workItem: DispatchWorkItem)
     ] = [:]
@@ -511,6 +587,15 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var terminalFocusLossProtectionUntil: [UUID: TimeInterval] = [:]
     private var fileDropFocusGeneration: [UUID: UInt64] = [:]
     private static let provisionalStartLifetime: TimeInterval = 3
+    /// Provider hooks can arrive just before their final PTY write is rendered.
+    /// These bounded retries stop as soon as one complete response is captured.
+    private static let responseCaptureSettlementDelays: [TimeInterval] = [
+        0.08, 0.18, 0.36, 0.72,
+    ]
+    /// The native provider Stop remains the fast path. A low-frequency screen
+    /// sample runs only while work is active and recovers a lost Stop after a
+    /// response has remained byte-identical for several consecutive samples.
+    private static let responseSettlementSampleInterval: TimeInterval = 0.5
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
@@ -526,6 +611,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     deinit {
+        for task in responseCaptureTasks.values {
+            task.cancel()
+        }
+        for watchdog in responseSettlementWatchdogs.values {
+            watchdog.cancel()
+        }
         for task in provisionalExpiryTasks.values {
             task.workItem.cancel()
         }
@@ -774,15 +865,194 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     ) -> GaiCompanionAgentEventReceipt {
         guard let runtime = runtime(id: event.surfaceID),
               token == runtime.eventToken else { return .rejected }
+        let phaseBeforeEvent = runtime.activity.phase
+        let pendingTurn = lastResponseStore.pendingTurn(for: runtime.id)
+        if event.kind == .started,
+           lastResponseStore.token(for: runtime.id) == nil,
+           let surface = runtime.surfaceView {
+            beginResponseTurn(for: runtime, surface: surface, origin: .user)
+        }
         let disposition = applyLifecycleEvent(
             event,
             to: runtime,
             notificationTitle: providerDisplayName(event.provider),
             notificationBody: event.message ?? notificationBody(for: event.kind))
         if disposition == .appliedEvent {
+            if event.kind == .started {
+                _ = lastResponseStore.bindTurn(
+                    agentID: runtime.id,
+                    turnID: event.turnID)
+            }
+            logAgentEvent(
+                event,
+                disposition: disposition,
+                phaseBefore: phaseBeforeEvent,
+                phaseAfter: runtime.activity.phase)
             return .applied
         }
+
+        // A Teddy submission is an app-owned, capability-correlated turn. If
+        // Codex returns its authenticated final answer but an intermediate
+        // lifecycle event was lost or rejected, recover that exact turn rather
+        // than leaving the doudou stuck forever. A conflicting explicit turn
+        // identifier is never rewritten.
+        if GaiAuthenticatedStopRecoveryPolicy.shouldRecover(
+            event: event,
+            disposition: disposition,
+            state: runtime.activity,
+            pendingTurn: pendingTurn
+        ) {
+            let recovered = GaiCompanionEvent(
+                surfaceID: event.surfaceID,
+                provider: event.provider,
+                eventID: nextEventID(prefix: "recovered-authenticated-stop"),
+                turnID: runtime.activity.turnID,
+                kind: .stop,
+                source: .terminalObservation,
+                timestamp: event.timestamp,
+                message: event.message,
+                responseText: event.responseText)
+            let recoveredDisposition = applyLifecycleEvent(
+                recovered,
+                to: runtime,
+                notificationTitle: providerDisplayName(event.provider),
+                notificationBody: event.message ?? notificationBody(for: event.kind))
+            if recoveredDisposition == .appliedEvent {
+                logAgentEvent(
+                    event,
+                    disposition: recoveredDisposition,
+                    phaseBefore: phaseBeforeEvent,
+                    phaseAfter: runtime.activity.phase,
+                    recovered: true)
+                return .applied
+            }
+            logAgentEvent(
+                event,
+                disposition: recoveredDisposition,
+                phaseBefore: phaseBeforeEvent,
+                phaseAfter: runtime.activity.phase,
+                recovered: true)
+            return .consumedWithoutChange(recoveredDisposition)
+        }
+        logAgentEvent(
+            event,
+            disposition: disposition,
+            phaseBefore: phaseBeforeEvent,
+            phaseAfter: runtime.activity.phase)
         return .consumedWithoutChange(disposition)
+    }
+
+    /// Privacy-safe lifecycle trace. It deliberately excludes the surface ID,
+    /// capability token, prompt and response contents while retaining enough
+    /// information to diagnose a real provider integration failure.
+    private func logAgentEvent(
+        _ event: GaiCompanionEvent,
+        disposition: GaiCompanionReductionDisposition,
+        phaseBefore: GaiCompanionPhase,
+        phaseAfter: GaiCompanionPhase,
+        recovered: Bool = false
+    ) {
+        let summary = "agent event provider=\(event.provider.rawValue) "
+            + "kind=\(event.kind.rawValue) before=\(phaseBefore.rawValue) "
+            + "after=\(phaseAfter.rawValue) disposition=\(disposition.rawValue) "
+            + "turn=\(event.turnID != nil) response=\(event.responseText != nil) "
+            + "recovered=\(recovered)"
+        Ghostty.logger.info("\(summary, privacy: .public)")
+    }
+
+    /// Returns the sole response retained for this companion. Every later
+    /// accepted completion replaces it.
+    func lastResponse(for id: UUID) -> GaiCompanionLastResponse? {
+        lastResponseStore.lastResponse(for: id)
+    }
+
+    /// Lightweight, on-demand state exposed to Teddy. This projection never
+    /// reads terminal contents and therefore remains safe to refresh in UI.
+    func managedAgentSnapshots() -> [GaiManagedAgentSnapshot] {
+        runtimes.map { runtime in
+            GaiManagedAgentSnapshot(
+                id: runtime.id,
+                name: runtime.record.displayName,
+                provider: runtime.activity.provider ?? inferredProvider(for: runtime),
+                phase: runtime.activity.phase,
+                directoryPath: runtime.record.directoryPath,
+                launchCommand: runtime.record.launchCommand,
+                lastResponse: lastResponseStore.lastResponse(for: runtime.id),
+                isResponsePending: lastResponseStore.hasPendingTurn(for: runtime.id))
+        }
+    }
+
+    /// Submits a prompt to an already-live doudou without revealing, focusing,
+    /// or otherwise changing its terminal. User interaction with that same CLI
+    /// remains completely normal before and after the submission.
+    @MainActor
+    func submitPrompt(_ text: String, to id: UUID) -> GaiCompanionControlReceipt {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return .failed(.emptyPrompt) }
+        guard prompt.utf8.count <= GaiCompanionControl.maximumPromptByteCount else {
+            return .failed(.promptTooLarge)
+        }
+        guard let runtime = runtime(id: id) else { return .failed(.unknownAgent) }
+        guard runtime.activity.phase != .exited,
+              let surfaceView = runtime.surfaceView,
+              let surface = surfaceView.surfaceModel else {
+            return .failed(.unavailableTerminal)
+        }
+        guard runtime.activity.phase != .working else {
+            return .failed(.agentBusy)
+        }
+
+        beginResponseTurn(
+            for: runtime,
+            surface: surfaceView,
+            origin: .teddy,
+            submittedText: prompt)
+        recordSubmittedInput(for: runtime, submissionIsGuaranteed: true)
+        surface.sendText(prompt)
+        surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .press))
+        surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .release))
+        return .submitted(agentID: id)
+    }
+
+    /// Sends the same Ctrl-C a user would type. It does not kill the PTY or
+    /// recreate the agent, so conversation state remains owned by the CLI.
+    @MainActor
+    func interruptAgent(id: UUID) -> GaiCompanionControlReceipt {
+        guard let runtime = runtime(id: id) else { return .failed(.unknownAgent) }
+        guard runtime.activity.phase != .exited,
+              let surface = runtime.surfaceView?.surfaceModel else {
+            return .failed(.unavailableTerminal)
+        }
+
+        let press = Ghostty.Input.KeyEvent(
+            key: .c,
+            action: .press,
+            text: "c",
+            mods: .ctrl,
+            unshiftedCodepoint: 0x63)
+        let release = Ghostty.Input.KeyEvent(
+            key: .c,
+            action: .release,
+            text: "c",
+            mods: .ctrl,
+            unshiftedCodepoint: 0x63)
+        surface.sendKeyEvent(press)
+        surface.sendKeyEvent(release)
+
+        let provider = inferredProvider(for: runtime)
+        let event = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: provider,
+            eventID: nextEventID(prefix: "teddy-cancel"),
+            kind: .cancelled,
+            source: .userInput,
+            message: "Work cancelled by Teddy")
+        _ = applyLifecycleEvent(
+            event,
+            to: runtime,
+            notificationTitle: providerDisplayName(provider),
+            notificationBody: "Work cancelled")
+        return .interrupted(agentID: id)
     }
 
     // MARK: Library actions
@@ -800,6 +1070,26 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             companionColorway: colorway,
             companionScalePercent: scalePercent,
             companionCompletionSoundEnabled: completionSoundEnabled)
+    }
+
+    /// Creates one ordinary doudou rooted in an explicitly selected folder.
+    /// A CLI launch command is optional: `.terminal` preserves a plain shell,
+    /// while `.codex` starts Codex inside that same normal terminal.
+    @MainActor
+    func createCompanion(
+        directoryURL: URL,
+        cli: GaiCompanionCreationCLI
+    ) -> GaiManagedAgentSnapshot? {
+        let directory = directoryURL.standardizedFileURL
+        guard directory.isFileURL,
+              (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        else { return nil }
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = directory.path
+        config.command = cli.launchCommand
+        guard let surface = openTerminal(baseConfig: config) else { return nil }
+        return managedAgentSnapshots().first { $0.id == surface.id }
     }
 
     var suggestedCompanionColorway: GaiCompanionColorway {
@@ -1115,6 +1405,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         terminalFocusLossProtectionUntil.removeValue(forKey: id)
         fileDropFocusGeneration.removeValue(forKey: id)
         activeCloseConfirmationIDs.remove(id)
+        responseCaptureTasks.removeValue(forKey: id)?.cancel()
+        responseSettlementWatchdogs.removeValue(forKey: id)?.cancel()
+        lastResponseStore.removeAgent(id)
         provisionalExpiryTasks.removeValue(forKey: id)?.workItem.cancel()
         let runtime = runtimes.remove(at: index)
         runtime.surfaceView?.gaiReleaseTerminalSurface()
@@ -1380,6 +1673,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         #endif
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? fallbackBundleIdentifier
         config.environmentVariables["GAITERM_NOTIFY_BUNDLE_ID"] = bundleIdentifier
+        config.environmentVariables["GAITERM_NOTIFY_APP_PATH"] = Bundle.main.bundlePath
         config.environmentVariables["GAITERM_NOTIFY_URL_SCHEME"] =
             GaiCompanionEventEnvelope.scheme
 
@@ -1829,6 +2123,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let disposition = runtime.apply(.event(event))
         if disposition == .appliedEvent {
             reconcileProvisionalExpiry(for: runtime)
+            reconcileResponseSettlementWatchdog(for: runtime)
         }
         updateDockBadge()
     }
@@ -1868,13 +2163,31 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     @objc private func didReceiveUserInput(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
               let runtime = currentRuntime(for: surface) else { return }
+        beginResponseTurn(for: runtime, surface: surface, origin: .user)
+        recordSubmittedInput(for: runtime)
+    }
+
+    private func recordSubmittedInput(
+        for runtime: GaiCompanionRuntime,
+        submissionIsGuaranteed: Bool = false
+    ) {
         runtime.acknowledgeCompletion()
         let provider = inferredProvider(for: runtime)
-        guard let kind = GaiCompanionInputPolicy.eventKind(
-            provider: provider,
-            phase: runtime.activity.phase,
-            nativeAdapterIsReady: runtime.hasObservedNativeAdapter(for: provider))
-        else {
+        let kind: GaiCompanionEventKind?
+        if submissionIsGuaranteed {
+            // The tool router has already validated a live PTY and is about to
+            // inject both the prompt and a real Enter. Unlike a speculative
+            // physical key press, this is sufficient to open the local turn;
+            // the provider start hook subsequently enriches it with turn_id.
+            kind = GaiCompanionGuaranteedInputPolicy.eventKind(
+                for: runtime.activity.phase)
+        } else {
+            kind = GaiCompanionInputPolicy.eventKind(
+                provider: provider,
+                phase: runtime.activity.phase,
+                nativeAdapterIsReady: runtime.hasObservedNativeAdapter(for: provider))
+        }
+        guard let kind else {
             updateDockBadge()
             return
         }
@@ -1888,6 +2201,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let disposition = runtime.apply(.event(event))
         if disposition == .appliedEvent {
             reconcileProvisionalExpiry(for: runtime)
+            reconcileResponseSettlementWatchdog(for: runtime)
         }
         updateDockBadge()
     }
@@ -1955,8 +2269,20 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let disposition = runtime.apply(.event(event))
         if disposition == .appliedEvent {
             reconcileProvisionalExpiry(for: runtime)
+            reconcileResponseSettlementWatchdog(for: runtime)
         }
         guard disposition == .appliedEvent else { return disposition }
+
+        switch event.kind {
+        case .stop, .failed, .awaitingInput, .awaitingApproval:
+            scheduleResponseCapture(for: event, runtime: runtime)
+        case .cancelled, .exited:
+            responseCaptureTasks.removeValue(forKey: runtime.id)?.cancel()
+            responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+            lastResponseStore.resetTurn(for: runtime.id)
+        case .ready, .started, .resumed:
+            break
+        }
 
         updateDockBadge()
         if event.kind == .stop, runtime.record.completionSoundEnabled {
@@ -1983,6 +2309,186 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         return disposition
     }
 
+    private func beginResponseTurn(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView,
+        origin: GaiInteractionOrigin,
+        submittedText: String? = nil
+    ) {
+        responseCaptureTasks.removeValue(forKey: runtime.id)?.cancel()
+        responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+        _ = lastResponseStore.begin(
+            agentID: runtime.id,
+            origin: origin,
+            screenText: surface.gaiResponseCaptureScreenText(),
+            submittedText: submittedText)
+    }
+
+    private func scheduleResponseCapture(
+        for event: GaiCompanionEvent,
+        runtime: GaiCompanionRuntime
+    ) {
+        guard let surface = runtime.surfaceView else { return }
+        let token = lastResponseStore.token(for: runtime.id)
+            ?? lastResponseStore.begin(
+                agentID: runtime.id,
+                origin: .user,
+                screenText: "")
+        responseCaptureTasks.removeValue(forKey: runtime.id)?.cancel()
+
+        if let responseText = event.responseText {
+            if let response = lastResponseStore.complete(
+                token: token,
+                provider: event.provider,
+                eventID: event.eventID,
+                turnID: event.turnID,
+                responseText: responseText
+            ) {
+                publishLastResponse(response)
+            }
+            return
+        }
+
+        scheduleResponseCaptureAttempt(
+            for: event,
+            runtime: runtime,
+            surface: surface,
+            token: token,
+            attempt: 0)
+    }
+
+    private func scheduleResponseCaptureAttempt(
+        for event: GaiCompanionEvent,
+        runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView,
+        token: GaiCompanionLastResponseStore.TurnToken,
+        attempt: Int
+    ) {
+        guard Self.responseCaptureSettlementDelays.indices.contains(attempt),
+              lastResponseStore.token(for: runtime.id) == token else { return }
+
+        let runtimeID = runtime.id
+        let workItem = DispatchWorkItem { [weak self, weak runtime, weak surface] in
+            guard let self,
+                  let runtime,
+                  let surface,
+                  self.runtime(id: runtimeID) === runtime,
+                  runtime.surfaceView === surface,
+                  self.lastResponseStore.token(for: runtimeID) == token else { return }
+            self.responseCaptureTasks[runtimeID] = nil
+            if let response = self.lastResponseStore.complete(
+                token: token,
+                provider: event.provider,
+                eventID: event.eventID,
+                turnID: event.turnID,
+                screenText: surface.gaiResponseCaptureScreenText()) {
+                self.publishLastResponse(response)
+                return
+            }
+            self.scheduleResponseCaptureAttempt(
+                for: event,
+                runtime: runtime,
+                surface: surface,
+                token: token,
+                attempt: attempt + 1)
+        }
+        responseCaptureTasks[runtimeID] = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.responseCaptureSettlementDelays[attempt],
+            execute: workItem)
+    }
+
+    private func reconcileResponseSettlementWatchdog(
+        for runtime: GaiCompanionRuntime
+    ) {
+        guard runtime.activity.phase == .working,
+              runtime.activity.provider != .terminal,
+              runtime.surfaceView != nil,
+              let responseToken = lastResponseStore.token(for: runtime.id) else {
+            responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+            return
+        }
+
+        if let current = responseSettlementWatchdogs[runtime.id],
+           current.incarnationToken == runtime.eventToken,
+           current.generation == runtime.activity.generation,
+           current.responseToken == responseToken {
+            return
+        }
+
+        responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+        let watchdog = GaiCompanionResponseSettlementWatchdog(
+            runtimeID: runtime.id,
+            incarnationToken: runtime.eventToken,
+            generation: runtime.activity.generation,
+            responseToken: responseToken)
+        responseSettlementWatchdogs[runtime.id] = watchdog
+        scheduleResponseSettlementSample(watchdog, runtime: runtime)
+    }
+
+    private func scheduleResponseSettlementSample(
+        _ watchdog: GaiCompanionResponseSettlementWatchdog,
+        runtime: GaiCompanionRuntime
+    ) {
+        let workItem = DispatchWorkItem { [weak self, weak runtime, weak watchdog] in
+            guard let self,
+                  let runtime,
+                  let watchdog,
+                  self.responseSettlementWatchdogs[watchdog.runtimeID] === watchdog,
+                  self.runtime(id: watchdog.runtimeID) === runtime,
+                  runtime.eventToken == watchdog.incarnationToken,
+                  runtime.activity.generation == watchdog.generation,
+                  runtime.activity.phase == .working,
+                  self.lastResponseStore.token(for: watchdog.runtimeID)
+                      == watchdog.responseToken,
+                  let surface = runtime.surfaceView else {
+                watchdog?.cancel()
+                return
+            }
+
+            watchdog.workItem = nil
+            let screenText = surface.gaiResponseCaptureScreenText()
+            let candidate = self.lastResponseStore.candidateResponse(
+                token: watchdog.responseToken,
+                screenText: screenText)
+            guard watchdog.observation.observe(
+                screenText: screenText,
+                candidateResponse: candidate) else {
+                self.scheduleResponseSettlementSample(watchdog, runtime: runtime)
+                return
+            }
+
+            self.responseSettlementWatchdogs.removeValue(
+                forKey: watchdog.runtimeID)?.cancel()
+            let provider = runtime.activity.provider
+                ?? self.inferredProvider(for: runtime)
+            let event = GaiCompanionEvent(
+                surfaceID: runtime.id,
+                provider: provider,
+                eventID: self.nextEventID(prefix: "settled-response"),
+                turnID: runtime.activity.turnID,
+                kind: .stop,
+                source: .terminalObservation,
+                message: "Response settled")
+            _ = self.applyLifecycleEvent(
+                event,
+                to: runtime,
+                notificationTitle: self.providerDisplayName(provider),
+                notificationBody: "Work completed")
+        }
+        watchdog.workItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.responseSettlementSampleInterval,
+            execute: workItem)
+    }
+
+    private func publishLastResponse(_ response: GaiCompanionLastResponse) {
+        NotificationCenter.default.post(
+            name: .gaiCompanionLastResponseDidChange,
+            object: self,
+            userInfo: [GaiCompanionControl.responseUserInfoKey: response])
+    }
+
     private func reconcileProvisionalExpiry(for runtime: GaiCompanionRuntime) {
         provisionalExpiryTasks.removeValue(forKey: runtime.id)?.workItem.cancel()
         guard runtime.activity.phase == .working,
@@ -2007,6 +2513,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             let disposition = runtime.apply(
                 .expireProvisionalStart(generation: generation))
             if disposition == .expiredProvisionalStart {
+                self.reconcileResponseSettlementWatchdog(for: runtime)
                 self.updateDockBadge()
             }
         }
@@ -2448,6 +2955,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             terminalFrame: clamped(geometry.terminalFrame, to: workArea))
     }
 
+    // swiftlint:disable:next function_parameter_count
     private func placementScore(
         raw: GaiCompanionPreviewGeometry,
         constrained: GaiCompanionPreviewGeometry,

@@ -16,6 +16,7 @@
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
 		00429441D6B8C74D277450B8 /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = B99100C2BC2E286ECF2A7C08 /* Sounds */; };
 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
+		B10000000000000000000001 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = B50000000000000000000001 /* FluidAudio */; };
 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
 		A53D0C952B53B4D800305CE6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
 		A546F1142D7B68D7003B11A0 /* locale in Resources */ = {isa = PBXBuildFile; fileRef = A546F1132D7B68D7003B11A0 /* locale */; };
@@ -98,6 +99,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		B30000000000000000000001 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				TeddyGrokVoiceApp.swift,
+			);
+			target = A5B30530299BEAAA0047F10C /* Ghostty */;
+		};
 		8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -220,6 +228,7 @@
 		810ACCA02E9D3302004F8F92 /* GhosttyUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = GhosttyUITests; sourceTree = "<group>"; };
 		81F82BC72E82815D001EDFA7 /* Sources */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 81F82CB02E8281F5001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Sources; sourceTree = "<group>"; };
 		A54F45F42E1F047A0046BD5C /* Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Tests; sourceTree = "<group>"; };
+		B40000000000000000000001 /* Teddy Voice Sources */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (B30000000000000000000001 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); name = "Teddy Voice Sources"; path = "../../TeddyGrokVoice/Sources"; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -249,6 +258,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */,
+				B10000000000000000000001 /* FluidAudio in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
 			);
@@ -294,6 +304,7 @@
 				A51BFC282B30F26D00E92F16 /* GhosttyDebug.entitlements */,
 				3B39CAA42B33949B00DABEB8 /* GhosttyReleaseLocal.entitlements */,
 				81F82BC72E82815D001EDFA7 /* Sources */,
+				B40000000000000000000001 /* Teddy Voice Sources */,
 				A54F45F42E1F047A0046BD5C /* Tests */,
 				810ACCA02E9D3302004F8F92 /* GhosttyUITests */,
 				A5D495A3299BECBA00DD1313 /* Frameworks */,
@@ -409,10 +420,12 @@
 			);
 			fileSystemSynchronizedGroups = (
 				81F82BC72E82815D001EDFA7 /* Sources */,
+				B40000000000000000000001 /* Teddy Voice Sources */,
 			);
 			name = Ghostty;
 			packageProductDependencies = (
 				A51BFC262B30F1B800E92F16 /* Sparkle */,
+				B50000000000000000000001 /* FluidAudio */,
 			);
 			productName = Ghostty;
 			productReference = A5B30531299BEAAA0047F10C /* GaiTerm.app */;
@@ -479,6 +492,7 @@
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				B60000000000000000000001 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -750,7 +764,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipiyou.gaiterm;
@@ -1150,7 +1164,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipiyou.gaiterm.debug;
@@ -1208,7 +1222,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipiyou.gaiterm;
@@ -1412,6 +1426,14 @@
 				minimumVersion = 2.5.1;
 			};
 		};
+		B60000000000000000000001 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.14.5;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1419,6 +1441,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		B50000000000000000000001 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B60000000000000000000001 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

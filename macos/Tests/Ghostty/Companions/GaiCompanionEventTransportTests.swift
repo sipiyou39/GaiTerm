@@ -1,7 +1,7 @@
 #if DEBUG
 import Foundation
 import Testing
-@testable import Ghostty
+@testable import GaiTerm
 
 struct GaiCompanionEventTransportTests {
     private let receivedAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -37,6 +37,54 @@ struct GaiCompanionEventTransportTests {
         #expect(envelope.event.kind == .started)
         #expect(envelope.event.turnID == nil)
         #expect(envelope.event.message == nil)
+        #expect(envelope.event.responseText == nil)
+        #expect(envelope.discardedMalformedResponse == false)
+    }
+
+    @Test func decodesABoundedNativeCLIResponse() throws {
+        let response = "J’ai terminé.\nLes tests passent."
+        let encoded = Data(response.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let url = replacingQueryItem(
+            in: validURL(),
+            named: "response",
+            with: encoded)
+
+        let envelope = try GaiCompanionEventEnvelope(url: url)
+
+        #expect(envelope.event.responseText == response)
+        #expect(envelope.discardedMalformedResponse == false)
+    }
+
+    @Test func malformedOptionalResponseDoesNotDiscardTheLifecycleEvent() {
+        let url = replacingQueryItem(
+            in: validURL(),
+            named: "response",
+            with: "not*base64")
+
+        let envelope = try? GaiCompanionEventEnvelope(url: url)
+
+        #expect(envelope?.event.kind == .started)
+        #expect(envelope?.event.responseText == nil)
+        #expect(envelope?.discardedMalformedResponse == true)
+    }
+
+    @Test func decodesExactRawResponseBodyFromSocketFrame() {
+        let response = "Réponse finale\navec du français et un emoji 👌"
+        let body = Data(response.utf8)
+        let url = replacingQueryItem(
+            in: validURL(),
+            named: "response_bytes",
+            with: String(body.count))
+
+        let envelope = try? GaiCompanionEventEnvelope(
+            url: url,
+            responseBody: body)
+
+        #expect(envelope?.event.responseText == response)
+        #expect(envelope?.discardedMalformedResponse == false)
     }
 
     @Test func rejectsWrongRouteAndUnsupportedVersion() throws {

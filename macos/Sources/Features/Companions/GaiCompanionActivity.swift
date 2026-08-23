@@ -8,10 +8,6 @@ import Foundation
 struct GaiCompanionProvider: RawRepresentable, Hashable, Sendable {
     let rawValue: String
 
-    init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
     static let codex = Self(rawValue: "codex")
     static let claude = Self(rawValue: "claude")
     static let agy = Self(rawValue: "agy")
@@ -147,6 +143,22 @@ enum GaiCompanionInputPolicy {
     }
 }
 
+/// A validated app-owned submission is stronger evidence than a speculative
+/// keyboard Return: the manager has a live PTY and will inject prompt + Enter
+/// as one operation. Provider hooks still enrich this local boundary.
+enum GaiCompanionGuaranteedInputPolicy {
+    static func eventKind(for phase: GaiCompanionPhase) -> GaiCompanionEventKind? {
+        switch phase {
+        case .awaitingInput, .awaitingApproval:
+            .resumed
+        case .idle, .completedUnseen, .failed:
+            .started
+        case .working, .exited:
+            nil
+        }
+    }
+}
+
 /// A provisional Return may time out only after a strongly identified
 /// interactive agent owns the foreground. Generic shell commands retain their
 /// work state until Ghostty's real command-finished boundary arrives.
@@ -163,6 +175,10 @@ enum GaiCompanionEventSource: String, Codable, Hashable, Sendable {
     case providerHook
     case userInput
     case terminalFallback
+    /// A bounded, process-local observation of a stable terminal response.
+    /// Unlike OSC/bell fallbacks this source cannot be supplied by a terminal
+    /// process; the manager creates it only for the exact active generation.
+    case terminalObservation
     /// Ghostty proved that the foreground process or PTY ended. This is more
     /// authoritative than a provider hook about session liveness, while a
     /// previously recorded provider completion/failure remains more precise.
@@ -171,7 +187,7 @@ enum GaiCompanionEventSource: String, Codable, Hashable, Sendable {
     fileprivate var authority: Int {
         switch self {
         case .processLifecycle: 4
-        case .providerHook: 3
+        case .providerHook, .terminalObservation: 3
         case .userInput: 2
         case .terminalFallback: 1
         }
@@ -188,11 +204,14 @@ struct GaiCompanionEvent: Codable, Hashable, Identifiable, Sendable {
     let source: GaiCompanionEventSource
     let timestamp: Date
     let message: String?
+    /// Provider-native final answer when the CLI exposes one. This is bounded
+    /// and authenticated by the local transport before it reaches the reducer.
+    /// Lifecycle state ignores it; the response store consumes it separately.
+    let responseText: String?
 
     var id: String { eventID }
 
     // The event intentionally keeps its transport fields explicit at call sites.
-    // swiftlint:disable:next function_parameter_count
     init(
         surfaceID: UUID,
         provider: GaiCompanionProvider,
@@ -201,7 +220,8 @@ struct GaiCompanionEvent: Codable, Hashable, Identifiable, Sendable {
         kind: GaiCompanionEventKind,
         source: GaiCompanionEventSource = .providerHook,
         timestamp: Date = Date(),
-        message: String? = nil
+        message: String? = nil,
+        responseText: String? = nil
     ) {
         self.surfaceID = surfaceID
         self.provider = provider
@@ -211,6 +231,7 @@ struct GaiCompanionEvent: Codable, Hashable, Identifiable, Sendable {
         self.source = source
         self.timestamp = timestamp
         self.message = message
+        self.responseText = responseText
     }
 }
 
@@ -598,6 +619,13 @@ enum GaiCompanionActivityReducer {
            !Self.isPermittedFallbackTransition(event, in: state) {
             return GaiCompanionReduction(state: state, disposition: .ignoredStaleEvent)
         }
+        // A terminal observation is produced only by the in-process bounded
+        // settlement watcher. It may recover a missing provider Stop, but may
+        // never manufacture a generation or override a wait/failure boundary.
+        if event.source == .terminalObservation,
+           !Self.isPermittedTerminalObservation(event, in: state) {
+            return GaiCompanionReduction(state: state, disposition: .ignoredStaleEvent)
+        }
         // Stop hooks may overlap during migration or be retried with a fresh
         // UUID. Completion and cancellation are terminal and idempotent within
         // one generation, including after a UI acknowledgement. In particular,
@@ -611,10 +639,11 @@ enum GaiCompanionActivityReducer {
         // regress either terminal state with a late active event for the same
         // logical turn. A fresh local Enter is the one explicit exception: it
         // opens the next provisional generation.
+        let generationAlreadyFinished = state.lastCompletedGeneration == state.generation
+            || state.lastCancelledGeneration == state.generation
+            || state.phase == .failed
         if Self.isActiveUpdate(event.kind),
-           (state.lastCompletedGeneration == state.generation
-               || state.lastCancelledGeneration == state.generation
-               || state.phase == .failed),
+           generationAlreadyFinished,
            !Self.isFreshLocalStart(event, in: state),
            !Self.isSessionScopedProviderStart(event, in: state),
            Self.belongsToCurrentTurn(event, in: state) {
@@ -622,8 +651,10 @@ enum GaiCompanionActivityReducer {
         }
         // Permission can arrive before UserPromptSubmit through separate hook
         // processes. Only `resumed` may leave a structured waiting state.
+        let isWaitingForUser = state.phase == .awaitingInput
+            || state.phase == .awaitingApproval
         if event.kind == .started,
-           (state.phase == .awaitingInput || state.phase == .awaitingApproval),
+           isWaitingForUser,
            !Self.isProviderConfirmationOfProvisionalStart(event, in: state),
            Self.belongsToCurrentTurn(event, in: state) {
             return GaiCompanionReduction(state: state, disposition: .ignoredStaleEvent)
@@ -854,6 +885,24 @@ enum GaiCompanionActivityReducer {
         case .ready, .started, .resumed, .exited:
             return false
         }
+    }
+
+    private static func isPermittedTerminalObservation(
+        _ event: GaiCompanionEvent,
+        in state: GaiCompanionActivityState
+    ) -> Bool {
+        guard event.source == .terminalObservation,
+              event.kind == .stop,
+              state.phase == .working,
+              state.provider == event.provider else { return false }
+        guard let eventTurnID = event.turnID,
+              let currentTurnID = state.turnID else {
+            // A locally observed generation may not have received a provider
+            // turn identifier. The manager still correlates it by generation,
+            // surface incarnation and response token before creating the event.
+            return event.turnID == nil && state.turnID == nil
+        }
+        return eventTurnID == currentTurnID
     }
 
     private static func acknowledge(

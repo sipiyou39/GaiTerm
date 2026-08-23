@@ -10,10 +10,17 @@ import Foundation
 /// Connections are handled in accept order, including the handler and ACK, so
 /// separate hook processes cannot reorder lifecycle transitions.
 final class GaiCompanionEventSocketServer: @unchecked Sendable {
-    typealias Handler = @MainActor @Sendable (URL) -> Bool
+    struct Frame: Equatable, Sendable {
+        let url: URL
+        let responseBody: Data?
+    }
+
+    typealias Handler = @MainActor @Sendable (Frame) -> Bool
 
     static let acknowledgement = Data("OK\n".utf8)
-    static let maximumFrameByteCount = 8_192
+    /// A Codex Stop event may carry one bounded final assistant message. The
+    /// base64url envelope needs roughly 4/3 of the original UTF-8 size.
+    static let maximumFrameByteCount = 96 * 1_024
 
     private let handler: Handler
     private let clientDeadline: TimeInterval
@@ -226,26 +233,40 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
             }
         }
 
-        let newlineOffsets = client.buffer.indices.filter {
-            client.buffer[$0] == UInt8(ascii: "\n")
-        }
-        if newlineOffsets.count > 1 ||
-            (newlineOffsets.first != nil && newlineOffsets.first != client.buffer.index(before: client.buffer.endIndex)) {
-            rejectAndAdvance(fileDescriptor)
-            return
-        }
-
-        if let newlineOffset = newlineOffsets.first {
-            let payload = client.buffer[..<newlineOffset]
-            guard payload.count <= Self.maximumFrameByteCount,
-                  let rawURL = String(data: payload, encoding: .utf8),
-                  let url = Self.strictURL(from: rawURL) else {
+        if let newlineOffset = client.buffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let header = client.buffer[..<newlineOffset]
+            guard header.count <= Self.maximumFrameByteCount,
+                  let rawURL = String(data: header, encoding: .utf8),
+                  let url = Self.strictURL(from: rawURL),
+                  let expectedResponseByteCount = Self.responseByteCount(from: url) else {
                 rejectAndAdvance(fileDescriptor)
                 return
             }
 
+            let bodyStart = client.buffer.index(after: newlineOffset)
+            let body = client.buffer[bodyStart...]
+            if let expectedResponseByteCount {
+                guard body.count <= expectedResponseByteCount else {
+                    rejectAndAdvance(fileDescriptor)
+                    return
+                }
+                if body.count < expectedResponseByteCount {
+                    if reachedEndOfStream {
+                        rejectAndAdvance(fileDescriptor)
+                    }
+                    return
+                }
+            } else {
+                guard body.isEmpty else {
+                    rejectAndAdvance(fileDescriptor)
+                    return
+                }
+            }
+
             client.cancelReadAndDeadline()
-            client.phase = .ready(url)
+            client.phase = .ready(Frame(
+                url: url,
+                responseBody: expectedResponseByteCount == nil ? nil : Data(body)))
             drainAcceptedClients()
             return
         }
@@ -266,7 +287,7 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
 
         guard let fileDescriptor = acceptOrder.first,
               let client = clients[fileDescriptor],
-              case let .ready(url) = client.phase else {
+              case let .ready(frame) = client.phase else {
             return
         }
 
@@ -275,7 +296,7 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
         let handler = handler
 
         Task { @MainActor [weak self] in
-            let accepted = handler(url)
+            let accepted = handler(frame)
             self?.queue.async { [weak self] in
                 self?.handlerCompleted(
                     for: fileDescriptor,
@@ -433,6 +454,23 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
         return url
     }
 
+    /// `nil` means a legacy one-line URL frame. A non-nil outer optional with
+    /// a nil value means the header is malformed and must be rejected.
+    private static func responseByteCount(from url: URL) -> Int?? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        let values = (components.queryItems ?? [])
+            .filter { $0.name == "response_bytes" }
+        guard values.count <= 1 else { return nil }
+        guard let raw = values.first?.value else { return .some(nil) }
+        guard let count = Int(raw),
+              count > 0,
+              count <= GaiCompanionEventEnvelope.maximumResponseByteCount,
+              String(count) == raw else { return nil }
+        return .some(count)
+    }
+
     private static func makeUniqueSocketPath() -> String {
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
         return "/tmp/gaiterm-agent-events-\(getuid())-\(getpid())-\(nonce).sock"
@@ -521,7 +559,7 @@ private extension GaiCompanionEventSocketServer {
     final class Client {
         enum Phase: Equatable {
             case receiving
-            case ready(URL)
+            case ready(Frame)
             case handling
             case responding(offset: Int)
         }

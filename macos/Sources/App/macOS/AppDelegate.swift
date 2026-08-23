@@ -101,6 +101,9 @@ class AppDelegate: NSObject,
     /// macOS configuration. Debug keeps a separate bundle identity so it can
     /// coexist safely with the installed release.
     lazy var gaiWorkspaceManager = GaiCompanionManager(ghostty: ghostty)
+    private lazy var teddyVoiceWindowController = MainActor.assumeIsolated {
+        TeddyVoiceWindowController(manager: gaiWorkspaceManager)
+    }
     private var gaiAgentEventSocketServer: GaiCompanionEventSocketServer?
     private lazy var gaiAgentVisibilityShortcutMonitor =
         GaiAgentVisibilityShortcutMonitor { [weak self] in
@@ -199,8 +202,10 @@ class AppDelegate: NSObject,
 
         // Start the ordered local transport before creating any PTYs so every
         // hosted CLI inherits its private socket path from the first process.
-        let eventServer = GaiCompanionEventSocketServer { [weak self] url in
-            self?.handleGaiTermURL(url) ?? false
+        let eventServer = GaiCompanionEventSocketServer { [weak self] frame in
+            self?.handleGaiTermURL(
+                frame.url,
+                responseBody: frame.responseBody) ?? false
         }
         do {
             _ = try eventServer.start()
@@ -218,6 +223,7 @@ class AppDelegate: NSObject,
         // miss every lifecycle signal until it is restarted.
         GaiAgentHookInstaller.installBeforeLaunchingCompanionSurfaces()
         gaiWorkspaceManager.start()
+        teddyVoiceWindowController.show(activate: true)
 
         // Start our update checker.
         updateController.startUpdater()
@@ -430,6 +436,7 @@ class AppDelegate: NSObject,
         // DouDou Company's home is the agent library, not a classic terminal
         // window. Reopening it preserves the independent Hide Agents choice.
         gaiWorkspaceManager.reveal()
+        teddyVoiceWindowController.show(activate: true)
         reloadDockMenu()
         return false
     }
@@ -508,14 +515,25 @@ class AppDelegate: NSObject,
     }
 
     @discardableResult
-    private func handleGaiTermURL(_ url: URL) -> Bool {
+    private func handleGaiTermURL(
+        _ url: URL,
+        responseBody: Data? = nil
+    ) -> Bool {
         if url.scheme == GaiCompanionEventEnvelope.scheme,
            url.host == GaiCompanionEventEnvelope.host {
             do {
-                let envelope = try GaiCompanionEventEnvelope(url: url)
-                return gaiWorkspaceManager.recordAgentEvent(
+                let envelope = try GaiCompanionEventEnvelope(
+                    url: url,
+                    responseBody: responseBody)
+                let receipt = gaiWorkspaceManager.recordAgentEvent(
                     envelope.event,
-                    token: envelope.token).shouldAcknowledge
+                    token: envelope.token)
+                if envelope.discardedMalformedResponse,
+                   receipt.shouldAcknowledge {
+                    Ghostty.logger.warning(
+                        "discarded malformed optional agent response; lifecycle event preserved")
+                }
+                return receipt.shouldAcknowledge
             } catch {
                 // Never log the URL because it carries the per-terminal
                 // capability token.
@@ -963,6 +981,7 @@ class AppDelegate: NSObject,
 
     @IBAction func showGaiTerm(_ sender: Any) {
         gaiWorkspaceManager.reveal()
+        teddyVoiceWindowController.show(activate: true)
         reloadDockMenu()
     }
 
