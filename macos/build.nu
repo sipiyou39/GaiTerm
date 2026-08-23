@@ -29,4 +29,49 @@ def main [
         $"SYMROOT=($build_dir)"
         ...$skip_testing
         $action)
+
+    let build_exit = $env.LAST_EXIT_CODE
+    if $build_exit != 0 {
+        exit $build_exit
+    }
+
+    # Xcode's local configurations use an ad-hoc identity while linking. The
+    # resulting cdhash changes after every build, which makes macOS treat each
+    # launch as a new app for microphone and accessibility permissions. Always
+    # replace it with GaiTerm's long-lived local identity before handing the
+    # bundle to the developer.
+    let should_stabilize_identity = (
+        $action == "build"
+        and $scheme == "Ghostty"
+        and $configuration in ["Debug", "ReleaseLocal"]
+    )
+    if $should_stabilize_identity {
+        let app = ($build_dir | path join $configuration | path join "GaiTerm.app")
+        let entitlements = if $configuration == "ReleaseLocal" {
+            ($env.FILE_PWD | path join "GhosttyReleaseLocal.entitlements")
+        } else {
+            ($env.FILE_PWD | path join "GhosttyDebug.entitlements")
+        }
+
+        if not ($app | path exists) {
+            error make {msg: $"Build succeeded but app bundle is missing: ($app)"}
+        }
+
+        print $"Stabilizing GaiTerm identity for ($configuration)..."
+        (^/usr/bin/codesign
+            --force
+            --deep
+            --options runtime
+            --entitlements $entitlements
+            --sign "GaiTerm Self-Signed"
+            $app)
+        if $env.LAST_EXIT_CODE != 0 {
+            error make {msg: "Stable GaiTerm code signing failed"}
+        }
+
+        ^/usr/bin/codesign --verify --deep --strict $app
+        if $env.LAST_EXIT_CODE != 0 {
+            error make {msg: "Stable GaiTerm signature verification failed"}
+        }
+    }
 }
