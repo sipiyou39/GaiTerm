@@ -57,7 +57,7 @@ private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingV
 private enum GaiCompanionQuickAction: Hashable {
     case replay
     case terminal
-    case teddy
+    case voice
 }
 
 /// A native, accessibility-visible action which sits above the mascot's
@@ -234,9 +234,9 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             String,
             () -> Void
         )] = [
-            (.replay, "arrow.counterclockwise", "Réécouter", "Réécouter la dernière réponse", onReplay),
             (.terminal, "terminal", "Terminal", "Ouvrir le terminal compact", onTerminal),
-            (.teddy, "waveform", "Teddy", "Ouvrir cette conversation dans Teddy", onOpenTeddy),
+            (.voice, "waveform", "Vocal", "Ouvrir le chat vocal avec ce doudou", onOpenTeddy),
+            (.replay, "arrow.counterclockwise", "Réécouter", "Réécouter la dernière réponse", onReplay),
         ]
         for (action, symbol, label, help, callback) in definitions {
             let button = GaiCompanionQuickActionButton(
@@ -284,7 +284,7 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth))
         let diameter = (28 * scale).rounded()
         let gap = (5 * scale).rounded()
-        let orderedActions: [GaiCompanionQuickAction] = [.replay, .terminal, .teddy]
+        let orderedActions: [GaiCompanionQuickAction] = [.terminal, .voice, .replay]
         let totalWidth = diameter * CGFloat(orderedActions.count)
             + gap * CGFloat(orderedActions.count - 1)
         var x = ((bounds.width - totalWidth) / 2).rounded()
@@ -1425,9 +1425,6 @@ private struct GaiCompanionMascotView: View {
                 nameBadge
             }
             .padding(.bottom, max(1, 2 * scaleFactor))
-            .saturation(keepsIdentityColor ? 1 : 0)
-            .opacity(keepsIdentityColor ? 1 : 0.46)
-            .scaleEffect(runtime.isDesktopSelected ? 1 : 0.965, anchor: .bottom)
 
             if dropFeedback.isTargeted {
                 dropBadge(
@@ -1448,19 +1445,8 @@ private struct GaiCompanionMascotView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
         .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
-        .animation(.easeOut(duration: 0.16), value: runtime.isDesktopSelected)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
         .accessibilityValue(runtime.isDesktopSelected ? "Sélectionné" : "Non sélectionné")
-    }
-
-    private var keepsIdentityColor: Bool {
-        if runtime.isDesktopSelected || dropFeedback.isTargeted { return true }
-        switch runtime.activity.phase {
-        case .completedUnseen, .awaitingInput, .awaitingApproval, .failed:
-            return true
-        case .idle, .working, .exited:
-            return false
-        }
     }
 
     private var nameBadge: some View {
@@ -1608,9 +1594,7 @@ private struct GaiCompanionLiveTerminalView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if runtime.isInlineTerminalPresented {
-                inlineHeader
-            } else {
+            if !runtime.isInlineTerminalPresented {
                 floatingHeader
             }
 
@@ -1633,66 +1617,6 @@ private struct GaiCompanionLiveTerminalView: View {
             .background(paneColor)
         }
         .background(paneColor)
-    }
-
-    private var inlineHeader: some View {
-        HStack(spacing: 8) {
-            GaiCompanionSpriteView(
-                colorway: runtime.renderedColorway,
-                animation: runtime.animation,
-                size: 22)
-                .frame(width: 22, height: 24)
-
-            VStack(alignment: .leading, spacing: 0) {
-                Text(runtime.record.displayName)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.94))
-                    .lineLimit(1)
-                Text(inlineStatusLabel)
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.40))
-                    .lineLimit(1)
-            }
-
-            Rectangle()
-                .fill(Color.white.opacity(0.09))
-                .frame(width: 1, height: 18)
-
-            GaiDirectoryPicker(
-                path: surfaceView.pwd,
-                accent: .white,
-                onPick: onChooseDirectory,
-                onDialogVisibilityChanged: onDirectoryDialogVisibilityChanged)
-                .frame(maxWidth: 160, alignment: .leading)
-
-            GaiCompanionWindowDragArea()
-                .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
-
-            Button(action: onReturnToVoice) {
-                Label("Vocal", systemImage: "waveform")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.94))
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(
-                        Color.white.opacity(0.085),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                    }
-            }
-            .buttonStyle(.plain)
-            .help("Revenir au chat vocal")
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 42)
-        .background(Color.black.opacity(0.76))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.white.opacity(0.065))
-                .frame(height: 1)
-        }
     }
 
     private var floatingHeader: some View {
@@ -1755,22 +1679,6 @@ private struct GaiCompanionLiveTerminalView: View {
         .frame(height: GaiStageMetrics.paneHeaderHeight)
         .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
         .clipped()
-    }
-
-    private var inlineStatusLabel: String {
-        let directory = surfaceView.pwd ?? runtime.record.directoryPath
-        let project = URL(fileURLWithPath: directory).lastPathComponent
-        let phase: String
-        switch runtime.activity.phase {
-        case .idle: phase = "prêt"
-        case .working: phase = "travaille"
-        case .awaitingInput: phase = "attend ta réponse"
-        case .awaitingApproval: phase = "accord requis"
-        case .completedUnseen: phase = "terminé"
-        case .failed: phase = "erreur"
-        case .exited: phase = "fermé"
-        }
-        return "\(project) · \(phase)"
     }
 
     private func restoreTerminalFocus() {

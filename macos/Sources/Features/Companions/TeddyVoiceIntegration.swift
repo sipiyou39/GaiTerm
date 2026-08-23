@@ -78,6 +78,14 @@ final class GaiTeddyCompanionRouter: TeddyCompanionRouting {
                 hasPendingResponse: agent.isResponsePending))
     }
 
+    func renameCompanion(_ companionID: UUID, to name: String) {
+        manager?.updateName(id: companionID, name: name)
+    }
+
+    func changeCompanionDirectory(_ companionID: UUID, to path: String) {
+        manager?.chooseDirectory(id: companionID, path: path)
+    }
+
     func makeInlineTerminalView(for companionID: UUID) -> AnyView? {
         guard let manager,
               let terminal = manager.prepareInlineTerminalContent(id: companionID) else {
