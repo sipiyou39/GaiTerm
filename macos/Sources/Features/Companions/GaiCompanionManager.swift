@@ -561,6 +561,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var started = false
     private var eventSequence: UInt64 = 0
     private var focusGeneration: UInt64 = 0
+    /// At most Teddy's selected CLI normally lives here. Keeping the set
+    /// explicit lets the renderer distinguish a collapsed desktop panel from
+    /// the very same surface being visibly hosted inside Teddy.
+    private var inlineTerminalVisibleIDs: Set<UUID> = []
     private var terminalTransientCounts: [UUID: Int] = [:]
     private var activeCloseConfirmationIDs: Set<UUID> = []
     private var closeAllConfirmationIsPresented = false
@@ -760,16 +764,33 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     func focusedSurface() -> Ghostty.SurfaceView? {
-        guard let keyWindow = NSApp.keyWindow,
-              let runtime = runtimes.first(where: {
-                  panelControllers[$0.id]?.terminalPanel === keyWindow
-              })
-        else { return nil }
-        return runtime.surfaceView
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        if let inlineSurface = keyWindow.firstResponder as? Ghostty.SurfaceView,
+           currentRuntime(for: inlineSurface) != nil {
+            return inlineSurface
+        }
+        return runtimes.first(where: {
+            panelControllers[$0.id]?.terminalPanel === keyWindow
+        })?.surfaceView
     }
 
     func focusSurface(_ surface: Ghostty.SurfaceView) {
         guard let runtime = currentRuntime(for: surface) else { return }
+
+        // An inline surface already lives inside Teddy's key window. Promoting
+        // it to the compact floating presentation here would first detach that
+        // same NSView from Teddy, so the terminal appeared to close as soon as
+        // the user clicked it or typed. Keep the native surface where it is and
+        // only update its real first-responder/rendering state.
+        if inlineTerminalVisibleIDs.contains(runtime.id) {
+            if let window = surface.window,
+               window.firstResponder !== surface {
+                window.makeFirstResponder(surface)
+            }
+            updateSurfacePerformanceState(focused: surface)
+            return
+        }
+
         setPresentation(
             runtime.presentation == .maximized ? .maximized : .compact,
             for: runtime,
@@ -1092,6 +1113,69 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         return managedAgentSnapshots().first { $0.id == surface.id }
     }
 
+    /// Hands Teddy the existing live terminal surface for inline presentation.
+    /// The floating terminal panel is collapsed first so AppKit never mounts
+    /// the same NSView in two window hierarchies. The PTY and CLI process are
+    /// deliberately left untouched.
+    @MainActor
+    func prepareInlineTerminalContent(
+        id: UUID
+    ) -> (surfaceView: Ghostty.SurfaceView, hostView: NSView)? {
+        guard let runtime = runtime(id: id), runtime.activity.phase != .exited else {
+            return nil
+        }
+        setPresentation(.collapsed, for: runtime, animated: false, focus: false)
+        guard let surface = ensureSurface(for: runtime),
+              let controller = panelControllers[id],
+              let hostView = controller.detachTerminalContentForInlinePresentation()
+        else { return nil }
+        surface.focusDidChange(false)
+        inlineTerminalVisibleIDs.insert(id)
+        updateSurfacePerformanceState()
+        return (surface, hostView)
+    }
+
+    /// Reuses the live doudou identity inside Teddy's conversation list. The
+    /// sprite is presentation-only: it shares the existing runtime state and
+    /// never creates another terminal, process or polling loop.
+    @MainActor
+    func makeTeddyCompanionAvatarView(id: UUID, width: CGFloat) -> AnyView? {
+        guard let runtime = runtime(id: id) else { return nil }
+        return AnyView(
+            GaiCompanionSpriteView(
+                colorway: runtime.renderedColorway,
+                animation: runtime.animation,
+                size: width))
+    }
+
+    /// Mirrors SwiftUI's actual inline lifetime into the Ghostty renderer.
+    /// No polling and no extra PTY are involved; this only changes the native
+    /// visibility/high-refresh hints for the existing surface.
+    @MainActor
+    func setInlineTerminalVisible(_ visible: Bool, id: UUID) {
+        guard let runtime = runtime(id: id), runtime.activity.phase != .exited else {
+            inlineTerminalVisibleIDs.remove(id)
+            updateSurfacePerformanceState()
+            return
+        }
+        if visible {
+            inlineTerminalVisibleIDs.insert(id)
+        } else {
+            inlineTerminalVisibleIDs.remove(id)
+            panelControllers[id]?.restoreTerminalContentAfterInlinePresentation()
+        }
+        updateSurfacePerformanceState()
+    }
+
+    private func detachInlineTerminalIfNeeded(id: UUID) {
+        guard inlineTerminalVisibleIDs.remove(id) != nil else { return }
+        panelControllers[id]?.restoreTerminalContentAfterInlinePresentation()
+        NotificationCenter.default.post(
+            name: .gaiCompanionInlineTerminalDidDetach,
+            object: self,
+            userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
+    }
+
     var suggestedCompanionColorway: GaiCompanionColorway {
         let colorways = GaiCompanionColorway.selectableColorways
         return colorways[runtimes.count % colorways.count]
@@ -1401,6 +1485,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func closeCompanion(id: UUID) {
         guard let index = runtimes.firstIndex(where: { $0.id == id }) else { return }
         focusGeneration &+= 1
+        detachInlineTerminalIfNeeded(id: id)
         terminalTransientCounts.removeValue(forKey: id)
         terminalFocusLossProtectionUntil.removeValue(forKey: id)
         fileDropFocusGeneration.removeValue(forKey: id)
@@ -1731,6 +1816,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         focus: Bool
     ) {
         ensurePanel(for: runtime)
+        if presentation != .collapsed {
+            detachInlineTerminalIfNeeded(id: runtime.id)
+        }
         if presentation != .collapsed,
            ensureSurface(for: runtime) == nil {
             return
@@ -1983,8 +2071,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let focused = preferred ?? focusedSurface()
         for runtime in runtimes {
             guard let view = runtime.surfaceView, let surface = view.surface else { continue }
-            let visible = agentWindowsAreVisible
+            let visibleInFloatingPanel = agentWindowsAreVisible
                 && runtime.presentation != .collapsed
+            let visible = visibleInFloatingPanel
+                || inlineTerminalVisibleIDs.contains(runtime.id)
             ghostty_surface_set_occlusion(surface, visible)
             ghostty_surface_set_high_refresh(surface, visible)
             view.focusDidChange(visible && view === focused)
@@ -2050,6 +2140,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func handleNaturalTerminalExit(_ surface: Ghostty.SurfaceView) {
         guard let runtime = currentRuntime(for: surface) else { return }
+        detachInlineTerminalIfNeeded(id: runtime.id)
 
         let provider = inferredProvider(for: runtime)
         let event = GaiCompanionEvent(
@@ -2285,6 +2376,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
 
         updateDockBadge()
+        NotificationCenter.default.post(
+            name: .gaiCompanionStateDidChange,
+            object: self)
         if event.kind == .stop, runtime.record.completionSoundEnabled {
             // Playback happens only after the reducer accepts this exact event,
             // so duplicate Stop hooks cannot replay the completion sound.

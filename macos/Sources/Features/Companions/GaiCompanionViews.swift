@@ -416,6 +416,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var livePlacement: GaiCompanionTerminalPlacement = .top
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
+    private var terminalHostView: NSView?
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
         self?.advanceLivePlacementAnimation(at: timestamp)
     }
@@ -566,9 +567,38 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         terminalHost.layer?.cornerCurve = .continuous
         terminalHost.layer?.masksToBounds = true
         terminalPanel.contentView = terminalHost
+        terminalHostView = terminalHost
 
         // The compact terminal is attached only when visible. AppKit then
         // moves it in the same Window Server transaction as the mascot.
+    }
+
+    /// Moves the existing native terminal hierarchy into Teddy without
+    /// creating a second renderer. Keeping the whole host together avoids two
+    /// SwiftUI representables competing for the same Metal-backed SurfaceView.
+    func detachTerminalContentForInlinePresentation() -> NSView? {
+        guard let terminalHostView else { return nil }
+        terminalPanel.orderOut(nil)
+
+        if terminalPanel.contentView === terminalHostView {
+            let placeholder = NSView(frame: terminalHostView.frame)
+            placeholder.wantsLayer = true
+            placeholder.layer?.backgroundColor = NSColor.black.cgColor
+            terminalPanel.contentView = placeholder
+        }
+
+        terminalHostView.removeFromSuperview()
+        return terminalHostView
+    }
+
+    /// Returns the native hierarchy to the floating panel when Teddy closes
+    /// its inline terminal. The PTY, scrollback and renderer all stay alive.
+    func restoreTerminalContentAfterInlinePresentation() {
+        guard let terminalHostView,
+              terminalPanel.contentView !== terminalHostView else { return }
+        terminalHostView.removeFromSuperview()
+        terminalHostView.autoresizingMask = [.width, .height]
+        terminalPanel.contentView = terminalHostView
     }
 
     func show(

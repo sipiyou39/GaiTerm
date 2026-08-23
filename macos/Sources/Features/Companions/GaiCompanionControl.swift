@@ -6,6 +6,14 @@ extension Notification.Name {
     /// response. Observers receive the response under `responseUserInfoKey`.
     static let gaiCompanionLastResponseDidChange = Notification.Name(
         "com.sipiyou.gaiterm.companionLastResponseDidChange")
+    /// Lightweight invalidation for consumers such as Teddy's sidebar. It
+    /// carries no terminal text and is emitted only on semantic state changes.
+    static let gaiCompanionStateDidChange = Notification.Name(
+        "com.sipiyou.gaiterm.companionStateDidChange")
+    /// Requests Teddy to release an inline-hosted terminal before the same
+    /// native surface is shown again in its floating doudou window.
+    static let gaiCompanionInlineTerminalDidDetach = Notification.Name(
+        "com.sipiyou.gaiterm.companionInlineTerminalDidDetach")
 }
 
 /// Small, stable projection exposed to Teddy. It contains no terminal view,
@@ -29,6 +37,7 @@ enum GaiCompanionControl {
     /// malformed tool call cannot paste an unbounded payload into a CLI.
     static let maximumPromptByteCount = 32_768
     static let responseUserInfoKey = "response"
+    static let companionIDUserInfoKey = "companionID"
 }
 
 enum GaiCompanionCreationCLI: String, CaseIterable, Sendable {

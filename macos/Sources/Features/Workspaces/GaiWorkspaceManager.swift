@@ -2122,13 +2122,15 @@ enum GaiAgentHookInstaller {
         let eventName: String
         let eventLabel: String
         let command: String
+        let timeout: Int
 
         init(
             eventName: String,
             eventLabel: String? = nil,
             provider: String,
             kind: String,
-            includesLastAssistantMessage: Bool = false
+            includesLastAssistantMessage: Bool = false,
+            timeout: Int = 5
         ) {
             self.eventName = eventName
             self.eventLabel = eventLabel ?? eventName
@@ -2136,6 +2138,7 @@ enum GaiAgentHookInstaller {
                 provider: provider,
                 kind: kind,
                 includesLastAssistantMessage: includesLastAssistantMessage)
+            self.timeout = timeout
         }
 
         init(
@@ -2149,6 +2152,7 @@ enum GaiAgentHookInstaller {
                 provider: provider,
                 title: title,
                 marker: marker)
+            self.timeout = 5
         }
     }
 
@@ -2188,7 +2192,8 @@ enum GaiAgentHookInstaller {
             eventName: "SessionEnd",
             eventLabel: "session_end",
             provider: "codex",
-            kind: "cancelled"),
+            kind: "cancelled",
+            timeout: 3),
     ]
     private static let codexLegacyStopSpec = HookSpec(
         legacyStopProvider: "codex",
@@ -2498,7 +2503,7 @@ enum GaiAgentHookInstaller {
             "hooks": [[
                 "type": "command",
                 "command": spec.command,
-                "timeout": 5,
+                "timeout": spec.timeout,
             ]],
         ])
         hooks[spec.eventName] = groups
@@ -2510,7 +2515,7 @@ enum GaiAgentHookInstaller {
             eventLabel: spec.eventLabel,
             matcher: nil,
             command: spec.command,
-            timeout: 5,
+            timeout: spec.timeout,
             statusMessage: nil)
         return CodexTrustEntry(key: trustKey, trustedHash: trustedHash)
     }
@@ -2986,6 +2991,10 @@ enum GaiAgentHookInstaller {
     """#
 
     #if DEBUG
+    static func codexHookTimeoutForTesting(eventName: String) -> Int? {
+        codexHookSpecs.first { $0.eventName == eventName }?.timeout
+    }
+
     static func codexTrustContentForTesting(_ existing: String) -> String {
         codexTrustContent(
             existing: existing,
