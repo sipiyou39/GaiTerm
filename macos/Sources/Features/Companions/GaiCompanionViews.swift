@@ -54,6 +54,93 @@ private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingV
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+private enum GaiCompanionQuickAction: Hashable {
+    case replay
+    case terminal
+    case teddy
+}
+
+/// A native, accessibility-visible action which sits above the mascot's
+/// SwiftUI renderer. Keeping these controls in AppKit lets ordinary button
+/// clicks bypass the custom drag recognizer without adding another panel.
+private final class GaiCompanionQuickActionButton: NSButton {
+    private let activation: () -> Void
+    private var trackingAreaReference: NSTrackingArea?
+    private var isPointerInside = false
+
+    init(
+        symbol: String,
+        accessibilityLabel: String,
+        help: String,
+        activation: @escaping () -> Void
+    ) {
+        self.activation = activation
+        super.init(frame: .zero)
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityLabel)
+        imagePosition = .imageOnly
+        isBordered = false
+        bezelStyle = .regularSquare
+        focusRingType = .none
+        contentTintColor = NSColor.white.withAlphaComponent(0.82)
+        toolTip = help
+        wantsLayer = true
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 0.8
+        setAccessibilityLabel(accessibilityLabel)
+        target = self
+        action = #selector(activate)
+        refreshAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        if let trackingAreaReference {
+            removeTrackingArea(trackingAreaReference)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil)
+        addTrackingArea(area)
+        trackingAreaReference = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isPointerInside = true
+        refreshAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isPointerInside = false
+        refreshAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        alphaValue = 0.72
+        super.mouseDown(with: event)
+        alphaValue = 1
+    }
+
+    @objc private func activate() {
+        activation()
+    }
+
+    private func refreshAppearance() {
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(
+            isPointerInside ? 0.16 : 0.095).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(
+            isPointerInside ? 0.20 : 0.11).cgColor
+    }
+}
+
 private final class GaiCompanionDropFeedback: ObservableObject {
     @Published private(set) var isTargeted = false
     @Published private(set) var acceptedFileCount: Int?
@@ -97,6 +184,8 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
 
     private let hostingView: NSHostingView<Content>
     private var clickGeneration: UInt64 = 0
+    private var quickActionButtons: [GaiCompanionQuickAction: GaiCompanionQuickActionButton] = [:]
+    private var quickActionsAreVisible = false
 
     init(rootView: Content) {
         hostingView = NSHostingView(rootView: rootView)
@@ -122,12 +211,101 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        guard bounds.contains(point) else { return nil }
+        if quickActionsAreVisible {
+            for button in quickActionButtons.values where !button.isHidden {
+                let buttonPoint = button.convert(point, from: self)
+                if button.bounds.contains(buttonPoint) {
+                    return button.hitTest(buttonPoint) ?? button
+                }
+            }
+        }
+        return self
     }
 
     override func layout() {
         super.layout()
         hostingView.frame = bounds
+        layoutQuickActions()
+    }
+
+    func configureQuickActions(
+        onReplay: @escaping () -> Void,
+        onTerminal: @escaping () -> Void,
+        onOpenTeddy: @escaping () -> Void
+    ) {
+        guard quickActionButtons.isEmpty else { return }
+        let definitions: [(
+            GaiCompanionQuickAction,
+            String,
+            String,
+            String,
+            () -> Void
+        )] = [
+            (.replay, "arrow.counterclockwise", "Réécouter", "Réécouter la dernière réponse", onReplay),
+            (.terminal, "terminal", "Terminal", "Ouvrir le terminal compact", onTerminal),
+            (.teddy, "waveform", "Teddy", "Ouvrir cette conversation dans Teddy", onOpenTeddy),
+        ]
+        for (action, symbol, label, help, callback) in definitions {
+            let button = GaiCompanionQuickActionButton(
+                symbol: symbol,
+                accessibilityLabel: label,
+                help: help,
+                activation: callback)
+            button.isHidden = true
+            button.alphaValue = 0
+            quickActionButtons[action] = button
+            addSubview(button)
+        }
+        needsLayout = true
+    }
+
+    func setQuickActionsVisible(_ visible: Bool, animated: Bool = true) {
+        guard visible != quickActionsAreVisible else { return }
+        quickActionsAreVisible = visible
+        let buttons = Array(quickActionButtons.values)
+        if visible {
+            for button in buttons {
+                button.isHidden = false
+                button.alphaValue = animated ? 0 : 1
+            }
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animated ? 0.14 : 0
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            for button in buttons {
+                button.animator().alphaValue = visible ? 1 : 0
+            }
+        } completionHandler: {
+            guard !visible else { return }
+            for button in buttons {
+                button.isHidden = true
+            }
+        }
+    }
+
+    private func layoutQuickActions() {
+        guard !quickActionButtons.isEmpty else { return }
+        let scale = max(
+            0.72,
+            bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth))
+        let diameter = (28 * scale).rounded()
+        let gap = (5 * scale).rounded()
+        let orderedActions: [GaiCompanionQuickAction] = [.replay, .terminal, .teddy]
+        let totalWidth = diameter * CGFloat(orderedActions.count)
+            + gap * CGFloat(orderedActions.count - 1)
+        var x = ((bounds.width - totalWidth) / 2).rounded()
+        let y = max(3, bounds.height - diameter - 4 * scale).rounded()
+        for action in orderedActions {
+            quickActionButtons[action]?.frame = NSRect(
+                x: x,
+                y: y,
+                width: diameter,
+                height: diameter)
+            quickActionButtons[action]?.layer?.cornerRadius = diameter / 2
+            x += diameter + gap
+        }
     }
 
     override func viewDidMoveToWindow() {
@@ -417,6 +595,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
     private var terminalHostView: NSView?
+    private var mascotHostView: GaiCompanionDragClickContainerView<GaiCompanionMascotView>?
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
         self?.advanceLivePlacementAnimation(at: timestamp)
     }
@@ -509,11 +688,21 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             dropFeedback: dropFeedback)
         let mascotHost = GaiCompanionDragClickContainerView(rootView: mascotRoot)
         mascotHost.onClick = { [weak manager] in
-            manager?.toggleTerminal(id: runtime.id)
+            manager?.selectCompanion(id: runtime.id)
         }
         mascotHost.onDoubleClick = { [weak manager] in
-            manager?.openMaximizedTerminal(id: runtime.id)
+            manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
         }
+        mascotHost.configureQuickActions(
+            onReplay: { [weak manager] in
+                manager?.requestReplayLatestVoice(id: runtime.id)
+            },
+            onTerminal: { [weak manager] in
+                manager?.toggleTerminal(id: runtime.id)
+            },
+            onOpenTeddy: { [weak manager] in
+                manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
+            })
         mascotHost.onDragBegan = { [weak manager] in
             manager?.companionDragDidBegin(id: runtime.id)
         }
@@ -536,6 +725,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
         mascotHost.autoresizingMask = [.width, .height]
         companionPanel.contentView = mascotHost
+        mascotHostView = mascotHost
         // Installing an NSHostingView hierarchy can replace native drag
         // registrations. Register both concrete destinations only after the
         // final content view is attached to the panel.
@@ -545,7 +735,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
         let terminalRoot = GaiCompanionTerminalView(
             runtime: runtime,
-            onToggleMaximized: { [weak manager] in manager?.toggleMaximized(id: runtime.id) },
+            onToggleMaximized: { [weak manager] in
+                manager?.requestOpenTeddy(id: runtime.id, presentation: .terminal)
+            },
             onApplyLayoutPreset: { [weak manager] preset in
                 manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
             },
@@ -576,6 +768,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
         // The compact terminal is attached only when visible. AppKit then
         // moves it in the same Window Server transaction as the mascot.
+    }
+
+    func setDesktopSelected(_ selected: Bool) {
+        mascotHostView?.setQuickActionsVisible(selected)
     }
 
     /// Moves the existing native terminal hierarchy into Teddy without
@@ -1240,6 +1436,9 @@ private struct GaiCompanionMascotView: View {
                 nameBadge
             }
             .padding(.bottom, max(1, 2 * scaleFactor))
+            .saturation(keepsIdentityColor ? 1 : 0)
+            .opacity(keepsIdentityColor ? 1 : 0.46)
+            .scaleEffect(runtime.isDesktopSelected ? 1 : 0.965, anchor: .bottom)
 
             if dropFeedback.isTargeted {
                 dropBadge(
@@ -1260,7 +1459,18 @@ private struct GaiCompanionMascotView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
         .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
+        .animation(.easeOut(duration: 0.16), value: runtime.isDesktopSelected)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
+    }
+
+    private var keepsIdentityColor: Bool {
+        if runtime.isDesktopSelected || dropFeedback.isTargeted { return true }
+        switch runtime.activity.phase {
+        case .completedUnseen, .awaitingInput, .awaitingApproval, .failed:
+            return true
+        case .idle, .working, .exited:
+            return false
+        }
     }
 
     private var nameBadge: some View {
@@ -1541,12 +1751,8 @@ private struct GaiCompanionLiveTerminalView: View {
                     action: onToggleLock)
                 GaiCompanionLayoutPresetMenu(onSelect: onApplyLayoutPreset)
                 GaiCompanionHeaderIconButton(
-                    symbol: runtime.presentation == .maximized
-                        ? "arrow.down.right.and.arrow.up.left"
-                        : "arrow.up.left.and.arrow.down.right",
-                    help: runtime.presentation == .maximized
-                        ? "Restore compact terminal"
-                        : "Maximize terminal",
+                    symbol: "arrow.up.left.and.arrow.down.right",
+                    help: "Ouvrir dans Teddy",
                     size: 18,
                     action: onToggleMaximized)
                 GaiCompanionHeaderIconButton(

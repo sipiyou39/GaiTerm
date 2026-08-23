@@ -41,6 +41,10 @@ final class GaiTeddyCompanionRouter: TeddyCompanionRouting {
         }
     }
 
+    func selectCompanion(_ companionID: UUID) {
+        manager?.selectCompanion(id: companionID)
+    }
+
     func submitPrompt(
         _ text: String,
         to companionID: UUID
@@ -350,6 +354,21 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
             selector: #selector(inlineTerminalRequestedVoice(_:)),
             name: .gaiCompanionInlineTerminalRequestedVoice,
             object: manager)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(desktopSelectionDidChange(_:)),
+            name: .gaiCompanionDesktopSelectionDidChange,
+            object: manager)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(openTeddyRequested(_:)),
+            name: .gaiCompanionOpenTeddyRequested,
+            object: manager)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(replayVoiceRequested(_:)),
+            name: .gaiCompanionReplayVoiceRequested,
+            object: manager)
         companionListCancellable = manager.$runtimes
             .receive(on: RunLoop.main)
             .sink { [weak voiceController] _ in
@@ -435,6 +454,53 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
               companionID == voiceController.activeConversationID
         else { return }
         voiceController.collapseInlineTerminal()
+    }
+
+    @objc private func desktopSelectionDidChange(_ notification: Notification) {
+        guard let companionID = companionID(from: notification) else { return }
+        selectConversation(companionID)
+    }
+
+    @objc private func openTeddyRequested(_ notification: Notification) {
+        guard let companionID = companionID(from: notification) else { return }
+        let rawPresentation = notification.userInfo?[
+            GaiCompanionControl.teddyPresentationUserInfoKey
+        ] as? String
+        let presentation = rawPresentation.flatMap(GaiCompanionTeddyPresentation.init(rawValue:))
+            ?? .vocal
+
+        selectConversation(companionID) { [weak self] in
+            guard let self else { return }
+            switch presentation {
+            case .vocal:
+                self.voiceController.collapseInlineTerminal()
+            case .terminal:
+                self.voiceController.openInlineTerminal()
+            }
+        }
+        show(activate: true)
+    }
+
+    @objc private func replayVoiceRequested(_ notification: Notification) {
+        guard let companionID = companionID(from: notification) else { return }
+        selectConversation(companionID) { [weak self] in
+            _ = self?.voiceController.replayLatestTeddyMessage()
+        }
+    }
+
+    private func selectConversation(
+        _ companionID: UUID,
+        onReady: @escaping () -> Void = {}
+    ) {
+        voiceController.refreshCompanionConversations()
+        voiceController.selectConversation(companionID, onReady: onReady)
+    }
+
+    private func companionID(from notification: Notification) -> UUID? {
+        guard notification.object as? GaiCompanionManager === manager else { return nil }
+        return notification.userInfo?[
+            GaiCompanionControl.companionIDUserInfoKey
+        ] as? UUID
     }
 }
 #endif

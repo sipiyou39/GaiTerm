@@ -422,6 +422,7 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     @Published var terminalPlacement: GaiCompanionTerminalPlacement = .top
     @Published var isTerminalLocked = false
     @Published var isInlineTerminalPresented = false
+    @Published var isDesktopSelected = false
     @Published private(set) var activity: GaiCompanionActivityState
 
     init(record: GaiCompanionRecord) {
@@ -551,6 +552,7 @@ private final class GaiCompanionResponseSettlementWatchdog {
 final class GaiCompanionManager: NSObject, ObservableObject {
     @Published private(set) var runtimes: [GaiCompanionRuntime] = []
     @Published private(set) var agentWindowsAreVisible = true
+    @Published private(set) var selectedCompanionID: UUID?
 
     private let ghostty: Ghostty.App
     private let store: GaiCompanionStore
@@ -751,6 +753,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             closeCompanion(id: runtime.id)
             return nil
         }
+        selectCompanion(id: runtime.id)
         setPresentation(.compact, for: runtime, animated: true, focus: true)
         showLibrary(activate: false)
         return surface
@@ -1211,6 +1214,55 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         setPresentation(target, for: runtime, animated: true, focus: true)
     }
 
+    /// Selects the desktop identity without touching its PTY or terminal
+    /// presentation. This is the only state Option-right needs to route the
+    /// next voice turn to the correct conversation.
+    func selectCompanion(id: UUID) {
+        guard let runtime = runtime(id: id) else { return }
+        runtime.acknowledgeCompletion()
+        updateDockBadge()
+        guard selectedCompanionID != id else {
+            panelControllers[id]?.setDesktopSelected(true)
+            return
+        }
+
+        if let previousID = selectedCompanionID {
+            self.runtime(id: previousID)?.isDesktopSelected = false
+            panelControllers[previousID]?.setDesktopSelected(false)
+        }
+        selectedCompanionID = id
+        runtime.isDesktopSelected = true
+        panelControllers[id]?.setDesktopSelected(true)
+        NotificationCenter.default.post(
+            name: .gaiCompanionDesktopSelectionDidChange,
+            object: self,
+            userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
+    }
+
+    func requestOpenTeddy(
+        id: UUID,
+        presentation: GaiCompanionTeddyPresentation
+    ) {
+        guard runtime(id: id) != nil else { return }
+        selectCompanion(id: id)
+        NotificationCenter.default.post(
+            name: .gaiCompanionOpenTeddyRequested,
+            object: self,
+            userInfo: [
+                GaiCompanionControl.companionIDUserInfoKey: id,
+                GaiCompanionControl.teddyPresentationUserInfoKey: presentation.rawValue,
+            ])
+    }
+
+    func requestReplayLatestVoice(id: UUID) {
+        guard runtime(id: id) != nil else { return }
+        selectCompanion(id: id)
+        NotificationCenter.default.post(
+            name: .gaiCompanionReplayVoiceRequested,
+            object: self,
+            userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
+    }
+
     func toggleTerminal(id: UUID) {
         activateCompanion(id: id, activation: .singleClick)
     }
@@ -1508,6 +1560,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func closeCompanion(id: UUID) {
         guard let index = runtimes.firstIndex(where: { $0.id == id }) else { return }
+        let wasSelected = selectedCompanionID == id
         focusGeneration &+= 1
         detachInlineTerminalIfNeeded(id: id)
         terminalTransientCounts.removeValue(forKey: id)
@@ -1525,6 +1578,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         _ = store.remove(id: id)
         if !runtimes.contains(where: { $0.record.completionSoundEnabled }) {
             GaiCompanionCompletionSoundPlayer.shared.stop()
+        }
+        if wasSelected {
+            selectedCompanionID = nil
+            if let replacement = runtimes.first {
+                selectCompanion(id: replacement.id)
+            }
         }
         updateDockBadge()
     }
@@ -1828,9 +1887,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func ensurePanel(for runtime: GaiCompanionRuntime) {
         guard panelControllers[runtime.id] == nil else { return }
-        panelControllers[runtime.id] = GaiCompanionPanelController(
+        let controller = GaiCompanionPanelController(
             runtime: runtime,
             manager: self)
+        panelControllers[runtime.id] = controller
+        controller.setDesktopSelected(selectedCompanionID == runtime.id)
     }
 
     private func setPresentation(

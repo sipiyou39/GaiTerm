@@ -19,6 +19,15 @@ extension Notification.Name {
     /// voice controller's normal collapse lifecycle, never duplicated.
     static let gaiCompanionInlineTerminalRequestedVoice = Notification.Name(
         "com.sipiyou.gaiterm.companionInlineTerminalRequestedVoice")
+    /// The desktop mascot and Teddy's sidebar share one lightweight selection.
+    static let gaiCompanionDesktopSelectionDidChange = Notification.Name(
+        "com.sipiyou.gaiterm.companionDesktopSelectionDidChange")
+    /// Requests the full Teddy workspace for one doudou and one presentation.
+    static let gaiCompanionOpenTeddyRequested = Notification.Name(
+        "com.sipiyou.gaiterm.companionOpenTeddyRequested")
+    /// Requests replay of the latest archived Teddy answer for one doudou.
+    static let gaiCompanionReplayVoiceRequested = Notification.Name(
+        "com.sipiyou.gaiterm.companionReplayVoiceRequested")
 }
 
 /// Small, stable projection exposed to Teddy. It contains no terminal view,
@@ -43,6 +52,12 @@ enum GaiCompanionControl {
     static let maximumPromptByteCount = 32_768
     static let responseUserInfoKey = "response"
     static let companionIDUserInfoKey = "companionID"
+    static let teddyPresentationUserInfoKey = "teddyPresentation"
+}
+
+enum GaiCompanionTeddyPresentation: String, Sendable {
+    case vocal
+    case terminal
 }
 
 enum GaiCompanionCreationCLI: String, CaseIterable, Sendable {
