@@ -345,6 +345,11 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
             selector: #selector(inlineTerminalDidDetach(_:)),
             name: .gaiCompanionInlineTerminalDidDetach,
             object: manager)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inlineTerminalRequestedVoice(_:)),
+            name: .gaiCompanionInlineTerminalRequestedVoice,
+            object: manager)
         companionListCancellable = manager.$runtimes
             .receive(on: RunLoop.main)
             .sink { [weak voiceController] _ in
@@ -413,6 +418,16 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
     }
 
     @objc private func inlineTerminalDidDetach(_ notification: Notification) {
+        guard notification.object as? GaiCompanionManager === manager,
+              let companionID = notification.userInfo?[
+                  GaiCompanionControl.companionIDUserInfoKey
+              ] as? UUID,
+              companionID == voiceController.activeConversationID
+        else { return }
+        voiceController.collapseInlineTerminal()
+    }
+
+    @objc private func inlineTerminalRequestedVoice(_ notification: Notification) {
         guard notification.object as? GaiCompanionManager === manager,
               let companionID = notification.userInfo?[
                   GaiCompanionControl.companionIDUserInfoKey

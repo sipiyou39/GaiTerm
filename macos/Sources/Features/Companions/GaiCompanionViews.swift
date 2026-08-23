@@ -550,6 +550,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
             },
             onToggleLock: { [weak manager] in manager?.toggleTerminalLock(id: runtime.id) },
+            onReturnToVoice: { [weak manager] in
+                Task { @MainActor in
+                    manager?.requestTeddyVoiceMode(id: runtime.id)
+                }
+            },
             onRename: { [weak manager] name in manager?.updateName(id: runtime.id, name: name) },
             onClose: { [weak manager] in manager?.requestCloseCompanion(id: runtime.id) },
             onChooseDirectory: { [weak manager] path in
@@ -1344,6 +1349,7 @@ private struct GaiCompanionTerminalView: View {
     let onToggleMaximized: () -> Void
     let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
+    let onReturnToVoice: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
     let onChooseDirectory: (String) -> Void
@@ -1358,6 +1364,7 @@ private struct GaiCompanionTerminalView: View {
                     onToggleMaximized: onToggleMaximized,
                     onApplyLayoutPreset: onApplyLayoutPreset,
                     onToggleLock: onToggleLock,
+                    onReturnToVoice: onReturnToVoice,
                     onRename: onRename,
                     onClose: onClose,
                     onChooseDirectory: onChooseDirectory,
@@ -1386,6 +1393,7 @@ private struct GaiCompanionLiveTerminalView: View {
     let onToggleMaximized: () -> Void
     let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
+    let onReturnToVoice: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
     let onChooseDirectory: (String) -> Void
@@ -1400,7 +1408,95 @@ private struct GaiCompanionLiveTerminalView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 7) {
+            if runtime.isInlineTerminalPresented {
+                inlineHeader
+            } else {
+                floatingHeader
+            }
+
+            ZStack(alignment: .bottom) {
+                GaiCompanionFastSurfaceWrapper(surfaceView: surfaceView)
+                    .background(paneColor)
+                    .background(GaiCompanionSurfaceLayerAsserter(
+                        surfaceView: surfaceView,
+                        backdrop: NSColor(paneColor).cgColor))
+                    .clipped()
+                    .transaction { transaction in
+                        transaction.animation = nil
+                    }
+
+                if let message = surfaceView.childExitedMessage {
+                    ChildExitedMessageBar(msg: message)
+                        .font(.system(size: min(surfaceView.cellSize.height * 0.8, 30)))
+                }
+            }
+            .background(paneColor)
+        }
+        .background(paneColor)
+    }
+
+    private var inlineHeader: some View {
+        HStack(spacing: 8) {
+            GaiCompanionSpriteView(
+                colorway: runtime.renderedColorway,
+                animation: runtime.animation,
+                size: 22)
+                .frame(width: 22, height: 24)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(runtime.record.displayName)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.94))
+                    .lineLimit(1)
+                Text(inlineStatusLabel)
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.40))
+                    .lineLimit(1)
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(width: 1, height: 18)
+
+            GaiDirectoryPicker(
+                path: surfaceView.pwd,
+                accent: .white,
+                onPick: onChooseDirectory,
+                onDialogVisibilityChanged: onDirectoryDialogVisibilityChanged)
+                .frame(maxWidth: 160, alignment: .leading)
+
+            GaiCompanionWindowDragArea()
+                .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
+
+            Button(action: onReturnToVoice) {
+                Label("Vocal", systemImage: "waveform")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.94))
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(
+                        Color.white.opacity(0.085),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    }
+            }
+            .buttonStyle(.plain)
+            .help("Revenir au chat vocal")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 42)
+        .background(Color.black.opacity(0.76))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.065))
+                .frame(height: 1)
+        }
+    }
+
+    private var floatingHeader: some View {
+        HStack(spacing: 7) {
                 GaiAgentNameEditor(
                     name: runtime.record.displayName,
                     font: .system(size: 11.5, weight: .semibold, design: .rounded),
@@ -1458,31 +1554,27 @@ private struct GaiCompanionLiveTerminalView: View {
                     help: "Kill terminal and remove agent",
                     size: 18,
                     action: onClose)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: GaiStageMetrics.paneHeaderHeight)
-            .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
-            .clipped()
-
-            ZStack(alignment: .bottom) {
-                GaiCompanionFastSurfaceWrapper(surfaceView: surfaceView)
-                    .background(paneColor)
-                    .background(GaiCompanionSurfaceLayerAsserter(
-                        surfaceView: surfaceView,
-                        backdrop: NSColor(paneColor).cgColor))
-                    .clipped()
-                    .transaction { transaction in
-                        transaction.animation = nil
-                    }
-
-                if let message = surfaceView.childExitedMessage {
-                    ChildExitedMessageBar(msg: message)
-                        .font(.system(size: min(surfaceView.cellSize.height * 0.8, 30)))
-                }
-            }
-            .background(paneColor)
         }
-        .background(paneColor)
+        .padding(.horizontal, 9)
+        .frame(height: GaiStageMetrics.paneHeaderHeight)
+        .background(Color.gaiPanelColor(accent: accent, tinted: tintPanels))
+        .clipped()
+    }
+
+    private var inlineStatusLabel: String {
+        let directory = surfaceView.pwd ?? runtime.record.directoryPath
+        let project = URL(fileURLWithPath: directory).lastPathComponent
+        let phase: String
+        switch runtime.activity.phase {
+        case .idle: phase = "prêt"
+        case .working: phase = "travaille"
+        case .awaitingInput: phase = "attend ta réponse"
+        case .awaitingApproval: phase = "accord requis"
+        case .completedUnseen: phase = "terminé"
+        case .failed: phase = "erreur"
+        case .exited: phase = "fermé"
+        }
+        return "\(project) · \(phase)"
     }
 
     private func restoreTerminalFocus() {

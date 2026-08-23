@@ -421,6 +421,7 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     @Published var presentation: GaiCompanionPresentation = .collapsed
     @Published var terminalPlacement: GaiCompanionTerminalPlacement = .top
     @Published var isTerminalLocked = false
+    @Published var isInlineTerminalPresented = false
     @Published private(set) var activity: GaiCompanionActivityState
 
     init(record: GaiCompanionRecord) {
@@ -1130,6 +1131,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
               let hostView = controller.detachTerminalContentForInlinePresentation()
         else { return nil }
         surface.focusDidChange(false)
+        runtime.isInlineTerminalPresented = true
         inlineTerminalVisibleIDs.insert(id)
         updateSurfacePerformanceState()
         return (surface, hostView)
@@ -1153,22 +1155,44 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     /// visibility/high-refresh hints for the existing surface.
     @MainActor
     func setInlineTerminalVisible(_ visible: Bool, id: UUID) {
-        guard let runtime = runtime(id: id), runtime.activity.phase != .exited else {
+        guard let runtime = runtime(id: id) else {
+            inlineTerminalVisibleIDs.remove(id)
+            updateSurfacePerformanceState()
+            return
+        }
+        guard runtime.activity.phase != .exited else {
+            runtime.isInlineTerminalPresented = false
             inlineTerminalVisibleIDs.remove(id)
             updateSurfacePerformanceState()
             return
         }
         if visible {
+            runtime.isInlineTerminalPresented = true
             inlineTerminalVisibleIDs.insert(id)
         } else {
+            runtime.isInlineTerminalPresented = false
             inlineTerminalVisibleIDs.remove(id)
             panelControllers[id]?.restoreTerminalContentAfterInlinePresentation()
         }
         updateSurfacePerformanceState()
     }
 
+    /// The inline terminal owns the only visible app header while it is
+    /// mounted in Teddy. Its Vocal action comes back through this semantic
+    /// event so the voice controller performs the ordinary unmount/restore
+    /// path instead of the terminal view mutating two window hierarchies.
+    @MainActor
+    func requestTeddyVoiceMode(id: UUID) {
+        guard let runtime = runtime(id: id), runtime.isInlineTerminalPresented else { return }
+        NotificationCenter.default.post(
+            name: .gaiCompanionInlineTerminalRequestedVoice,
+            object: self,
+            userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
+    }
+
     private func detachInlineTerminalIfNeeded(id: UUID) {
         guard inlineTerminalVisibleIDs.remove(id) != nil else { return }
+        runtime(id: id)?.isInlineTerminalPresented = false
         panelControllers[id]?.restoreTerminalContentAfterInlinePresentation()
         NotificationCenter.default.post(
             name: .gaiCompanionInlineTerminalDidDetach,

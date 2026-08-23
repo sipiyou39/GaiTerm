@@ -14,6 +14,11 @@ extension Notification.Name {
     /// native surface is shown again in its floating doudou window.
     static let gaiCompanionInlineTerminalDidDetach = Notification.Name(
         "com.sipiyou.gaiterm.companionInlineTerminalDidDetach")
+    /// Emitted by the terminal's unified inline header when the user switches
+    /// back to Teddy's vocal presentation. The surface is released by the
+    /// voice controller's normal collapse lifecycle, never duplicated.
+    static let gaiCompanionInlineTerminalRequestedVoice = Notification.Name(
+        "com.sipiyou.gaiterm.companionInlineTerminalRequestedVoice")
 }
 
 /// Small, stable projection exposed to Teddy. It contains no terminal view,
