@@ -20,11 +20,16 @@ enum GaiCompanionColorway: String, Codable, CaseIterable, Sendable {
     /// task completion. Persisted agent identities deliberately exclude it so
     /// green always has one unambiguous meaning.
     static let completionColorway: Self = .aurore
-    static let selectableColorways = allCases.filter { $0 != completionColorway }
+    /// White belongs to the desktop hub and Aurore to unseen completion. They
+    /// stay system-signalling colours and can never become an agent identity.
+    static let hubColorway: Self = .white
+    static let selectableColorways = allCases.filter {
+        $0 != completionColorway && $0 != hubColorway
+    }
     static let defaultColorway: Self = .purple
 
     var isSelectable: Bool {
-        self != Self.completionColorway
+        self != Self.completionColorway && self != Self.hubColorway
     }
 
     var normalizedPersistentColorway: Self {
@@ -274,6 +279,7 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
     var compactSize: GaiCompanionCompactSize
     var scalePercent: GaiCompanionScalePercent
     var completionSoundEnabled: Bool
+    var stackCoordinate: GaiCompanionStackCoordinate?
 
     static let defaultName = "Agent"
     static let maximumNameLength = 40
@@ -296,7 +302,8 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
         displayID: String? = nil,
         compactSize: GaiCompanionCompactSize = .standard,
         scalePercent: GaiCompanionScalePercent = .standard,
-        completionSoundEnabled: Bool = true
+        completionSoundEnabled: Bool = true,
+        stackCoordinate: GaiCompanionStackCoordinate? = nil
     ) {
         self.id = id
         self.name = Self.cleanName(name)
@@ -312,6 +319,7 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
             height: compactSize.height)
         self.scalePercent = GaiCompanionScalePercent(scalePercent.value)
         self.completionSoundEnabled = completionSoundEnabled
+        self.stackCoordinate = stackCoordinate
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -325,6 +333,7 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
         case compactSize
         case scalePercent
         case completionSoundEnabled
+        case stackCoordinate
     }
 
     init(from decoder: Decoder) throws {
@@ -351,7 +360,10 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
                 forKey: .scalePercent) ?? .standard,
             completionSoundEnabled: try container.decodeIfPresent(
                 Bool.self,
-                forKey: .completionSoundEnabled) ?? true)
+                forKey: .completionSoundEnabled) ?? true,
+            stackCoordinate: try container.decodeIfPresent(
+                GaiCompanionStackCoordinate.self,
+                forKey: .stackCoordinate))
     }
 
     /// Re-applies invariants after a caller mutates a record through the store.
@@ -366,7 +378,8 @@ struct GaiCompanionRecord: Codable, Equatable, Identifiable, Sendable {
             displayID: displayID,
             compactSize: compactSize.migratingLegacyStandard,
             scalePercent: scalePercent,
-            completionSoundEnabled: completionSoundEnabled)
+            completionSoundEnabled: completionSoundEnabled,
+            stackCoordinate: stackCoordinate)
     }
 
     private static func cleanName(_ value: String?) -> String? {

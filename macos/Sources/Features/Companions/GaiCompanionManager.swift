@@ -428,6 +428,9 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     @Published var isTerminalLocked = false
     @Published var isInlineTerminalPresented = false
     @Published var isDesktopSelected = false
+    /// Greater than one only for the visible representative of a collapsed
+    /// pile. The mascot view uses it to render depth and the member count.
+    @Published var collapsedStackDepth = 0
     @Published private(set) var activity: GaiCompanionActivityState
 
     init(record: GaiCompanionRecord) {
@@ -741,6 +744,46 @@ private final class GaiCompanionResponseActivationProbe {
     }
 }
 
+private struct GaiCompanionStackTransitionItem {
+    let id: UUID
+    let fromFrame: NSRect
+    let toFrame: NSRect
+    let delay: CFTimeInterval
+    let bend: CGFloat
+    let fromAlpha: CGFloat
+    let toAlpha: CGFloat
+    let fromScale: CGFloat
+    let toScale: CGFloat
+}
+
+private struct GaiCompanionStackTransition {
+    let expanding: Bool
+    let isReflow: Bool
+    let anchorID: UUID
+    let startedAt: CFTimeInterval
+    let duration: CFTimeInterval
+    let items: [GaiCompanionStackTransitionItem]
+    let finalLayout: GaiCompanionStackResolvedLayout
+}
+
+/// A bounded under-damped bloom: fast intent, one restrained overshoot, then a
+/// soft settle. The exact endpoint is forced at one so repeated toggles never
+/// accumulate sub-pixel drift.
+private enum GaiCompanionStackMotion {
+    static func position(at progress: CGFloat) -> CGFloat {
+        let t = min(max(progress, 0), 1)
+        guard t > 0 else { return 0 }
+        guard t < 1 else { return 1 }
+        return 1 - exp(-8.6 * t) * (cos(10.4 * t) + 0.18 * sin(10.4 * t))
+    }
+
+    static func opacity(at progress: CGFloat) -> CGFloat {
+        let t = min(max(progress / 0.42, 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
+}
+
 /// Agent-first replacement for `GaiWorkspaceManager`.
 ///
 /// It deliberately mirrors the old manager's public surface API so the rest of
@@ -749,11 +792,22 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     @Published private(set) var runtimes: [GaiCompanionRuntime] = []
     @Published private(set) var agentWindowsAreVisible = true
     @Published private(set) var selectedCompanionID: UUID?
+    @Published private(set) var companionStackIsExpanded = false
 
     private let ghostty: Ghostty.App
     private let store: GaiCompanionStore
     private let userDefaults: UserDefaults
     private var panelControllers: [UUID: GaiCompanionPanelController] = [:]
+    private let companionHubID = UUID()
+    private let companionHubState = GaiCompanionHubState()
+    private var companionHubController: GaiCompanionHubPanelController?
+    private var companionHubPlacement: GaiCompanionHubPlacement?
+    private var companionHubCreatorPlacement: GaiCompanionTerminalPlacement = .top
+    private var activeCompanionStackLayout: GaiCompanionStackResolvedLayout?
+    private var companionStackTransition: GaiCompanionStackTransition?
+    private var companionStackMode: GaiCompanionStackMode
+    private var companionStackSwapPreview: (movingID: UUID, targetID: UUID)?
+    var onOpenCompanionCreator: (() -> Void)?
     private var expandedTerminalSize: GaiCompanionExpandedTerminalSize?
     private var expandedTerminalPosition: GaiCompanionExpandedTerminalPosition?
     private var started = false
@@ -791,6 +845,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     )?
     private var terminalFocusLossProtectionUntil: [UUID: TimeInterval] = [:]
     private var fileDropFocusGeneration: [UUID: UInt64] = [:]
+    private lazy var companionStackDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
+        self?.advanceCompanionStackTransition(at: timestamp)
+    }
     /// Provider hooks can arrive just before their final PTY write is rendered.
     /// These bounded retries stop as soon as one complete response is captured.
     private static let responseCaptureSettlementDelays: [TimeInterval] = [
@@ -812,6 +869,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         self.ghostty = ghostty
         let userDefaults = UserDefaults.ghostty
         self.userDefaults = userDefaults
+        companionStackMode = GaiCompanionStackMode.current(in: userDefaults)
+        companionHubPlacement = GaiCompanionHubPlacement(userDefaults: userDefaults)
         store = GaiCompanionStore(userDefaults: userDefaults, loadImmediately: false)
         expandedTerminalSize = GaiCompanionExpandedTerminalSize(
             userDefaults: userDefaults)
@@ -853,6 +912,18 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
 
         runtimes = store.companions.map(GaiCompanionRuntime.init)
+        if companionHubPlacement == nil {
+            let seed = runtimes.first?.record
+            let placement = GaiCompanionHubPlacement(
+                normalizedPosition: seed?.normalizedPosition ?? .center,
+                displayID: seed?.displayID)
+            companionHubPlacement = placement
+            if !placement.persist(to: userDefaults) {
+                Ghostty.logger.error("could not persist companion hub placement")
+            }
+        }
+        reconcileCompanionStackCoordinates()
+        ensureCompanionHubPanel()
         if runtimes.contains(where: { $0.record.completionSoundEnabled }) {
             GaiCompanionCompletionSoundPlayer.shared.preload()
         }
@@ -868,6 +939,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             ensurePanel(for: runtime)
             setPresentation(.collapsed, for: runtime, animated: false, focus: false)
         }
+        settleCompanionStackVisibility()
         installGlobalFileDropFallback()
 
         updateSurfacePerformanceState()
@@ -901,6 +973,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for controller in panelControllers.values {
             controller.setAgentWindowsVisible(visible)
         }
+        companionHubController?.setVisible(visible)
+        if visible {
+            settleCompanionStackVisibility()
+        }
         updateSurfacePerformanceState()
         updateDockBadge()
     }
@@ -927,6 +1003,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let colorway = companionColorway ?? colorways[runtimes.count % colorways.count]
         let directory = baseConfig?.workingDirectory ?? GaiCompanionRecord.defaultDirectoryPath
         let screen = screenUnderMouse()
+        let stackCoordinate = GaiCompanionStackLayout.firstAvailableConnectedCoordinate(
+            occupied: Set(runtimes.compactMap(\.record.stackCoordinate)).union([.origin]))
         let record = store.create(
             colorway: colorway,
             directoryPath: directory,
@@ -934,13 +1012,19 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             normalizedPosition: suggestedPosition(for: runtimes.count),
             displayID: displayID(for: screen),
             scalePercent: companionScalePercent,
-            completionSoundEnabled: companionCompletionSoundEnabled)
+            completionSoundEnabled: companionCompletionSoundEnabled,
+            stackCoordinate: stackCoordinate)
         let runtime = GaiCompanionRuntime(record: record)
         runtimes.append(runtime)
         if record.completionSoundEnabled {
             GaiCompanionCompletionSoundPlayer.shared.preload()
         }
         ensurePanel(for: runtime)
+        if !companionStackIsExpanded {
+            expandCompanionStack()
+        } else if companionStackIsExpanded {
+            reflowExpandedCompanionStack(animated: true)
+        }
 
         guard let surface = ensureSurface(for: runtime, baseConfig: baseConfig) else {
             closeCompanion(id: runtime.id)
@@ -1473,6 +1557,26 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
     }
 
+    /// Real agents are purely conversational. Stack expansion belongs to the
+    /// dedicated hub, which deliberately has no PTY and no selected-agent role.
+    func companionWasClicked(id: UUID) {
+        guard runtime(id: id) != nil else { return }
+        selectCompanion(id: id)
+    }
+
+    func companionHubWasClicked() {
+        guard !runtimes.isEmpty else { return }
+        if companionStackIsExpanded {
+            collapseCompanionStack()
+        } else {
+            expandCompanionStack()
+        }
+    }
+
+    func requestOpenCompanionCreator() {
+        onOpenCompanionCreator?()
+    }
+
     func requestOpenTeddy(
         id: UUID,
         presentation: GaiCompanionTeddyPresentation
@@ -1748,6 +1852,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         case .leftMouseDragged:
             let target = panelControllers.first { _, controller in
                 agentWindowsAreVisible
+                    && companionStackIsExpanded
                     && controller.companionPanel.isVisible
                     && controller.companionPanel.frame.contains(location)
             }
@@ -1898,6 +2003,18 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             if let replacement = runtimes.first {
                 selectCompanion(id: replacement.id)
             }
+        }
+        reconcileCompanionStackCoordinates()
+        if runtimes.isEmpty {
+            companionStackIsExpanded = false
+            activeCompanionStackLayout = nil
+            companionStackTransition = nil
+            companionStackDisplayLink.stop()
+            settleCompanionStackVisibility()
+        } else if companionStackIsExpanded {
+            reflowExpandedCompanionStack(animated: true)
+        } else {
+            settleCompanionStackVisibility()
         }
         updateDockBadge()
     }
@@ -2207,6 +2324,552 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             focus: true)
     }
 
+    // MARK: Companion stack
+
+    private func reconcileCompanionStackCoordinates() {
+        guard !runtimes.isEmpty else { return }
+        let persisted = runtimes.compactMap(\.record.stackCoordinate)
+        let persistedSet = Set(persisted)
+        let completeSet = persistedSet.union([.origin])
+        guard persisted.count != runtimes.count
+                || persistedSet.count != runtimes.count
+                || persistedSet.contains(.origin)
+                || !GaiCompanionStackLayout.isConnected(completeSet) else { return }
+
+        let defaults = Array(
+            GaiCompanionStackLayout.defaultCoordinates(count: runtimes.count + 1)
+                .dropFirst())
+        for (runtime, coordinate) in zip(runtimes, defaults) {
+            guard let record = store.update(id: runtime.id, {
+                $0.stackCoordinate = coordinate
+            }) else { continue }
+            runtime.replaceRecord(record)
+        }
+    }
+
+    private var companionStackElementIDs: [UUID] {
+        [companionHubID] + runtimes.map(\.id)
+    }
+
+    private func companionStackCoordinate(for id: UUID) -> GaiCompanionStackCoordinate {
+        id == companionHubID
+            ? .origin
+            : runtime(id: id)?.record.stackCoordinate ?? .origin
+    }
+
+    private func expandCompanionStack() {
+        guard !runtimes.isEmpty,
+              let hubController = companionHubController else { return }
+        collapseEveryCompanionTerminalForStackMotion()
+
+        let screen = hubController.companionPanel.screen ?? targetScreenForCompanionHub()
+        let anchorFrame = hubController.companionPanel.frame
+        let layout = resolvedCompanionStackLayout(
+            anchorFrame: anchorFrame,
+            screen: screen)
+        let fromFrames = companionStackTransition == nil
+            ? collapsedCompanionFrames(around: anchorFrame)
+            : currentCompanionFrames()
+        beginCompanionStackTransition(
+            expanding: true,
+            isReflow: false,
+            fromFrames: fromFrames,
+            layout: layout,
+            duration: 0.72)
+    }
+
+    private func collapseCompanionStack() {
+        guard companionStackIsExpanded,
+              let hubController = companionHubController else { return }
+        collapseEveryCompanionTerminalForStackMotion()
+        let screen = hubController.companionPanel.screen ?? targetScreenForCompanionHub()
+        let anchorFrame = hubController.companionPanel.frame
+        persistCompanionHubFrame(anchorFrame, screen: screen)
+        let currentLayout = activeCompanionStackLayout
+            ?? resolvedCompanionStackLayout(
+                anchorFrame: anchorFrame,
+                screen: screen)
+        let collapsedFrames = collapsedCompanionFrames(around: anchorFrame)
+        let collapsedLayout = GaiCompanionStackResolvedLayout(
+            orientation: currentLayout.orientation,
+            anchorCenter: CGPoint(x: anchorFrame.midX, y: anchorFrame.midY),
+            cellSize: currentLayout.cellSize,
+            frames: collapsedFrames)
+        beginCompanionStackTransition(
+            expanding: false,
+            isReflow: false,
+            fromFrames: currentCompanionFrames(),
+            layout: collapsedLayout,
+            duration: 0.62)
+    }
+
+    private func reflowExpandedCompanionStack(animated: Bool) {
+        guard companionStackIsExpanded,
+              let hubController = companionHubController else { return }
+        let screen = hubController.companionPanel.screen ?? targetScreenForCompanionHub()
+        let layout = resolvedCompanionStackLayout(
+            anchorFrame: hubController.companionPanel.frame,
+            screen: screen,
+            preferredOrientation: activeCompanionStackLayout?.orientation)
+        guard animated else {
+            activeCompanionStackLayout = layout
+            settleCompanionStackVisibility()
+            return
+        }
+        beginCompanionStackTransition(
+            expanding: true,
+            isReflow: true,
+            fromFrames: currentCompanionFrames(),
+            layout: layout,
+            duration: 0.46)
+    }
+
+    private func beginCompanionStackTransition(
+        expanding: Bool,
+        isReflow: Bool,
+        fromFrames: [UUID: NSRect],
+        layout: GaiCompanionStackResolvedLayout,
+        duration: CFTimeInterval
+    ) {
+        let reversesActiveTransition = companionStackTransition != nil
+        companionStackDisplayLink.stop()
+        companionStackSwapPreview = nil
+        let elementIDs = companionStackElementIDs
+        let distances = elementIDs.map { id -> Int in
+            let coordinate = companionStackCoordinate(for: id)
+            return abs(coordinate.column) + abs(coordinate.row)
+        }
+        let maximumDistance = max(distances.max() ?? 1, 1)
+        let items = elementIDs.enumerated().compactMap { index, id -> GaiCompanionStackTransitionItem? in
+            guard let fromFrame = fromFrames[id],
+                  let toFrame = layout.frames[id] else { return nil }
+            let distance = distances[index]
+            let waveDistance = expanding ? distance : maximumDistance - distance
+            let delay: CFTimeInterval = isReflow
+                ? min(Double(distance) * 0.012, 0.045)
+                : min(Double(waveDistance) * 0.026 + Double(index) * 0.006, 0.14)
+            let stableSeed = id.uuidString.utf8.reduce(0) {
+                ($0 &* 31 &+ Int($1)) & 0x7fff
+            }
+            let bendSign: CGFloat = stableSeed.isMultiple(of: 2) ? 1 : -1
+            let travel = hypot(toFrame.midX - fromFrame.midX, toFrame.midY - fromFrame.midY)
+            let isAnchor = id == companionHubID
+            let fromAlpha: CGFloat = if reversesActiveTransition {
+                stackTransitionAlpha(for: id)
+            } else {
+                1
+            }
+            let fromScale: CGFloat = if reversesActiveTransition {
+                stackTransitionScale(for: id)
+            } else if isReflow || isAnchor || !expanding {
+                1
+            } else {
+                Self.collapsedPileScale
+            }
+            return GaiCompanionStackTransitionItem(
+                id: id,
+                fromFrame: fromFrame,
+                toFrame: toFrame,
+                delay: delay,
+                bend: bendSign * min(18, travel * 0.055),
+                fromAlpha: fromAlpha,
+                toAlpha: 1,
+                fromScale: fromScale,
+                toScale: isReflow || isAnchor || expanding
+                    ? 1
+                    : Self.collapsedPileScale)
+        }
+        guard !items.isEmpty else { return }
+
+        detachCompanionPileWindows()
+        companionStackIsExpanded = expanding
+        activeCompanionStackLayout = expanding ? layout : nil
+        updateCompanionStackDepths()
+        companionHubController?.prepareStackTransition()
+        for controller in panelControllers.values {
+            controller.prepareStackTransition()
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            companionStackTransition = nil
+            for item in items {
+                settleCompanionStackElement(
+                    id: item.id,
+                    frame: item.toFrame,
+                    visible: agentWindowsAreVisible
+                        && (expanding || item.id == companionHubID))
+            }
+            settleCompanionStackVisibility()
+            return
+        }
+        companionStackTransition = GaiCompanionStackTransition(
+            expanding: expanding,
+            isReflow: isReflow,
+            anchorID: companionHubID,
+            startedAt: CACurrentMediaTime(),
+            duration: duration,
+            items: items,
+            finalLayout: layout)
+
+        let depthOrderedItems = Array(
+            items.filter { $0.id != companionHubID }.reversed())
+            + items.filter { $0.id == companionHubID }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for item in depthOrderedItems where agentWindowsAreVisible {
+            applyCompanionStackElement(
+                id: item.id,
+                item.fromFrame,
+                alpha: item.fromAlpha,
+                scale: item.fromScale,
+                orderFront: true)
+        }
+        CATransaction.commit()
+        companionStackDisplayLink.start()
+    }
+
+    private func advanceCompanionStackTransition(at timestamp: CFTimeInterval) {
+        guard let transition = companionStackTransition else {
+            companionStackDisplayLink.stop()
+            return
+        }
+        let elapsed = max(0, timestamp - transition.startedAt)
+        var finished = true
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for item in transition.items {
+            let availableDuration = max(transition.duration - item.delay, 0.001)
+            let linear = CGFloat(min(max((elapsed - item.delay) / availableDuration, 0), 1))
+            if linear < 1 { finished = false }
+            let position = GaiCompanionStackMotion.position(at: linear)
+            let opacityProgress = GaiCompanionStackMotion.opacity(at: linear)
+            let frame = companionStackFrame(
+                from: item.fromFrame,
+                to: item.toFrame,
+                position: position,
+                linearProgress: linear,
+                bend: transition.isReflow ? 0 : item.bend)
+            let alpha = item.fromAlpha
+                + (item.toAlpha - item.fromAlpha) * opacityProgress
+            let scaleProgress = min(max(position, 0), 1.035)
+            let scale = item.fromScale
+                + (item.toScale - item.fromScale) * scaleProgress
+            applyCompanionStackElement(
+                id: item.id,
+                frame,
+                alpha: alpha,
+                scale: scale,
+                orderFront: false)
+        }
+        CATransaction.commit()
+        guard finished else { return }
+
+        companionStackDisplayLink.stop()
+        companionStackTransition = nil
+        activeCompanionStackLayout = transition.expanding
+            ? transition.finalLayout
+            : nil
+        settleCompanionStackVisibility()
+    }
+
+    private func companionStackFrame(
+        from: NSRect,
+        to: NSRect,
+        position: CGFloat,
+        linearProgress: CGFloat,
+        bend: CGFloat
+    ) -> NSRect {
+        let start = CGPoint(x: from.midX, y: from.midY)
+        let end = CGPoint(x: to.midX, y: to.midY)
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let distance = max(hypot(dx, dy), 1)
+        let arc = sin(.pi * min(max(linearProgress, 0), 1)) * bend
+        let center = CGPoint(
+            x: start.x + dx * position - dy / distance * arc,
+            y: start.y + dy * position + dx / distance * arc)
+        let width = from.width + (to.width - from.width) * position
+        let height = from.height + (to.height - from.height) * position
+        return NSRect(
+            x: center.x - width / 2,
+            y: center.y - height / 2,
+            width: width,
+            height: height)
+    }
+
+    private func resolvedCompanionStackLayout(
+        anchorFrame: NSRect,
+        screen: NSScreen,
+        preferredOrientation: GaiCompanionStackOrientation? = nil
+    ) -> GaiCompanionStackResolvedLayout {
+        if companionStackMode == .freeform {
+            return freeformCompanionStackLayout(
+                anchorFrame: anchorFrame)
+        }
+        let ids = companionStackElementIDs
+        var coordinates = Dictionary(uniqueKeysWithValues: runtimes.map {
+            ($0.id, $0.record.stackCoordinate ?? .origin)
+        })
+        coordinates[companionHubID] = .origin
+        var sizes = Dictionary(uniqueKeysWithValues: runtimes.map {
+            ($0.id, companionPanelSize(scalePercent: $0.record.scalePercent))
+        })
+        sizes[companionHubID] = companionPanelSize(scalePercent: .standard)
+        return GaiCompanionStackLayout.resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: companionHubID,
+            anchorFrame: anchorFrame,
+            workArea: screen.visibleFrame.insetBy(dx: 18, dy: 18),
+            preferredOrientation: preferredOrientation)
+    }
+
+    private func freeformCompanionStackLayout(
+        anchorFrame: NSRect
+    ) -> GaiCompanionStackResolvedLayout {
+        var frames = Dictionary(uniqueKeysWithValues: runtimes.map { runtime in
+            let screen = targetScreen(for: runtime)
+            return (runtime.id, persistedFreeformCompanionFrame(
+                for: runtime,
+                screen: screen))
+        })
+        frames[companionHubID] = anchorFrame
+        return GaiCompanionStackResolvedLayout(
+            orientation: .identity,
+            anchorCenter: CGPoint(x: anchorFrame.midX, y: anchorFrame.midY),
+            cellSize: anchorFrame.size,
+            frames: frames)
+    }
+
+    private func persistedFreeformCompanionFrame(
+        for runtime: GaiCompanionRuntime,
+        screen: NSScreen
+    ) -> NSRect {
+        let visible = screen.visibleFrame
+        let size = companionPanelSize(scalePercent: runtime.record.scalePercent)
+        let center = CGPoint(
+            x: visible.minX + visible.width * CGFloat(runtime.record.normalizedPosition.x),
+            y: visible.minY + visible.height * CGFloat(runtime.record.normalizedPosition.y))
+        return NSRect(
+            x: center.x - size.width / 2,
+            y: center.y - size.height / 2,
+            width: size.width,
+            height: size.height)
+    }
+
+    private func collapsedCompanionFrames(around anchorFrame: NSRect) -> [UUID: NSRect] {
+        var frames = Dictionary(uniqueKeysWithValues: runtimes.enumerated().map { index, runtime in
+            let size = companionPanelSize(scalePercent: runtime.record.scalePercent)
+            let stair = CGFloat(index / 2 + 1)
+            let direction: CGFloat = index.isMultiple(of: 2) ? 1 : -1
+            let horizontalOffset = direction * stair * 3.25
+            let verticalOffset = stair * 0.8
+            return (runtime.id, NSRect(
+                x: anchorFrame.midX - size.width / 2 + horizontalOffset,
+                y: anchorFrame.midY - size.height / 2 + verticalOffset,
+                width: size.width,
+                height: size.height))
+        })
+        frames[companionHubID] = anchorFrame
+        return frames
+    }
+
+    private func currentCompanionFrames() -> [UUID: NSRect] {
+        var frames = Dictionary(uniqueKeysWithValues: runtimes.compactMap { runtime in
+            panelControllers[runtime.id].map { (runtime.id, $0.companionPanel.frame) }
+        })
+        if let hubController = companionHubController {
+            frames[companionHubID] = hubController.companionPanel.frame
+        }
+        return frames
+    }
+
+    private func collapseEveryCompanionTerminalForStackMotion() {
+        for runtime in runtimes where runtime.presentation != .collapsed {
+            setPresentation(.collapsed, for: runtime, animated: false, focus: false)
+        }
+    }
+
+    private func settleCompanionStackVisibility() {
+        updateCompanionStackDepths()
+        guard agentWindowsAreVisible,
+              let hubController = companionHubController else { return }
+        if companionStackIsExpanded {
+            detachCompanionPileWindows()
+            if activeCompanionStackLayout == nil {
+                let screen = hubController.companionPanel.screen
+                    ?? targetScreenForCompanionHub()
+                activeCompanionStackLayout = resolvedCompanionStackLayout(
+                    anchorFrame: hubController.companionPanel.frame,
+                    screen: screen)
+            }
+            guard let layout = activeCompanionStackLayout else { return }
+            for runtime in runtimes {
+                guard let frame = layout.frames[runtime.id] else { continue }
+                panelControllers[runtime.id]?.settleStackTransition(
+                    frame: frame,
+                    visible: true)
+            }
+            if let frame = layout.frames[companionHubID] {
+                hubController.settleStackTransition(frame: frame, visible: true)
+            }
+        } else {
+            let hubFrame = hubController.companionPanel.frame
+            let collapsedFrames = collapsedCompanionFrames(around: hubFrame)
+            for runtime in runtimes.reversed() {
+                guard let frame = collapsedFrames[runtime.id] else { continue }
+                panelControllers[runtime.id]?.settleStackTransition(frame: frame, visible: true)
+            }
+            hubController.settleStackTransition(frame: hubFrame, visible: true)
+            attachCompanionPileWindows()
+        }
+        companionHubController?.finishStackTransition()
+        for runtime in runtimes {
+            panelControllers[runtime.id]?.finishStackTransition(
+                interactive: companionStackIsExpanded,
+                selected: selectedCompanionID == runtime.id,
+                restingScale: companionStackIsExpanded ? 1 : Self.collapsedPileScale)
+        }
+    }
+
+    private func detachCompanionPileWindows() {
+        guard let hubWindow = companionHubController?.companionPanel else { return }
+        for controller in panelControllers.values
+            where controller.companionPanel.parent === hubWindow {
+            hubWindow.removeChildWindow(controller.companionPanel)
+        }
+    }
+
+    private func attachCompanionPileWindows() {
+        guard !companionStackIsExpanded,
+              let hubWindow = companionHubController?.companionPanel else { return }
+        detachCompanionPileWindows()
+        for runtime in runtimes.reversed() {
+            guard let window = panelControllers[runtime.id]?.companionPanel else { continue }
+            hubWindow.addChildWindow(window, ordered: .below)
+        }
+    }
+
+    private func updateCompanionStackDepths() {
+        for runtime in runtimes {
+            runtime.collapsedStackDepth = companionStackIsExpanded ? 0 : 1
+        }
+        companionHubState.companionCount = runtimes.count
+        companionHubState.isExpanded = companionStackIsExpanded
+    }
+
+    private func stackTransitionAlpha(for id: UUID) -> CGFloat {
+        id == companionHubID
+            ? companionHubController?.transitionAlpha ?? 1
+            : panelControllers[id]?.companionTransitionAlpha ?? 1
+    }
+
+    private func stackTransitionScale(for id: UUID) -> CGFloat {
+        id == companionHubID
+            ? companionHubController?.transitionScale ?? 1
+            : panelControllers[id]?.companionTransitionScale ?? 1
+    }
+
+    private func applyCompanionStackElement(
+        id: UUID,
+        _ frame: NSRect,
+        alpha: CGFloat,
+        scale: CGFloat,
+        orderFront: Bool
+    ) {
+        if id == companionHubID {
+            companionHubController?.applyStackTransitionFrame(
+                frame,
+                alpha: alpha,
+                scale: scale,
+                orderFront: orderFront)
+        } else {
+            panelControllers[id]?.applyStackTransitionFrame(
+                frame,
+                alpha: alpha,
+                scale: scale,
+                orderFront: orderFront)
+        }
+    }
+
+    private func settleCompanionStackElement(
+        id: UUID,
+        frame: NSRect,
+        visible: Bool
+    ) {
+        if id == companionHubID {
+            companionHubController?.settleStackTransition(frame: frame, visible: visible)
+        } else {
+            panelControllers[id]?.settleStackTransition(frame: frame, visible: visible)
+        }
+    }
+
+    private func ensureCompanionHubPanel() {
+        guard companionHubController == nil else { return }
+        let controller = GaiCompanionHubPanelController(
+            hubID: companionHubID,
+            state: companionHubState,
+            manager: self)
+        companionHubController = controller
+        let screen = targetScreenForCompanionHub()
+        controller.show(
+            frame: companionHubFrame(screen: screen),
+            visible: agentWindowsAreVisible)
+        updateCompanionStackDepths()
+    }
+
+    private func targetScreenForCompanionHub() -> NSScreen {
+        if let displayID = companionHubPlacement?.displayID,
+           let screen = NSScreen.screens.first(where: {
+               self.displayID(for: $0) == displayID
+           }) {
+            return screen
+        }
+        return screenUnderMouse()
+    }
+
+    private func companionHubFrame(screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        let size = companionPanelSize(scalePercent: .standard)
+        let position = companionHubPlacement?.normalizedPosition ?? .center
+        let center = CGPoint(
+            x: visible.minX + visible.width * CGFloat(position.x),
+            y: visible.minY + visible.height * CGFloat(position.y))
+        return NSRect(
+            x: center.x - size.width / 2,
+            y: center.y - size.height / 2,
+            width: size.width,
+            height: size.height)
+    }
+
+    private func persistCompanionHubFrame(_ frame: NSRect, screen: NSScreen) {
+        let visible = screen.visibleFrame
+        let placement = GaiCompanionHubPlacement(
+            normalizedPosition: GaiCompanionNormalizedPosition(
+                x: Double((frame.midX - visible.minX) / max(visible.width, 1)),
+                y: Double((frame.midY - visible.minY) / max(visible.height, 1))),
+            displayID: displayID(for: screen))
+        companionHubPlacement = placement
+        if !placement.persist(to: userDefaults) {
+            Ghostty.logger.error("could not persist companion hub placement")
+        }
+    }
+
+    private func persistCompanionAnchorFrame(
+        _ frame: NSRect,
+        runtime: GaiCompanionRuntime,
+        screen: NSScreen
+    ) {
+        let visible = screen.visibleFrame
+        let x = Double((frame.midX - visible.minX) / max(visible.width, 1))
+        let y = Double((frame.midY - visible.minY) / max(visible.height, 1))
+        guard let record = store.update(id: runtime.id, {
+            $0.normalizedPosition = GaiCompanionNormalizedPosition(x: x, y: y)
+            $0.displayID = displayID(for: screen)
+        }) else { return }
+        runtime.replaceRecord(record)
+    }
+
     // MARK: Presentation and windows
 
     private func ensurePanel(for runtime: GaiCompanionRuntime) {
@@ -2225,6 +2888,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         focus: Bool
     ) {
         ensurePanel(for: runtime)
+        if presentation != .collapsed,
+           focus,
+           !runtimes.isEmpty,
+           !companionStackIsExpanded {
+            expandCompanionStack()
+        }
         if presentation != .collapsed {
             detachInlineTerminalIfNeeded(id: runtime.id)
         }
@@ -2432,6 +3101,16 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     /// Persistence and record publication stay in `panelDidMove` after mouse-up.
     func panelIsMoving(for id: UUID, frame: NSRect, screen: NSScreen?) {
         guard let runtime = runtime(id: id), let screen else { return }
+        if companionStackIsExpanded {
+            if companionStackMode == .freeform {
+                updateFreeformCompanionFrame(id: id, frame: frame)
+                return
+            }
+            previewOrganicCompanionSwapIfNeeded(
+                movingID: id,
+                frame: frame)
+            return
+        }
         let preview = compactPreviewGeometry(
             for: runtime,
             screen: screen,
@@ -2447,6 +3126,20 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     func panelDidMove(for id: UUID, frame: NSRect, screen: NSScreen?) {
         guard let runtime = runtime(id: id), let screen else { return }
+        if companionStackIsExpanded {
+            if companionStackMode == .freeform {
+                persistFreeformCompanionFrame(
+                    runtime: runtime,
+                    frame: frame,
+                    screen: screen)
+                return
+            }
+            settleExpandedCompanionDrag(
+                runtime: runtime,
+                frame: frame,
+                screen: screen)
+            return
+        }
         let visible = screen.visibleFrame
         let x = Double((frame.midX - visible.minX) / max(visible.width, 1))
         let y = Double((frame.midY - visible.minY) / max(visible.height, 1))
@@ -2471,6 +3164,195 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             terminalFrame: runtime.presentation == .compact ? geometry.terminalFrame : nil,
             placement: geometry.placement,
             screen: screen)
+    }
+
+    func companionHubIsMoving(frame: NSRect, screen: NSScreen?) {
+        guard let screen else { return }
+        guard companionStackIsExpanded else { return }
+        if companionStackMode == .freeform {
+            updateFreeformCompanionFrame(id: companionHubID, frame: frame)
+        } else {
+            moveExpandedCompanionStackWithHub(frame: frame)
+        }
+        _ = screen
+    }
+
+    func companionHubDidMove(frame: NSRect, screen: NSScreen?) {
+        guard let screen else { return }
+        persistCompanionHubFrame(frame, screen: screen)
+        guard companionStackIsExpanded else { return }
+        if companionStackMode == .freeform {
+            updateFreeformCompanionFrame(id: companionHubID, frame: frame)
+            return
+        }
+        reflowExpandedCompanionStack(animated: true)
+    }
+
+    private func moveExpandedCompanionStackWithHub(frame: NSRect) {
+        guard let layout = activeCompanionStackLayout,
+              let previousAnchorFrame = layout.frames[companionHubID] else { return }
+        let dx = frame.minX - previousAnchorFrame.minX
+        let dy = frame.minY - previousAnchorFrame.minY
+        guard dx != 0 || dy != 0 else { return }
+
+        let shiftedFrames = layout.frames.mapValues { $0.offsetBy(dx: dx, dy: dy) }
+        let shiftedLayout = GaiCompanionStackResolvedLayout(
+            orientation: layout.orientation,
+            anchorCenter: CGPoint(
+                x: layout.anchorCenter.x + dx,
+                y: layout.anchorCenter.y + dy),
+            cellSize: layout.cellSize,
+            frames: shiftedFrames)
+        activeCompanionStackLayout = shiftedLayout
+        for runtime in runtimes {
+            guard let shiftedFrame = shiftedFrames[runtime.id] else { continue }
+            panelControllers[runtime.id]?.applyStackTransitionFrame(
+                shiftedFrame,
+                alpha: 1,
+                scale: 1,
+                orderFront: false)
+        }
+    }
+
+    private func updateFreeformCompanionFrame(id: UUID, frame: NSRect) {
+        guard let layout = activeCompanionStackLayout else { return }
+        var frames = layout.frames
+        frames[id] = frame
+        activeCompanionStackLayout = GaiCompanionStackResolvedLayout(
+            orientation: layout.orientation,
+            anchorCenter: id == companionHubID
+                ? CGPoint(x: frame.midX, y: frame.midY)
+                : layout.anchorCenter,
+            cellSize: layout.cellSize,
+            frames: frames)
+    }
+
+    private func persistFreeformCompanionFrame(
+        runtime: GaiCompanionRuntime,
+        frame: NSRect,
+        screen: NSScreen
+    ) {
+        updateFreeformCompanionFrame(id: runtime.id, frame: frame)
+        persistCompanionAnchorFrame(frame, runtime: runtime, screen: screen)
+    }
+
+    /// The occupied cell begins yielding before mouse-up, like an iOS icon
+    /// grid. Its motion is driven directly by pointer proximity, so there is no
+    /// delayed animation chasing the hand and no layout commit until release.
+    private func previewOrganicCompanionSwapIfNeeded(
+        movingID: UUID,
+        frame: NSRect
+    ) {
+        guard let layout = activeCompanionStackLayout,
+              let movingRuntime = runtime(id: movingID) else {
+            clearOrganicCompanionSwapPreview()
+            return
+        }
+        let destination = layout.coordinate(
+            nearest: CGPoint(x: frame.midX, y: frame.midY),
+            anchorCoordinate: .origin)
+        guard destination != movingRuntime.record.stackCoordinate,
+              destination != .origin,
+              let target = runtimes.first(where: {
+                  $0.id != movingID && $0.record.stackCoordinate == destination
+              }),
+              let sourceFrame = layout.frames[movingID],
+              let targetFrame = layout.frames[target.id] else {
+            clearOrganicCompanionSwapPreview()
+            return
+        }
+
+        if let preview = companionStackSwapPreview,
+           preview.targetID != target.id,
+           let previousFrame = layout.frames[preview.targetID] {
+            panelControllers[preview.targetID]?.applyStackTransitionFrame(
+                previousFrame,
+                alpha: 1,
+                scale: 1,
+                orderFront: false)
+        }
+
+        let distance = hypot(frame.midX - targetFrame.midX, frame.midY - targetFrame.midY)
+        let radius = max(24, min(layout.cellSize.width, layout.cellSize.height) * 0.72)
+        let linear = min(max(1 - distance / radius, 0), 1)
+        let progress = linear * linear * (3 - 2 * linear)
+        guard progress > 0.001 else {
+            clearOrganicCompanionSwapPreview()
+            return
+        }
+        let previewFrame = companionStackFrame(
+            from: targetFrame,
+            to: sourceFrame,
+            position: progress,
+            linearProgress: progress,
+            bend: 8)
+        panelControllers[target.id]?.applyStackTransitionFrame(
+            previewFrame,
+            alpha: 1,
+            scale: 1 - 0.035 * sin(.pi * progress),
+            orderFront: false)
+        companionStackSwapPreview = (movingID: movingID, targetID: target.id)
+    }
+
+    private func clearOrganicCompanionSwapPreview() {
+        guard let preview = companionStackSwapPreview else { return }
+        if let frame = activeCompanionStackLayout?.frames[preview.targetID] {
+            panelControllers[preview.targetID]?.applyStackTransitionFrame(
+                frame,
+                alpha: 1,
+                scale: 1,
+                orderFront: false)
+        }
+        companionStackSwapPreview = nil
+    }
+
+    private func settleExpandedCompanionDrag(
+        runtime: GaiCompanionRuntime,
+        frame: NSRect,
+        screen: NSScreen
+    ) {
+        _ = screen
+        guard let layout = activeCompanionStackLayout else { return }
+
+        let source = runtime.record.stackCoordinate ?? .origin
+        let destination = layout.coordinate(
+            nearest: CGPoint(x: frame.midX, y: frame.midY),
+            anchorCoordinate: .origin)
+        if destination == source {
+            reflowExpandedCompanionStack(animated: true)
+            return
+        }
+        if let target = runtimes.first(where: {
+            $0.id != runtime.id && $0.record.stackCoordinate == destination
+        }) {
+            let records = store.update(ids: [runtime.id, target.id]) { record in
+                if record.id == runtime.id {
+                    record.stackCoordinate = destination
+                } else if record.id == target.id {
+                    record.stackCoordinate = source
+                }
+            }
+            for record in records {
+                self.runtime(id: record.id)?.replaceRecord(record)
+            }
+            companionStackSwapPreview = nil
+            reflowExpandedCompanionStack(animated: true)
+            return
+        }
+
+        let occupied = Set(runtimes.compactMap(\.record.stackCoordinate)).union([.origin])
+        guard GaiCompanionStackLayout.canMove(
+            from: source,
+            to: destination,
+            occupied: occupied),
+            let record = store.update(id: runtime.id, {
+                $0.stackCoordinate = destination
+            }) else {
+            reflowExpandedCompanionStack(animated: true)
+            return
+        }
+        runtime.replaceRecord(record)
+        reflowExpandedCompanionStack(animated: true)
     }
 
     private func updateSurfacePerformanceState(focused preferred: Ghostty.SurfaceView? = nil) {
@@ -2524,6 +3406,26 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         center.addObserver(
             self, selector: #selector(screensDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        center.addObserver(
+            self, selector: #selector(companionPreferencesDidChange(_:)),
+            name: UserDefaults.didChangeNotification, object: nil)
+    }
+
+    @objc private func companionPreferencesDidChange(_ notification: Notification) {
+        _ = notification
+        let mode = GaiCompanionStackMode.current(in: userDefaults)
+        guard mode != companionStackMode else { return }
+        companionStackMode = mode
+        companionStackSwapPreview = nil
+        if mode == .organicGrid {
+            reconcileCompanionStackCoordinates()
+        }
+        guard companionStackIsExpanded else {
+            settleCompanionStackVisibility()
+            return
+        }
+        activeCompanionStackLayout = nil
+        reflowExpandedCompanionStack(animated: true)
     }
 
     @objc private func didRequestNewSplit(_ notification: Notification) {
@@ -2788,6 +3690,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func screensDidChange(_ notification: Notification) {
         _ = notification
+        detachCompanionPileWindows()
+        ensureCompanionHubPanel()
+        let hubScreen = targetScreenForCompanionHub()
+        companionHubController?.show(
+            frame: companionHubFrame(screen: hubScreen),
+            visible: agentWindowsAreVisible)
         for runtime in runtimes {
             let screen = targetScreen(for: runtime)
             let companionFrame = companionFrame(for: runtime, screen: screen)
@@ -2806,6 +3714,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
                 animated: false,
                 focus: false,
                 agentWindowsAreVisible: agentWindowsAreVisible)
+        }
+        if companionStackIsExpanded {
+            reflowExpandedCompanionStack(animated: false)
+        } else {
+            settleCompanionStackVisibility()
         }
     }
 
@@ -3595,6 +4508,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
                 : nil,
             placement: geometry.placement,
             screen: screen)
+        if companionStackIsExpanded {
+            reflowExpandedCompanionStack(animated: true)
+        }
     }
 
     private func companionFrame(for runtime: GaiCompanionRuntime, screen: NSScreen) -> NSRect {
@@ -3753,6 +4669,56 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         return constrained(selected, to: workArea)
     }
 
+    /// Places the creator with the exact same four-side scorer as a compact
+    /// terminal, while keeping its independent AppKit window size and lifecycle.
+    func companionCreatorWindowFrame(windowSize: NSSize) -> NSRect? {
+        start()
+        guard let hubController = companionHubController else { return nil }
+        let screen = hubController.companionPanel.screen ?? targetScreenForCompanionHub()
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.screenMargin,
+            dy: Self.screenMargin)
+        let size = NSSize(
+            width: min(windowSize.width, workArea.width),
+            height: min(windowSize.height, workArea.height))
+        let hubFrame = hubController.companionPanel.frame
+        let rawCandidates = rawPreviewCandidates(
+            companionFrame: hubFrame,
+            terminalSize: size)
+        let obstacles = panelControllers.values.flatMap { controller -> [NSRect] in
+            var frames: [NSRect] = []
+            if controller.companionPanel.isVisible {
+                frames.append(controller.companionPanel.frame)
+            }
+            if controller.terminalPanel.isVisible {
+                frames.append(controller.terminalPanel.frame)
+            }
+            return frames
+        }
+        guard let selected = rawCandidates.enumerated().min(by: { lhs, rhs in
+            let left = constrained(lhs.element, to: workArea)
+            let right = constrained(rhs.element, to: workArea)
+            return placementScore(
+                raw: lhs.element,
+                constrained: left,
+                preferenceIndex: lhs.offset,
+                previousPlacement: companionHubCreatorPlacement,
+                companionFrame: hubFrame,
+                obstacles: obstacles,
+                workArea: workArea)
+                < placementScore(
+                    raw: rhs.element,
+                    constrained: right,
+                    preferenceIndex: rhs.offset,
+                    previousPlacement: companionHubCreatorPlacement,
+                    companionFrame: hubFrame,
+                    obstacles: obstacles,
+                    workArea: workArea)
+        })?.element else { return nil }
+        companionHubCreatorPlacement = selected.placement
+        return constrained(selected, to: workArea).terminalFrame
+    }
+
     private func rawPreviewCandidates(
         companionFrame: NSRect,
         terminalSize: NSSize
@@ -3845,6 +4811,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private static let screenMargin: CGFloat = 12
     private static let terminalGap: CGFloat = 8
     private static let expandedTerminalScreenMargin: CGFloat = 10
+    private static let collapsedPileScale: CGFloat = 0.94
 
     private func targetScreen(for runtime: GaiCompanionRuntime) -> NSScreen {
         if let displayID = runtime.record.displayID,

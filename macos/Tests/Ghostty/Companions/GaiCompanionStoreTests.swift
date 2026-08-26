@@ -5,15 +5,23 @@ import Testing
 
 @MainActor
 struct GaiCompanionStoreTests {
-    @Test func greenIsReservedForCompletionAndCannotBePersistedAsAnAgentColor() {
+    @Test func systemSignalColorsCannotBePersistedAsAgentColors() {
         #expect(GaiCompanionColorway.completionColorway == .aurore)
+        #expect(GaiCompanionColorway.hubColorway == .white)
         #expect(!GaiCompanionColorway.selectableColorways.contains(.aurore))
-        #expect(GaiCompanionColorway.selectableColorways.count == 8)
+        #expect(!GaiCompanionColorway.selectableColorways.contains(.white))
+        #expect(GaiCompanionColorway.selectableColorways.count == 7)
         #expect(GaiCompanionColorway.defaultColorway != .aurore)
+        #expect(GaiCompanionColorway.defaultColorway != .white)
 
-        let record = GaiCompanionRecord(colorway: .aurore)
-        #expect(record.colorway == .defaultColorway)
-        #expect(record.colorway.isSelectable)
+        for reservedColorway in [
+            GaiCompanionColorway.aurore,
+            GaiCompanionColorway.white,
+        ] {
+            let record = GaiCompanionRecord(colorway: reservedColorway)
+            #expect(record.colorway == .defaultColorway)
+            #expect(record.colorway.isSelectable)
+        }
     }
 
     @Test func loadingAnOldGreenAgentMigratesAndPersistsItsNormalColor() throws {
@@ -56,7 +64,8 @@ struct GaiCompanionStoreTests {
             displayID: " display-1 ",
             compactSize: .init(width: 10, height: 9_000),
             scalePercent: .init(275),
-            completionSoundEnabled: false)
+            completionSoundEnabled: false,
+            stackCoordinate: .init(column: -3, row: 4))
 
         let data = try JSONEncoder().encode(record)
         let decoded = try JSONDecoder().decode(GaiCompanionRecord.self, from: data)
@@ -72,6 +81,7 @@ struct GaiCompanionStoreTests {
         #expect(decoded.compactSize == .init(width: 320, height: 1_200))
         #expect(decoded.scalePercent == .init(200))
         #expect(decoded.completionSoundEnabled == false)
+        #expect(decoded.stackCoordinate == .init(column: -3, row: 4))
     }
 
     @Test func loadingTheOldCompactDefaultMigratesToTheLargerTerminal() throws {

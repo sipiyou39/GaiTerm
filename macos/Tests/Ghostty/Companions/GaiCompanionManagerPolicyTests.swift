@@ -5,6 +5,109 @@ import Testing
 @testable import TeddyCLI
 
 struct GaiCompanionManagerPolicyTests {
+    @Test func stackSeedIsCompactUniqueAndConnected() {
+        let coordinates = GaiCompanionStackLayout.defaultCoordinates(count: 10)
+        #expect(coordinates.count == 10)
+        #expect(Set(coordinates).count == 10)
+        #expect(GaiCompanionStackLayout.isConnected(Set(coordinates)))
+    }
+
+    @Test func dedicatedHubOwnsTheOriginWithoutBreakingTheAgentChain() {
+        let agentCoordinates = Array(
+            GaiCompanionStackLayout.defaultCoordinates(count: 11).dropFirst())
+        #expect(agentCoordinates.count == 10)
+        #expect(!agentCoordinates.contains(.origin))
+        #expect(GaiCompanionStackLayout.isConnected(
+            Set(agentCoordinates).union([.origin])))
+    }
+
+    @Test func stackDragCannotSplitTheConstellation() {
+        let occupied: Set<GaiCompanionStackCoordinate> = [
+            .init(column: 0, row: 0),
+            .init(column: 1, row: 0),
+            .init(column: 2, row: 0),
+        ]
+        #expect(!GaiCompanionStackLayout.canMove(
+            from: .init(column: 1, row: 0),
+            to: .init(column: 1, row: 1),
+            occupied: occupied))
+        #expect(GaiCompanionStackLayout.canMove(
+            from: .init(column: 2, row: 0),
+            to: .init(column: 0, row: 1),
+            occupied: occupied))
+    }
+
+    @Test func stackOrientationBloomsInwardWithoutMovingItsAnchor() throws {
+        let ids = (0..<4).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 100, height: 100)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+        let anchorFrame = NSRect(x: 850, y: 650, width: 100, height: 100)
+        let workArea = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+
+        let layout = GaiCompanionStackLayout.resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: anchorFrame,
+            workArea: workArea)
+
+        #expect(layout.orientation == .rotate180)
+        #expect(try #require(layout.frames[ids[0]]) == anchorFrame)
+        #expect(layout.frames.values.allSatisfy { workArea.contains($0) })
+    }
+
+    @Test func stackLayoutNeverPullsAnEdgeAlignedAnchorBackOntoTheDesktop() throws {
+        let ids = (0..<4).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 142, height: 174)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+        let anchorFrame = NSRect(x: -42, y: -74, width: 142, height: 174)
+
+        let layout = GaiCompanionStackLayout.resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: anchorFrame,
+            workArea: NSRect(x: 0, y: 0, width: 1_000, height: 800))
+
+        #expect(try #require(layout.frames[ids[0]]) == anchorFrame)
+    }
+
+    @Test func organicGridUsesTheMascotFootprintInsteadOfTransparentPanelBounds() {
+        let ids = (0..<2).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 142, height: 174)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+
+        let layout = GaiCompanionStackLayout.resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: NSRect(x: 400, y: 300, width: 142, height: 174),
+            workArea: NSRect(x: 0, y: 0, width: 1_000, height: 800))
+
+        #expect(abs(layout.cellSize.width - 122) < 0.001)
+        #expect(abs(layout.cellSize.height - 160) < 0.001)
+    }
+
+    @Test func everyStackOrientationRoundTripsGridCoordinates() {
+        let coordinate = GaiCompanionStackCoordinate(column: 3, row: -2)
+        for orientation in GaiCompanionStackOrientation.allCases {
+            #expect(orientation.removing(from: orientation.applying(to: coordinate))
+                == coordinate)
+        }
+    }
+
     @Test func mascotDoubleClickAlwaysOpensTheExpandedTerminal() {
         let doubleClick = GaiCompanionMascotActivation.doubleClick
         #expect(doubleClick.targetPresentation(from: .collapsed) == .maximized)

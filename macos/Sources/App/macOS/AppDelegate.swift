@@ -176,6 +176,10 @@ class AppDelegate: NSObject,
             // Teddy Peek is the default desktop interaction. It remains a
             // preference so the former click-only behavior is one toggle away.
             GaiPreferenceKey.teddyPeekEnabled: true,
+            // A compact, connected constellation is the polished default. The
+            // freeform alternative can be selected in General settings.
+            GaiPreferenceKey.companionStackMode:
+                GaiCompanionStackMode.organicGrid.rawValue,
 
             // Disable the automatic full screen menu item because we handle
             // it manually.

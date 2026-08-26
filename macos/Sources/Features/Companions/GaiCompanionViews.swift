@@ -55,6 +55,7 @@ private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingV
 }
 
 private enum GaiCompanionQuickAction: Hashable {
+    case home
     case replay
     case terminal
     case voice
@@ -338,6 +339,21 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         needsLayout = true
     }
 
+    func configureHubAction(onOpenCreator: @escaping () -> Void) {
+        guard quickActionButtons.isEmpty else { return }
+        let button = GaiCompanionQuickActionButton(
+            symbol: "house.fill",
+            accessibilityLabel: "Créer des doudous",
+            help: "Ouvrir la création de doudous",
+            activation: onOpenCreator)
+        button.isHidden = false
+        button.alphaValue = 1
+        quickActionButtons[.home] = button
+        quickActionsAreVisible = true
+        addSubview(button)
+        needsLayout = true
+    }
+
     func setQuickActionsVisible(_ visible: Bool, animated: Bool = true) {
         guard visible != quickActionsAreVisible else { return }
         quickActionsAreVisible = visible
@@ -372,7 +388,9 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth))
         let diameter = (28 * scale).rounded()
         let gap = (5 * scale).rounded()
-        let orderedActions: [GaiCompanionQuickAction] = [.terminal, .voice, .replay]
+        let orderedActions: [GaiCompanionQuickAction] = quickActionButtons[.home] == nil
+            ? [.terminal, .voice, .replay]
+            : [.home]
         let totalWidth = diameter * CGFloat(orderedActions.count)
             + gap * CGFloat(orderedActions.count - 1)
         var x = ((bounds.width - totalWidth) / 2).rounded()
@@ -470,16 +488,19 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let startPointer = NSEvent.mouseLocation
         let startOrigin = window.frame.origin
         var exceededDragThreshold = false
+        var windowActuallyMoved = false
         let notificationCenter = NotificationCenter.default
         let movementObserver = notificationCenter.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window,
             queue: .main
         ) { [weak self, weak window] _ in
-            guard !exceededDragThreshold,
-                  let origin = window?.frame.origin,
-                  hypot(origin.x - startOrigin.x, origin.y - startOrigin.y) >= 6
-            else { return }
+            guard let origin = window?.frame.origin else { return }
+            let distance = hypot(origin.x - startOrigin.x, origin.y - startOrigin.y)
+            if distance >= 0.5 {
+                windowActuallyMoved = true
+            }
+            guard !exceededDragThreshold, distance >= 3 else { return }
 
             exceededDragThreshold = true
             self?.onDragBegan?()
@@ -498,8 +519,9 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             window.frame.minX - startOrigin.x,
             window.frame.minY - startOrigin.y)
         let completedDrag = exceededDragThreshold
-            || pointerDistance >= 6
-            || windowDistance >= 6
+            || windowActuallyMoved
+            || pointerDistance >= 3
+            || windowDistance >= 0.5
         if completedDrag {
             if !exceededDragThreshold {
                 onDragBegan?()
@@ -549,7 +571,7 @@ private struct GaiCompanionWindowDragArea: NSViewRepresentable {
 /// Display-synchronised main-thread ticks with coalescing. `CVDisplayLink`
 /// calls back off-main; the data source merges frames if AppKit is briefly busy
 /// instead of building a queue of stale animation work.
-private final class GaiCompanionDisplayLink {
+final class GaiCompanionDisplayLink {
     private let onFrame: (CFTimeInterval) -> Void
     private let frameSource: DispatchSourceUserDataAdd
     private var displayLink: CVDisplayLink?
@@ -663,6 +685,162 @@ private enum GaiCompanionPlacementTiming {
         return 3 * inverse * inverse * parameter * firstControlPoint
             + 3 * inverse * parameter * parameter * secondControlPoint
             + parameter * parameter * parameter
+    }
+}
+
+final class GaiCompanionHubState: ObservableObject {
+    @Published var companionCount = 0
+    @Published var isExpanded = false
+}
+
+final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
+    let companionPanel: NSPanel
+
+    private let hubID: UUID
+    private weak var manager: GaiCompanionManager?
+    private var applyingFrame = false
+    private var previousFrame: NSRect?
+
+    init(
+        hubID: UUID,
+        state: GaiCompanionHubState,
+        manager: GaiCompanionManager
+    ) {
+        self.hubID = hubID
+        self.manager = manager
+
+        let panel = GaiCompanionPanel(
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: GaiCompanionVisualMetrics.basePanelWidth,
+                height: GaiCompanionVisualMetrics.basePanelHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        panel.level = NSWindow.Level(
+            rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
+        ]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.isMovableByWindowBackground = false
+        panel.animationBehavior = .none
+        panel.acceptsMouseMovedEvents = true
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "gai.companion.hub.\(hubID.uuidString)")
+        companionPanel = panel
+
+        super.init()
+        panel.delegate = self
+
+        let root = GaiCompanionHubView(state: state)
+        let host = GaiCompanionDragClickContainerView(rootView: root)
+        host.onClick = { [weak manager] in
+            manager?.companionHubWasClicked()
+        }
+        host.configureHubAction { [weak manager] in
+            manager?.requestOpenCompanionCreator()
+        }
+        host.onDragEnded = { [weak self, weak manager] in
+            guard let self else { return }
+            manager?.companionHubDidMove(
+                frame: self.companionPanel.frame,
+                screen: self.companionPanel.screen)
+        }
+        host.autoresizingMask = [.width, .height]
+        panel.contentView = host
+    }
+
+    func show(frame: NSRect, visible: Bool) {
+        applyingFrame = true
+        if companionPanel.frame != frame {
+            companionPanel.setFrame(frame, display: true, animate: false)
+        }
+        previousFrame = frame
+        applyingFrame = false
+        companionPanel.alphaValue = 1
+        companionPanel.contentView?.layer?.setAffineTransform(.identity)
+        if visible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
+    }
+
+    func setVisible(_ visible: Bool) {
+        if visible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
+    }
+
+    var transitionAlpha: CGFloat { companionPanel.alphaValue }
+
+    var transitionScale: CGFloat {
+        companionPanel.contentView?.layer?.affineTransform().a ?? 1
+    }
+
+    func applyStackTransitionFrame(
+        _ frame: NSRect,
+        alpha: CGFloat,
+        scale: CGFloat,
+        orderFront: Bool
+    ) {
+        applyingFrame = true
+        if companionPanel.frame != frame {
+            companionPanel.setFrame(frame, display: false, animate: false)
+        }
+        previousFrame = frame
+        applyingFrame = false
+        companionPanel.alphaValue = min(max(alpha, 0), 1)
+        companionPanel.contentView?.wantsLayer = true
+        companionPanel.contentView?.layer?.setAffineTransform(
+            CGAffineTransform(scaleX: scale, y: scale))
+        if orderFront {
+            companionPanel.orderFrontRegardless()
+        }
+    }
+
+    func prepareStackTransition() {
+        companionPanel.contentView?.wantsLayer = true
+        companionPanel.contentView?.layer?.shouldRasterize = true
+        companionPanel.contentView?.layer?.rasterizationScale =
+            companionPanel.screen?.backingScaleFactor ?? 2
+    }
+
+    func finishStackTransition() {
+        companionPanel.contentView?.layer?.shouldRasterize = false
+    }
+
+    func settleStackTransition(frame: NSRect, visible: Bool) {
+        show(frame: frame, visible: visible)
+    }
+
+    func close() {
+        companionPanel.delegate = nil
+        companionPanel.orderOut(nil)
+        companionPanel.close()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === companionPanel,
+              !applyingFrame else { return }
+        let frame = companionPanel.frame
+        guard let previousFrame else {
+            self.previousFrame = frame
+            return
+        }
+        self.previousFrame = frame
+        guard frame.origin != previousFrame.origin else { return }
+        manager?.companionHubIsMoving(
+            frame: frame,
+            screen: companionPanel.screen)
     }
 }
 
@@ -787,7 +965,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             dropFeedback: dropFeedback)
         let mascotHost = GaiCompanionDragClickContainerView(rootView: mascotRoot)
         mascotHost.onClick = { [weak manager] in
-            manager?.selectCompanion(id: runtime.id)
+            manager?.companionWasClicked(id: runtime.id)
         }
         mascotHost.onDoubleClick = { [weak manager] in
             manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
@@ -876,7 +1054,81 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func setDesktopSelected(_ selected: Bool) {
-        mascotHostView?.setQuickActionsVisible(selected && !dropIsTargeted)
+        mascotHostView?.setQuickActionsVisible(
+            selected && !dropIsTargeted && !companionPanel.ignoresMouseEvents)
+    }
+
+    var companionTransitionAlpha: CGFloat { companionPanel.alphaValue }
+
+    var companionTransitionScale: CGFloat {
+        companionPanel.contentView?.layer?.affineTransform().a ?? 1
+    }
+
+    /// Applies one compositor frame of the stack bloom. The window keeps its
+    /// real size while its layer scales around the centre, so SwiftUI and the
+    /// sprite atlas never relayout during motion.
+    func applyStackTransitionFrame(
+        _ frame: NSRect,
+        alpha: CGFloat,
+        scale: CGFloat,
+        orderFront: Bool
+    ) {
+        applyingCompanionFrame = true
+        if !NSEqualRects(companionPanel.frame, frame) {
+            companionPanel.setFrame(frame, display: false, animate: false)
+        }
+        previousCompanionFrame = frame
+        applyingCompanionFrame = false
+        companionPanel.alphaValue = min(max(alpha, 0), 1)
+        companionPanel.contentView?.wantsLayer = true
+        companionPanel.contentView?.layer?.setAffineTransform(
+            CGAffineTransform(scaleX: scale, y: scale))
+        if orderFront {
+            companionPanel.orderFrontRegardless()
+        }
+    }
+
+    /// The whole mascot hierarchy becomes one compositor texture for stack
+    /// motion. Materials, badges and atlas sublayers no longer need to be
+    /// recomposited independently for every Window Server frame.
+    func prepareStackTransition() {
+        cancelHoverPeekLifecycle()
+        companionPanel.ignoresMouseEvents = true
+        mascotHostView?.setQuickActionsVisible(false, animated: false)
+        companionPanel.contentView?.wantsLayer = true
+        companionPanel.contentView?.layer?.shouldRasterize = true
+        companionPanel.contentView?.layer?.rasterizationScale =
+            companionPanel.screen?.backingScaleFactor ?? 2
+    }
+
+    func finishStackTransition(
+        interactive: Bool,
+        selected: Bool,
+        restingScale: CGFloat
+    ) {
+        companionPanel.contentView?.layer?.shouldRasterize = false
+        companionPanel.contentView?.layer?.setAffineTransform(
+            CGAffineTransform(scaleX: restingScale, y: restingScale))
+        companionPanel.ignoresMouseEvents = !interactive
+        mascotHostView?.setQuickActionsVisible(
+            interactive && selected,
+            animated: false)
+    }
+
+    func settleStackTransition(frame: NSRect, visible: Bool) {
+        applyingCompanionFrame = true
+        if !NSEqualRects(companionPanel.frame, frame) {
+            companionPanel.setFrame(frame, display: true, animate: false)
+        }
+        previousCompanionFrame = frame
+        applyingCompanionFrame = false
+        companionPanel.contentView?.layer?.setAffineTransform(.identity)
+        companionPanel.alphaValue = 1
+        if visible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
     }
 
     var isHoverPeekPresented: Bool {
@@ -1126,6 +1378,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         if terminalPanel.parent === companionPanel {
             companionPanel.removeChildWindow(terminalPanel)
         }
+        companionPanel.parent?.removeChildWindow(companionPanel)
         companionPanel.delegate = nil
         terminalPanel.delegate = nil
         if let companionPanel = companionPanel as? GaiCompanionPanel {
@@ -1585,6 +1838,63 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 }
 
+private struct GaiCompanionHubView: View {
+    @ObservedObject var state: GaiCompanionHubState
+
+    private let colorway = GaiCompanionColorway.hubColorway
+    private let spriteWidth = CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth)
+
+    var body: some View {
+        ZStack {
+            Color.clear.contentShape(Rectangle())
+
+            VStack(spacing: -4) {
+                GaiCompanionSpriteView(
+                    colorway: colorway,
+                    animation: .idle,
+                    size: spriteWidth)
+                    .shadow(color: Color.white.opacity(0.18), radius: 11)
+                Color.clear.frame(height: 24)
+            }
+            .padding(.bottom, 2)
+
+            if state.companionCount > 0 {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Text("\(state.companionCount)")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.96))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background {
+                                Capsule(style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                                    .overlay {
+                                        Capsule(style: .continuous)
+                                            .fill(Color.white.opacity(0.12))
+                                    }
+                                    .overlay {
+                                        Capsule(style: .continuous)
+                                            .stroke(.white.opacity(0.32), lineWidth: 0.8)
+                                    }
+                            }
+                            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                    }
+                    Spacer()
+                }
+                .padding(.top, 35)
+                .padding(.trailing, 9)
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .accessibilityLabel("Pile de \(state.companionCount) doudous")
+        .accessibilityValue(state.isExpanded ? "Ouverte" : "Fermée")
+    }
+
+}
+
 private struct GaiCompanionMascotView: View {
     @ObservedObject var runtime: GaiCompanionRuntime
     @ObservedObject var dropFeedback: GaiCompanionDropFeedback
@@ -1601,6 +1911,11 @@ private struct GaiCompanionMascotView: View {
         ZStack {
             Color.clear
                 .contentShape(Rectangle())
+
+            if runtime.collapsedStackDepth > 1 {
+                stackGhost(opacity: 0.18, x: -9, y: 6, scale: 0.88)
+                stackGhost(opacity: 0.30, x: 9, y: 3, scale: 0.94)
+            }
 
             if dropFeedback.isTargeted {
                 RoundedRectangle(cornerRadius: 22 * scaleFactor, style: .continuous)
@@ -1626,9 +1941,17 @@ private struct GaiCompanionMascotView: View {
                     .shadow(color: phaseGlow.opacity(0.85), radius: 11 * scaleFactor)
                     .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
 
-                nameBadge
+                if runtime.collapsedStackDepth > 0 {
+                    Color.clear.frame(height: 24 * scaleFactor)
+                } else {
+                    nameBadge
+                }
             }
             .padding(.bottom, max(1, 2 * scaleFactor))
+
+            if runtime.collapsedStackDepth > 1 {
+                stackCountBadge
+            }
 
             if dropFeedback.isTargeted {
                 dropBadge(
@@ -1651,6 +1974,60 @@ private struct GaiCompanionMascotView: View {
         .animation(.easeOut(duration: 0.16), value: dropFeedback.acceptedFileCount)
         .accessibilityLabel("\(runtime.record.displayName), \(runtime.phaseLabel)")
         .accessibilityValue(runtime.isDesktopSelected ? "Sélectionné" : "Non sélectionné")
+    }
+
+    private func stackGhost(
+        opacity: Double,
+        x: CGFloat,
+        y: CGFloat,
+        scale: CGFloat
+    ) -> some View {
+        VStack(spacing: -4 * scaleFactor) {
+            GaiCompanionSpriteView(
+                colorway: runtime.renderedColorway,
+                animation: .idle,
+                size: spriteWidth)
+            Color.clear.frame(height: 24 * scaleFactor)
+        }
+        .scaleEffect(scale)
+        .offset(x: x * scaleFactor, y: y * scaleFactor)
+        .opacity(opacity)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private var stackCountBadge: some View {
+        VStack {
+            HStack {
+                Spacer()
+                Text("\(runtime.collapsedStackDepth)")
+                    .font(.system(
+                        size: max(9, 10 * scaleFactor),
+                        weight: .bold,
+                        design: .rounded))
+                    .foregroundStyle(.white.opacity(0.96))
+                    .padding(.horizontal, 6 * scaleFactor)
+                    .padding(.vertical, 3 * scaleFactor)
+                    .background {
+                        Capsule(style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .overlay {
+                                Capsule(style: .continuous)
+                                    .fill(accent.opacity(0.24))
+                            }
+                            .overlay {
+                                Capsule(style: .continuous)
+                                    .stroke(.white.opacity(0.32), lineWidth: 0.8)
+                            }
+                    }
+                    .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            }
+            Spacer()
+        }
+        .padding(.top, 35 * scaleFactor)
+        .padding(.trailing, 9 * scaleFactor)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var nameBadge: some View {

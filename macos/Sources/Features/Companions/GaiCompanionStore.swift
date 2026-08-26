@@ -93,7 +93,8 @@ final class GaiCompanionStore: ObservableObject {
         displayID: String? = nil,
         compactSize: GaiCompanionCompactSize = .standard,
         scalePercent: GaiCompanionScalePercent = .standard,
-        completionSoundEnabled: Bool = true
+        completionSoundEnabled: Bool = true,
+        stackCoordinate: GaiCompanionStackCoordinate? = nil
     ) -> GaiCompanionRecord {
         var record = GaiCompanionRecord(
             name: name,
@@ -104,7 +105,8 @@ final class GaiCompanionStore: ObservableObject {
             displayID: displayID,
             compactSize: compactSize,
             scalePercent: scalePercent,
-            completionSoundEnabled: completionSoundEnabled)
+            completionSoundEnabled: completionSoundEnabled,
+            stackCoordinate: stackCoordinate)
         if record.name == nil {
             var usedNames = Self.canonicalNames(in: companions)
             record.name = Self.nextGeneratedName(usedNames: &usedNames)

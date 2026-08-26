@@ -8,6 +8,8 @@ import UserNotifications
 enum GaiPreferenceKey {
     /// Reveal a companion's compact CLI after a deliberate pointer hover.
     static let teddyPeekEnabled = "GaiTeddyPeekEnabled"
+    /// Expanded desktop arrangement for a collapsed companion pile.
+    static let companionStackMode = "GaiCompanionStackMode"
     /// Tint the workspaces drawer's glass with the selected workspace's accent.
     static let tintGlassWithWorkspaceAccent = "GaiTintGlassWithWorkspaceAccent"
     /// Code editor font size (points).
@@ -593,6 +595,10 @@ private struct GeneralSettings: View {
         GaiPreferenceKey.teddyPeekEnabled,
         store: UserDefaults.ghostty)
     private var teddyPeekEnabled = true
+    @AppStorage(
+        GaiPreferenceKey.companionStackMode,
+        store: UserDefaults.ghostty)
+    private var companionStackMode = GaiCompanionStackMode.organicGrid.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -610,6 +616,8 @@ private struct GeneralSettings: View {
                     subtitle: "Laisse brièvement le pointeur sur un doudou pour lire sa CLI sans changer de fenêtre.",
                     first: true,
                     isOn: $teddyPeekEnabled)
+
+                CompanionStackModeSelector(selection: $companionStackMode)
             }
         }
         .onAppear { launchAtLogin = (SMAppService.mainApp.status == .enabled) }
@@ -625,6 +633,117 @@ private struct GeneralSettings: View {
             launchAtLogin = on
         } catch {
             launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        }
+    }
+}
+
+private struct CompanionStackModeSelector: View {
+    @Binding var selection: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Rectangle()
+                .fill(TeddySettingsPalette.hairline)
+                .frame(height: 1)
+                .padding(.leading, 14)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Disposition de la pile")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(TeddySettingsPalette.primaryText)
+                Text("Choisis comment les doudous retrouvent leur place à l’ouverture.")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(TeddySettingsPalette.tertiaryText)
+            }
+
+            HStack(spacing: 10) {
+                modeCard(.organicGrid)
+                modeCard(.freeform)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+    }
+
+    private func modeCard(_ mode: GaiCompanionStackMode) -> some View {
+        let selected = selection == mode.rawValue
+        return Button {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                selection = mode.rawValue
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: mode.settingsSymbol)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(selected
+                        ? Color.black.opacity(0.82)
+                        : TeddySettingsPalette.secondaryText)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        selected
+                            ? TeddySettingsPalette.accent
+                            : TeddySettingsPalette.control,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(mode.settingsTitle)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(TeddySettingsPalette.primaryText)
+                    Text(mode.settingsSubtitle)
+                        .font(.system(size: 9.5, weight: .regular))
+                        .foregroundStyle(TeddySettingsPalette.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 2)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(selected
+                        ? TeddySettingsPalette.primaryText
+                        : TeddySettingsPalette.tertiaryText)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
+            .background(
+                selected
+                    ? TeddySettingsPalette.selection
+                    : Color.black.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(
+                        selected
+                            ? Color.white.opacity(0.24)
+                            : TeddySettingsPalette.cardStroke,
+                        lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(selected ? "Sélectionné" : "Non sélectionné")
+    }
+}
+
+private extension GaiCompanionStackMode {
+    var settingsTitle: String {
+        switch self {
+        case .organicGrid: "Grille organique"
+        case .freeform: "Placement libre"
+        }
+    }
+
+    var settingsSubtitle: String {
+        switch self {
+        case .organicGrid:
+            "Bloc compact et connecté, avec permutation fluide des places."
+        case .freeform:
+            "Chaque doudou retrouve exactement l’endroit que tu as choisi."
+        }
+    }
+
+    var settingsSymbol: String {
+        switch self {
+        case .organicGrid: "square.grid.3x3.fill"
+        case .freeform: "move.3d"
         }
     }
 }

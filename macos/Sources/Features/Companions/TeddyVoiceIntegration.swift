@@ -410,6 +410,9 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
         self.window = window
         super.init()
         window.delegate = self
+        manager.onOpenCompanionCreator = { [weak self] in
+            self?.showCreatorAnchoredToHub()
+        }
         navigationCancellable = rootNavigation.$destination
             .removeDuplicates()
             .dropFirst()
@@ -436,6 +439,19 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
 
     func showSettings() {
         rootNavigation.showSettings()
+        show(activate: true)
+    }
+
+    private func showCreatorAnchoredToHub() {
+        let wasAlreadyLibrary = rootNavigation.destination == .library
+        rootNavigation.showLibrary()
+        if wasAlreadyLibrary {
+            resize(for: .library)
+        }
+        if let frame = manager.companionCreatorWindowFrame(
+            windowSize: window.frame.size) {
+            window.setFrame(frame, display: true, animate: window.isVisible)
+        }
         show(activate: true)
     }
 
