@@ -30,15 +30,14 @@ final class GaiTeddyCompanionRouter: TeddyCompanionRouting {
 
     func companionSnapshots() -> [TeddyCompanionSnapshot] {
         guard let manager else { return [] }
-        return manager.managedAgentSnapshots().map { agent in
-            TeddyCompanionSnapshot(
-                id: agent.id,
-                name: agent.name,
-                provider: agent.provider?.rawValue ?? "terminal",
-                phase: teddyPhase(agent.phase),
-                directoryPath: agent.directoryPath,
-                hasPendingResponse: agent.isResponsePending)
-        }
+        return manager.managedAgentSnapshots().map { teddySnapshot($0) }
+    }
+
+    func freshCompanionSnapshot(for companionID: UUID) -> TeddyCompanionSnapshot? {
+        guard let manager,
+              let agent = manager.freshManagedAgentSnapshot(id: companionID)
+        else { return nil }
+        return teddySnapshot(agent)
     }
 
     func selectCompanion(_ companionID: UUID) {
@@ -138,6 +137,16 @@ final class GaiTeddyCompanionRouter: TeddyCompanionRouting {
         case .exited:
             .exited
         }
+    }
+
+    private func teddySnapshot(_ agent: GaiManagedAgentSnapshot) -> TeddyCompanionSnapshot {
+        TeddyCompanionSnapshot(
+            id: agent.id,
+            name: agent.name,
+            provider: agent.provider?.rawValue ?? "terminal",
+            phase: teddyPhase(agent.phase),
+            directoryPath: agent.directoryPath,
+            hasPendingResponse: agent.isResponsePending)
     }
 
     private func teddyControlResult(
@@ -283,26 +292,70 @@ private final class GaiTeddyTerminalContainerView: NSView {
     }
 }
 
-private final class TeddyVoiceWindow: NSWindow {
+private final class TeddyApplicationWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
-/// Hosts the already-proven Teddy voice UI inside the isolated desktop copy.
-/// Closing the window hides it; the doudous and their PTYs are never stopped.
+private enum TeddyRootDestination: Equatable {
+    case library
+    case settings
+}
+
 @MainActor
-final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
-    private let window: TeddyVoiceWindow
-    private let companionRouter: GaiTeddyCompanionRouter
-    private let voiceController: VoiceAgentController
-    private weak var manager: GaiCompanionManager?
-    private var companionListCancellable: AnyCancellable?
+private final class TeddyRootNavigation: ObservableObject {
+    @Published private(set) var destination: TeddyRootDestination = .library
+
+    func showLibrary() {
+        destination = .library
+    }
+
+    func showSettings() {
+        destination = .settings
+    }
+}
+
+private struct TeddyApplicationRootView: View {
+    @ObservedObject var manager: GaiCompanionManager
+    let navigation: TeddyRootNavigation
+    let destination: TeddyRootDestination
+
+    var body: some View {
+        Group {
+            switch destination {
+            case .library:
+                GaiCompanionLibraryView(
+                    manager: manager,
+                    onOpenSettings: navigation.showSettings,
+                    onClose: {
+                        NSApp.keyWindow?.performClose(nil)
+                    })
+            case .settings:
+                SettingsView(onDismiss: navigation.showLibrary)
+            }
+        }
+        .animation(.easeInOut(duration: 0.16), value: destination)
+    }
+}
+
+/// Teddy CLI's only ordinary application window: a compact doudou creator that
+/// can expand into settings. Conversations remain exclusively on the desktop
+/// doudous and never return to this root window.
+@MainActor
+final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
+    private static let libraryContentSize = NSSize(width: 600, height: 500)
+    private static let settingsContentSize = NSSize(width: 980, height: 680)
+
+    private let manager: GaiCompanionManager
+    private let window: TeddyApplicationWindow
+    private let rootNavigation: TeddyRootNavigation
+    private let hostingView: NSHostingView<TeddyApplicationRootView>
+    private var navigationCancellable: AnyCancellable?
 
     init(manager: GaiCompanionManager) {
-        let companionRouter = GaiTeddyCompanionRouter(manager: manager)
-        let voiceController = VoiceAgentController(companionRouter: companionRouter)
-        let window = TeddyVoiceWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 780),
+        let rootNavigation = TeddyRootNavigation()
+        let window = TeddyApplicationWindow(
+            contentRect: NSRect(origin: .zero, size: Self.libraryContentSize),
             styleMask: [
                 .titled,
                 .closable,
@@ -313,40 +366,155 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false)
         window.title = "Teddy CLI"
-        window.minSize = NSSize(width: 920, height: 640)
+        window.contentMinSize = NSSize(width: 560, height: 450)
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.tabbingMode = .disallowed
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.isMovableByWindowBackground = false
         window.animationBehavior = .documentWindow
         window.collectionBehavior = [.managed, .fullScreenPrimary]
         window.hasShadow = true
-        if !window.setFrameUsingName("TeddyVoiceWindowFrame") {
-            window.center()
+        for buttonType in [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+        ] {
+            window.standardWindowButton(buttonType)?.isHidden = true
         }
-        window.setFrameAutosaveName("TeddyVoiceWindowFrame")
-        window.identifier = NSUserInterfaceItemIdentifier("teddy.voice")
+        window.center()
+        window.identifier = NSUserInterfaceItemIdentifier("teddy.application")
 
         let hostingView = NSHostingView(
-            rootView: VoiceChatView(controller: voiceController))
+            rootView: TeddyApplicationRootView(
+                manager: manager,
+                navigation: rootNavigation,
+                destination: .library))
         hostingView.sizingOptions = []
         hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.cornerRadius = 24
+        hostingView.layer?.cornerCurve = .continuous
+        hostingView.layer?.masksToBounds = true
         window.contentView = hostingView
 
-        self.companionRouter = companionRouter
-        self.voiceController = voiceController
-        self.window = window
         self.manager = manager
+        self.rootNavigation = rootNavigation
+        self.hostingView = hostingView
+        self.window = window
         super.init()
         window.delegate = self
+        navigationCancellable = rootNavigation.$destination
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] destination in
+                guard let self else { return }
+                self.hostingView.rootView = TeddyApplicationRootView(
+                    manager: self.manager,
+                    navigation: self.rootNavigation,
+                    destination: destination)
+                self.resize(for: destination)
+            }
+    }
+
+    func show(activate: Bool) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        if activate {
+            NSApp.unhide(nil)
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            window.orderFront(nil)
+        }
+    }
+
+    func showSettings() {
+        rootNavigation.showSettings()
+        show(activate: true)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
+
+    private func resize(for destination: TeddyRootDestination) {
+        let contentSize = switch destination {
+        case .library: Self.libraryContentSize
+        case .settings: Self.settingsContentSize
+        }
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        let isLibrary = destination == .library
+        window.contentMinSize = isLibrary
+            ? NSSize(width: 560, height: 450)
+            : NSSize(width: 820, height: 580)
+        window.contentMaxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude)
+        for buttonType in [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+        ] {
+            window.standardWindowButton(buttonType)?.isHidden = isLibrary
+        }
+        window.setContentSize(contentSize)
+        var frame = window.frame
+        frame.origin = NSPoint(
+            x: center.x - frame.width / 2,
+            y: center.y - frame.height / 2)
+        if let screen = window.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        window.setFrame(frame, display: true, animate: window.isVisible)
+    }
+}
+
+/// Owns the single voice engine and moves its compact SwiftUI view into the
+/// selected doudou's existing 480×330 floating panel.
+@MainActor
+final class TeddyVoiceWindowController: NSObject {
+    private let companionRouter: GaiTeddyCompanionRouter
+    private let voiceController: VoiceAgentController
+    private weak var manager: GaiCompanionManager?
+    private let onOpenApplicationSettings: () -> Void
+    private var hostingView: NSHostingView<VoiceChatView>!
+    private var presentedCompanionID: UUID?
+    private var companionListCancellable: AnyCancellable?
+
+    init(
+        manager: GaiCompanionManager,
+        onOpenApplicationSettings: @escaping () -> Void
+    ) {
+        let companionRouter = GaiTeddyCompanionRouter(manager: manager)
+        let voiceController = VoiceAgentController(companionRouter: companionRouter)
+        self.companionRouter = companionRouter
+        self.voiceController = voiceController
+        self.manager = manager
+        self.onOpenApplicationSettings = onOpenApplicationSettings
+        super.init()
+        hostingView = NSHostingView(
+            rootView: VoiceChatView(
+                controller: voiceController,
+                presentation: .compactCompanion,
+                onOpenApplicationSettings: { [weak self] in
+                    self?.openApplicationSettings()
+                },
+                onClose: { [weak self] in
+                    self?.hideCompactVoice()
+                }))
+        hostingView.sizingOptions = []
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(companionLastResponseDidChange(_:)),
@@ -393,26 +561,8 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
         NotificationCenter.default.removeObserver(self)
     }
 
-    func show(activate: Bool) {
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        if activate {
-            NSApp.unhide(nil)
-            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            window.orderFront(nil)
-        }
-    }
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        voiceController.collapseInlineTerminal()
-        sender.orderOut(nil)
-        return false
-    }
-
-    func windowWillMiniaturize(_ notification: Notification) {
-        guard notification.object as? NSWindow === window else { return }
-        voiceController.collapseInlineTerminal()
+    func start() {
+        Task { await voiceController.prepare() }
     }
 
     @objc private func companionLastResponseDidChange(_ notification: Notification) {
@@ -467,6 +617,7 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
               companionID == voiceController.activeConversationID
         else { return }
         voiceController.collapseInlineTerminal()
+        voiceController.refreshActiveCompanionReadiness()
     }
 
     @objc private func desktopSelectionDidChange(_ notification: Notification) {
@@ -476,10 +627,7 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
 
     @objc private func openTeddyRequested(_ notification: Notification) {
         guard notification.object as? GaiCompanionManager === manager else { return }
-        guard let companionID = companionID(from: notification) else {
-            show(activate: true)
-            return
-        }
+        guard let companionID = companionID(from: notification) else { return }
         let rawPresentation = notification.userInfo?[
             GaiCompanionControl.teddyPresentationUserInfoKey
         ] as? String
@@ -487,15 +635,23 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
             ?? .vocal
 
         selectConversation(companionID) { [weak self] in
-            guard let self else { return }
+            guard let self, let manager = self.manager else { return }
             switch presentation {
             case .vocal:
                 self.voiceController.collapseInlineTerminal()
+                if let previousID = self.presentedCompanionID,
+                   previousID != companionID {
+                    manager.dismissCompactVoice(id: previousID)
+                }
+                manager.presentCompactVoice(
+                    id: companionID,
+                    contentView: self.hostingView)
+                self.presentedCompanionID = companionID
             case .terminal:
-                self.voiceController.openInlineTerminal()
+                self.voiceController.collapseInlineTerminal()
+                manager.toggleTerminal(id: companionID)
             }
         }
-        show(activate: true)
     }
 
     @objc private func replayVoiceRequested(_ notification: Notification) {
@@ -509,8 +665,19 @@ final class TeddyVoiceWindowController: NSObject, NSWindowDelegate {
         _ companionID: UUID,
         onReady: @escaping () -> Void = {}
     ) {
-        voiceController.refreshCompanionConversations()
+        voiceController.refreshCompanionConversations(preferredSelection: companionID)
         voiceController.selectConversation(companionID, onReady: onReady)
+    }
+
+    private func hideCompactVoice() {
+        guard let companionID = presentedCompanionID else { return }
+        manager?.dismissCompactVoice(id: companionID)
+        presentedCompanionID = nil
+    }
+
+    private func openApplicationSettings() {
+        hideCompactVoice()
+        onOpenApplicationSettings()
     }
 
     private func companionID(from notification: Notification) -> UUID? {

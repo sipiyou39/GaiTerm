@@ -6,6 +6,8 @@ import UserNotifications
 /// UserDefaults keys for GaiTerm's GUI settings. Shared between the settings UI
 /// and the features that consume them.
 enum GaiPreferenceKey {
+    /// Reveal a companion's compact CLI after a deliberate pointer hover.
+    static let teddyPeekEnabled = "GaiTeddyPeekEnabled"
     /// Tint the workspaces drawer's glass with the selected workspace's accent.
     static let tintGlassWithWorkspaceAccent = "GaiTintGlassWithWorkspaceAccent"
     /// Code editor font size (points).
@@ -32,65 +34,40 @@ enum GaiPreferenceKey {
     static let agentNotificationSoundVolume = "GaiAgentNotificationSoundVolume"
 }
 
-/// Settings design tokens (dark, flat — matches the drawer/stage).
-private enum S {
-    static let bg = Color(red: 0.11, green: 0.11, blue: 0.12)
-    static let sidebar = Color(red: 0.085, green: 0.085, blue: 0.095)
+/// Settings design tokens. These deliberately mirror Teddy's monochrome
+/// conversation shell so entering settings feels like changing sections, not
+/// opening another application.
+private enum TeddySettingsPalette {
+    static let canvas = Color.black.opacity(0.72)
+    static let sidebar = Color.black.opacity(0.82)
+    static let sidebarRaised = Color.white.opacity(0.035)
     static let card = Color.white.opacity(0.045)
-    static let accent = Color(red: 0.42, green: 0.64, blue: 0.96)
-}
-
-private extension NSWindow.Level {
-    static let gaiSettings = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
-}
-
-// MARK: - Window
-
-/// Presents the settings window (App menu → Settings…). One window for the
-/// app's lifetime.
-final class GaiSettingsWindowController {
-    static let shared = GaiSettingsWindowController()
-
-    private var window: NSWindow?
-
-    func show() {
-        if window == nil {
-            let host = NSHostingController(rootView: SettingsView())
-            let window = NSWindow(contentViewController: host)
-            window.title = "Teddy CLI Settings"
-            window.styleMask = [.titled, .closable, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovableByWindowBackground = true
-            window.backgroundColor = NSColor(S.bg)
-            window.appearance = NSAppearance(named: .darkAqua)
-            window.level = .gaiSettings
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.isReleasedWhenClosed = false
-            window.center()
-            self.window = window
-        }
-        window?.level = .gaiSettings
-        window?.makeKeyAndOrderFront(nil)
-        window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-    }
+    static let cardStroke = Color.white.opacity(0.085)
+    static let selection = Color.white.opacity(0.075)
+    static let control = Color.white.opacity(0.07)
+    static let primaryText = Color.white.opacity(0.96)
+    static let secondaryText = Color.white.opacity(0.62)
+    static let tertiaryText = Color.white.opacity(0.38)
+    static let hairline = Color.white.opacity(0.07)
+    static let accent = Color.white.opacity(0.94)
 }
 
 // MARK: - Root
 
 private enum SettingsCategory: String, CaseIterable, Identifiable {
-    case general = "General"
-    case appearance = "Appearance"
+    case general = "Général"
+    case cli = "CLI"
+    case appearance = "Apparence"
     case notifications = "Notifications"
-    case editor = "Editor"
-    case permissions = "Permissions"
-    case updates = "Updates"
+    case editor = "Éditeur"
+    case permissions = "Autorisations"
+    case updates = "Mises à jour"
 
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .general: return "gearshape"
+        case .cli: return "terminal"
         case .appearance: return "paintbrush"
         case .notifications: return "bell.badge"
         case .editor: return "chevron.left.forwardslash.chevron.right"
@@ -98,57 +75,105 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .updates: return "arrow.down.circle"
         }
     }
+
+    var subtitle: String {
+        switch self {
+        case .general: "Démarrage et comportement global"
+        case .cli: "Détection locale et intégrations optionnelles"
+        case .appearance: "Interface et surfaces de travail"
+        case .notifications: "Alertes et sons des agents"
+        case .editor: "Lisibilité du code et du terminal"
+        case .permissions: "Accès accordés à Teddy CLI"
+        case .updates: "Version et mises à jour"
+        }
+    }
 }
 
 struct SettingsView: View {
+    let onDismiss: () -> Void
+
     @State private var category: SettingsCategory = .general
+    @AppStorage("TeddyVoiceSidebarWidthV2") private var sidebarWidth = 252.0
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            Rectangle().fill(Color.white.opacity(0.06)).frame(width: 1)
-            ScrollView {
-                detail
-                    .padding(22)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: resolvedSidebarWidth(in: geometry.size.width))
+                Rectangle()
+                    .fill(TeddySettingsPalette.hairline)
+                    .frame(width: 1)
+                detailPane
+                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.clear)
         }
-        .frame(width: 680, height: 500)
-        .background(S.bg)
+        .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(.dark)
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            brand
-                .padding(.horizontal, 14)
-                .padding(.top, 30)
-                .padding(.bottom, 16)
-            ForEach(SettingsCategory.allCases) { item in
-                sidebarItem(item)
+        VStack(spacing: 0) {
+            sidebarTopBar
+
+            VStack(alignment: .leading, spacing: 0) {
+                Button(action: onDismiss) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .frame(width: 20, height: 20)
+                            .background(TeddySettingsPalette.control, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        Text("Créer un doudou")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(TeddySettingsPalette.secondaryText)
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10)
+                .padding(.top, 12)
+
+                Text("RÉGLAGES")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.9)
+                    .foregroundStyle(TeddySettingsPalette.tertiaryText)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 19)
+                    .padding(.bottom, 8)
+
+                ForEach(SettingsCategory.allCases) { item in
+                    sidebarItem(item)
+                }
+
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+
+            settingsFooter
         }
-        .frame(width: 196)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(S.sidebar)
+        .background(TeddySettingsPalette.sidebar)
     }
 
-    private var brand: some View {
-        HStack(spacing: 10) {
-            Image("AppIconImage")
-                .resizable()
-                .frame(width: 34, height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Teddy CLI")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text(appVersion)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.4))
+    private var sidebarTopBar: some View {
+        ZStack(alignment: .trailing) {
+            SettingsWindowDragRegion()
+            Button(action: onDismiss) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(TeddySettingsPalette.secondaryText)
+                    .frame(width: 30, height: 28)
+                    .background(TeddySettingsPalette.sidebarRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
+            .buttonStyle(.plain)
+            .padding(.trailing, 11)
+            .help("Revenir à la création de doudou")
+        }
+        .frame(height: 44)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(TeddySettingsPalette.hairline).frame(height: 1)
         }
     }
 
@@ -157,27 +182,87 @@ struct SettingsView: View {
         return Button { category = item } label: {
             HStack(spacing: 9) {
                 Image(systemName: item.icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 18)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 20)
                 Text(item.rawValue)
-                    .font(.system(size: 12.5, weight: active ? .semibold : .regular))
+                    .font(.system(size: 12.5, weight: active ? .semibold : .medium))
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(active ? .white : .white.opacity(0.6))
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(active ? S.accent.opacity(0.22) : .clear))
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .foregroundStyle(active ? TeddySettingsPalette.primaryText : TeddySettingsPalette.secondaryText)
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(
+                active ? TeddySettingsPalette.selection : Color.clear,
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 1)
+    }
+
+    private var settingsFooter: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(TeddySettingsPalette.primaryText)
+                .frame(width: 32, height: 32)
+                .background(TeddySettingsPalette.control, in: Circle())
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Teddy CLI")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(TeddySettingsPalette.primaryText)
+                Text(appVersion)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(TeddySettingsPalette.tertiaryText)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 58)
+        .overlay(alignment: .top) {
+            Rectangle().fill(TeddySettingsPalette.hairline).frame(height: 1)
+        }
+    }
+
+    private var detailPane: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .leading) {
+                SettingsWindowDragRegion()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(category.rawValue)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(TeddySettingsPalette.primaryText)
+                    Text(category.subtitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(TeddySettingsPalette.tertiaryText)
+                }
+                .padding(.leading, 28)
+            }
+            .frame(height: 64)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(TeddySettingsPalette.hairline).frame(height: 1)
+            }
+
+            ScrollView {
+                detail
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .padding(.horizontal, 32)
+                    .padding(.top, 30)
+                    .padding(.bottom, 44)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .scrollIndicators(.automatic)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(TeddySettingsPalette.canvas)
     }
 
     @ViewBuilder
     private var detail: some View {
         switch category {
         case .general: GeneralSettings()
+        case .cli: CLIIntegrationsSettings()
         case .appearance: AppearanceSettings()
         case .notifications: NotificationsSettings()
         case .editor: EditorSettings()
@@ -186,9 +271,135 @@ struct SettingsView: View {
         }
     }
 
+    private func resolvedSidebarWidth(in totalWidth: CGFloat) -> CGFloat {
+        min(max(232, sidebarWidth), max(232, totalWidth - 640))
+    }
+
     private var appVersion: String {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         return "Version \(v)"
+    }
+}
+
+// MARK: - CLI integrations
+
+private struct CLIIntegrationsSettings: View {
+    typealias Provider = GaiAgentHookInstaller.SupportedProvider
+    typealias Status = GaiAgentHookInstaller.IntegrationStatus
+
+    @State private var statuses: [Provider: Status] = [:]
+    @State private var operationMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection(title: "Détection robuste") {
+                SettingsRow(
+                    title: "La voix reste disponible sans hooks",
+                    subtitle: "Teddy CLI identifie la CLI depuis le processus réellement au premier plan. Les hooks améliorent uniquement la précision des débuts, fins et réponses finales.",
+                    first: true) {
+                    Label("Local", systemImage: "checkmark.shield.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.green.opacity(0.9))
+                }
+            }
+
+            SettingsSection(title: "Adaptateurs natifs") {
+                ForEach(Array(Provider.allCases.enumerated()), id: \.element.id) { index, provider in
+                    SettingsRow(
+                        title: provider.displayName,
+                        subtitle: rowSubtitle(for: provider),
+                        first: index == 0) {
+                        HStack(spacing: 9) {
+                            statusBadge(for: provider)
+                            Button(actionTitle(for: provider)) {
+                                configure(provider)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(TeddySettingsPalette.primaryText)
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                            .background(
+                                TeddySettingsPalette.control,
+                                in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(TeddySettingsPalette.cardStroke, lineWidth: 1)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let operationMessage {
+                Text(operationMessage)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(TeddySettingsPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
+        }
+        .onAppear(perform: refresh)
+    }
+
+    private func rowSubtitle(for provider: Provider) -> String {
+        guard let status = statuses[provider] else {
+            return "Vérification de la configuration locale…"
+        }
+        switch status.state {
+        case .ready:
+            return status.detail
+        case .missing, .invalid:
+            return "\(status.detail) Teddy CLI continue de fonctionner grâce à la détection locale."
+        }
+    }
+
+    private func actionTitle(for provider: Provider) -> String {
+        statuses[provider]?.state == .ready ? "Réparer" : "Configurer"
+    }
+
+    @ViewBuilder
+    private func statusBadge(for provider: Provider) -> some View {
+        let state = statuses[provider]?.state
+        let ready = state == .ready
+        Label(
+            ready ? "Prêt" : state == .invalid ? "À réparer" : "Optionnel",
+            systemImage: ready ? "checkmark.circle.fill" : "circle.dashed")
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(ready ? Color.green.opacity(0.88) : TeddySettingsPalette.secondaryText)
+    }
+
+    private func configure(_ provider: Provider) {
+        do {
+            try GaiAgentHookInstaller.configureIntegration(for: provider)
+            refresh()
+            operationMessage = provider == .codex
+                ? "Codex est configuré. S’il affiche une validation de confiance, ouvre /hooks et accepte l’empreinte une seule fois."
+                : "\(provider.displayName) est configuré. Les prochaines sessions utiliseront l’adaptateur natif."
+        } catch {
+            refresh()
+            operationMessage = "Impossible de configurer \(provider.displayName) : \(error.localizedDescription)"
+        }
+    }
+
+    private func refresh() {
+        statuses = Dictionary(uniqueKeysWithValues: Provider.allCases.map {
+            ($0, GaiAgentHookInstaller.integrationStatus(for: $0))
+        })
+    }
+}
+
+private struct SettingsWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> SettingsWindowDragView {
+        SettingsWindowDragView()
+    }
+
+    func updateNSView(_ nsView: SettingsWindowDragView, context: Context) {}
+}
+
+private final class SettingsWindowDragView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
     }
 }
 
@@ -203,11 +414,16 @@ private struct SettingsSection<Content: View>: View {
             Text(title.uppercased())
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(TeddySettingsPalette.tertiaryText)
             VStack(spacing: 0) { content }
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(S.card))
+                .background(TeddySettingsPalette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(TeddySettingsPalette.cardStroke, lineWidth: 1)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .padding(.bottom, 20)
+        .padding(.bottom, 22)
     }
 }
 
@@ -219,24 +435,30 @@ private struct SettingsRow<Trailing: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !first { Divider().overlay(Color.white.opacity(0.06)) }
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
+            if !first {
+                Rectangle()
+                    .fill(TeddySettingsPalette.hairline)
+                    .frame(height: 1)
+                    .padding(.leading, 14)
+            }
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(TeddySettingsPalette.primaryText)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.white.opacity(0.4))
+                            .font(.system(size: 10.5, weight: .regular))
+                            .foregroundStyle(TeddySettingsPalette.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 12)
+                Spacer(minLength: 18)
                 trailing
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(minHeight: 56)
         }
     }
 }
@@ -249,7 +471,10 @@ private struct SettingsToggle: View {
 
     var body: some View {
         SettingsRow(title: title, subtitle: subtitle, first: first) {
-            Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch).tint(S.accent)
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(TeddySettingsPalette.accent)
         }
     }
 }
@@ -364,15 +589,27 @@ final class GaiNotificationSoundPlayer: NSObject, NSSoundDelegate {
 
 private struct GeneralSettings: View {
     @State private var launchAtLogin = false
+    @AppStorage(
+        GaiPreferenceKey.teddyPeekEnabled,
+        store: UserDefaults.ghostty)
+    private var teddyPeekEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(title: "Startup") {
+            SettingsSection(title: "Démarrage") {
                 SettingsToggle(
-                    title: "Launch Teddy CLI at login",
-                    subtitle: "Open Teddy CLI automatically when you log in.",
+                    title: "Ouvrir Teddy CLI à la connexion",
+                    subtitle: "Lance Teddy CLI automatiquement à l’ouverture de ta session Mac.",
                     first: true,
                     isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
+            }
+
+            SettingsSection(title: "Doudous sur le bureau") {
+                SettingsToggle(
+                    title: "Afficher la CLI au survol",
+                    subtitle: "Laisse brièvement le pointeur sur un doudou pour lire sa CLI sans changer de fenêtre.",
+                    first: true,
+                    isOn: $teddyPeekEnabled)
             }
         }
         .onAppear { launchAtLogin = (SMAppService.mainApp.status == .enabled) }
@@ -380,8 +617,11 @@ private struct GeneralSettings: View {
 
     private func setLaunchAtLogin(_ on: Bool) {
         do {
-            if on { try SMAppService.mainApp.register() }
-            else { try SMAppService.mainApp.unregister() }
+            if on {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
             launchAtLogin = on
         } catch {
             launchAtLogin = (SMAppService.mainApp.status == .enabled)
@@ -396,10 +636,10 @@ private struct AppearanceSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(title: "Panels") {
+            SettingsSection(title: "Surfaces") {
                 SettingsToggle(
-                    title: "Tint panels with workspace color",
-                    subtitle: "The pull tab, drawer, stage and pane headers take on a dark tint of the workspace's accent color. Off keeps them neutral gray.",
+                    title: "Teinter les panneaux avec la couleur du projet",
+                    subtitle: "Applique une nuance sombre de la couleur du projet aux panneaux. Désactivé, l’interface reste neutre.",
                     first: true,
                     isOn: $tintGlass)
             }
@@ -419,19 +659,19 @@ private struct NotificationsSettings: View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSection(title: "Notifications") {
                 SettingsToggle(
-                    title: "Desktop notifications",
-                    subtitle: "Show a macOS banner when Codex or Claude finishes in a background pane.",
+                    title: "Notifications sur le bureau",
+                    subtitle: "Affiche une bannière macOS lorsqu’une CLI termine en arrière-plan.",
                     first: true,
                     isOn: $desktopNotifications)
             }
 
-            SettingsSection(title: "Sounds") {
+            SettingsSection(title: "Sons") {
                 SettingsToggle(
-                    title: "Play notification sound",
-                    subtitle: "Use the selected Teddy CLI sound for CLI completion notifications.",
+                    title: "Jouer un son de notification",
+                    subtitle: "Utilise le son Teddy CLI sélectionné lorsqu’un agent termine.",
                     first: true,
                     isOn: $soundEnabled)
-                SettingsRow(title: "Sound", subtitle: "Choose the bundled completion sound.") {
+                SettingsRow(title: "Son", subtitle: "Choisis le signal joué à la fin d’une mission.") {
                     Picker("", selection: $soundID) {
                         ForEach(GaiNotificationSoundLibrary.sounds) { sound in
                             Text(sound.displayName).tag(sound.id)
@@ -440,7 +680,7 @@ private struct NotificationsSettings: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
-                SettingsRow(title: "Volume", subtitle: "Preview the exact notification volume.") {
+                SettingsRow(title: "Volume", subtitle: "Préécoute le volume exact des notifications.") {
                     HStack(spacing: 10) {
                         Slider(value: $volume, in: 0...1)
                             .frame(width: 126)
@@ -456,10 +696,10 @@ private struct NotificationsSettings: View {
                                 .foregroundStyle(.white)
                                 .frame(width: 26, height: 24)
                                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(S.accent.opacity(0.85)))
+                                    .fill(TeddySettingsPalette.accent.opacity(0.85)))
                         }
                         .buttonStyle(.plain)
-                        .help("Test sound")
+                        .help("Écouter le son")
                     }
                 }
             }
@@ -476,8 +716,8 @@ private struct EditorSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(title: "Code editor") {
-                SettingsRow(title: "Font size", subtitle: "Monospaced font size in points.", first: true) {
+            SettingsSection(title: "Éditeur de code") {
+                SettingsRow(title: "Taille du texte", subtitle: "Taille de la police monospace en points.", first: true) {
                     HStack(spacing: 8) {
                         stepper("minus") { fontSize = max(9, fontSize - 1) }
                         Text("\(Int(fontSize))")
@@ -487,8 +727,8 @@ private struct EditorSettings: View {
                         stepper("plus") { fontSize = min(24, fontSize + 1) }
                     }
                 }
-                SettingsToggle(title: "Show line numbers", isOn: $lineNumbers)
-                SettingsToggle(title: "Wrap long lines", isOn: $wrap)
+                SettingsToggle(title: "Afficher les numéros de ligne", isOn: $lineNumbers)
+                SettingsToggle(title: "Replier les lignes longues", isOn: $wrap)
             }
         }
     }
@@ -519,43 +759,43 @@ private struct PermissionsSettings: View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSection(title: "Notifications") {
                 SettingsRow(
-                    title: "macOS notifications",
-                    subtitle: "Required for desktop banners when Codex or Claude finishes in a background pane.",
+                    title: "Notifications macOS",
+                    subtitle: "Nécessaire pour afficher une bannière lorsqu’une CLI termine en arrière-plan.",
                     first: true) {
                     notificationStatusBadge
                 }
                 SettingsRow(
-                    title: "Activate notifications",
+                    title: "Activer les notifications",
                     subtitle: notificationActionSubtitle) {
                     actionButton(notificationActionTitle, action: activateNotifications)
                 }
                 SettingsRow(
-                    title: "Banners",
-                    subtitle: "Allows the top-right macOS notification banner.") {
+                    title: "Bannières",
+                    subtitle: "Autorise l’affichage des notifications dans le coin supérieur droit.") {
                     PermissionStatusBadge(
-                        title: notificationAlertSetting == .enabled ? "Ready" : "Off",
+                        title: notificationAlertSetting == .enabled ? "Prêt" : "Désactivé",
                         state: notificationAlertSetting == .enabled ? .granted : .blocked)
                 }
                 SettingsRow(
-                    title: "Dock badge",
-                    subtitle: "Allows macOS notification badge support; Teddy CLI also updates its Dock count directly.") {
+                    title: "Badge du Dock",
+                    subtitle: "Autorise le compteur de notifications sur l’icône Teddy CLI.") {
                     PermissionStatusBadge(
-                        title: notificationBadgeSetting == .enabled ? "Ready" : "Off",
+                        title: notificationBadgeSetting == .enabled ? "Prêt" : "Désactivé",
                         state: notificationBadgeSetting == .enabled ? .granted : .blocked)
                 }
                 SettingsRow(
-                    title: "Notification sound",
-                    subtitle: "Allows sound on macOS notifications. Teddy CLI sounds are controlled in Notifications → Sounds.") {
+                    title: "Son des notifications",
+                    subtitle: "Autorise les sons macOS. Les sons Teddy CLI se règlent dans Notifications.") {
                     PermissionStatusBadge(
-                        title: notificationSoundSetting == .enabled ? "Ready" : "Off",
+                        title: notificationSoundSetting == .enabled ? "Prêt" : "Désactivé",
                         state: notificationSoundSetting == .enabled ? .granted : .blocked)
                 }
             }
 
-            SettingsSection(title: "Keyboard shortcut") {
+            SettingsSection(title: "Raccourci clavier") {
                 SettingsRow(
-                    title: "Show or hide all agents",
-                    subtitle: "Press and release Shift + Option to toggle every agent, even while another app is active. No permission is required.",
+                    title: "Afficher ou masquer tous les agents",
+                    subtitle: "Appuie puis relâche Maj + Option pour basculer tous les doudous, même depuis une autre app.",
                     first: true) {
                     Text("⇧⌥")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -568,32 +808,32 @@ private struct PermissionsSettings: View {
                                 .overlay(
                                     Capsule()
                                         .stroke(Color.white.opacity(0.1), lineWidth: 1)))
-                        .accessibilityLabel("Shift plus Option")
+                        .accessibilityLabel("Maj plus Option")
                 }
             }
 
-            SettingsSection(title: "File access") {
+            SettingsSection(title: "Accès aux fichiers") {
                 SettingsRow(
-                    title: "Full Disk Access",
-                    subtitle: "Grant this once and macOS stops asking for your Documents, Desktop and other folders every time the file explorer or a terminal touches them.",
+                    title: "Accès complet au disque",
+                    subtitle: "Autorise une fois l’accès à Documents, Bureau et aux dossiers utilisés par les terminaux.",
                     first: true) {
                     PermissionStatusBadge(
-                        title: fullDisk ? "Granted" : "Not granted",
+                        title: fullDisk ? "Accordé" : "Non accordé",
                         state: fullDisk ? .granted : .blocked)
                 }
                 SettingsRow(
-                    title: "Open System Settings",
-                    subtitle: "Find Teddy CLI in the list, switch it on. If it isn't listed, use “+” and pick Teddy CLI.") {
-                    actionButton("Open Full Disk Access", action: openFullDiskAccess)
+                    title: "Ouvrir les Réglages Système",
+                    subtitle: "Active Teddy CLI dans la liste. S’il n’apparaît pas, ajoute-le avec le bouton « + ».") {
+                    actionButton("Ouvrir l’accès complet", action: openFullDiskAccess)
                 }
                 SettingsRow(
-                    title: "Re-check status",
-                    subtitle: "After enabling it, refresh the status here.") {
-                    actionButton("Re-check", filled: false, action: { fullDisk = Self.hasFullDiskAccess() })
+                    title: "Actualiser l’état",
+                    subtitle: "Vérifie de nouveau l’autorisation après l’avoir activée.") {
+                    actionButton("Actualiser", filled: false, action: { fullDisk = Self.hasFullDiskAccess() })
                 }
             }
 
-            Text("After enabling Full Disk Access, quit and reopen Teddy CLI once for it to take effect.")
+            Text("Après avoir accordé l’accès complet au disque, quitte puis rouvre Teddy CLI une seule fois.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.white.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)
@@ -608,24 +848,26 @@ private struct PermissionsSettings: View {
     private var notificationStatusBadge: some View {
         switch notificationAuthorization {
         case .authorized, .provisional, .ephemeral:
-            PermissionStatusBadge(title: "Granted", state: .granted)
+            PermissionStatusBadge(title: "Accordé", state: .granted)
         case .denied:
-            PermissionStatusBadge(title: "Denied", state: .blocked)
+            PermissionStatusBadge(title: "Refusé", state: .blocked)
         case .notDetermined:
-            PermissionStatusBadge(title: "Not requested", state: .pending)
+            PermissionStatusBadge(title: "Non demandé", state: .pending)
         @unknown default:
-            PermissionStatusBadge(title: "Unknown", state: .pending)
+            PermissionStatusBadge(title: "Inconnu", state: .pending)
         }
     }
 
     private var notificationActionTitle: String {
-        notificationAuthorization == .notDetermined ? "Allow Notifications" : "Open Notifications Settings"
+        notificationAuthorization == .notDetermined
+            ? "Autoriser"
+            : "Ouvrir les réglages"
     }
 
     private var notificationActionSubtitle: String {
         notificationAuthorization == .notDetermined
-            ? "Ask macOS for banners, sounds and badge permission now."
-            : "Change banners, sounds and badges in macOS Settings."
+            ? "Demande à macOS l’accès aux bannières, sons et badges."
+            : "Modifie les bannières, sons et badges dans les Réglages Système."
     }
 
     private func actionButton(_ title: String, filled: Bool = true, action: @escaping () -> Void) -> some View {
@@ -636,7 +878,11 @@ private struct PermissionsSettings: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(filled ? S.accent.opacity(0.85) : Color.white.opacity(0.1)))
+                .fill(filled ? TeddySettingsPalette.accent.opacity(0.16) : TeddySettingsPalette.control))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.white.opacity(filled ? 0.11 : 0.07), lineWidth: 1)
+            }
     }
 
     private func activateNotifications() {
@@ -738,20 +984,26 @@ private struct UpdatesSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(title: "Software updates") {
+            SettingsSection(title: "Logiciel") {
                 SettingsToggle(
-                    title: "Automatically check for updates",
-                    subtitle: "Periodically check for new versions of Teddy CLI in the background.",
+                    title: "Rechercher automatiquement les mises à jour",
+                    subtitle: "Vérifie périodiquement les nouvelles versions de Teddy CLI en arrière-plan.",
                     first: true,
                     isOn: Binding(get: { autoCheck }, set: { setAuto($0) }))
-                SettingsRow(title: "Check now", subtitle: "Look for an update right now.") {
-                    Button("Check for Updates") { controller?.checkForUpdates() }
+                SettingsRow(title: "Vérifier maintenant", subtitle: "Recherche immédiatement une nouvelle version.") {
+                    Button("Rechercher") { controller?.checkForUpdates() }
                         .buttonStyle(.plain)
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(S.accent.opacity(0.85)))
+                        .background(
+                            TeddySettingsPalette.accent.opacity(0.16),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(Color.white.opacity(0.11), lineWidth: 1)
+                        }
                 }
             }
         }

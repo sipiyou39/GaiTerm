@@ -86,8 +86,16 @@ private struct TeddyConversationLayout {
     var bottomInset: CGFloat { viewportWidth < 720 ? 24 : 32 }
 }
 
+enum VoiceChatPresentation {
+    case workspace
+    case compactCompanion
+}
+
 struct VoiceChatView: View {
     @Bindable var controller: VoiceAgentController
+    let presentation: VoiceChatPresentation
+    let onOpenApplicationSettings: () -> Void
+    let onClose: () -> Void
     @AppStorage("TeddyVoiceSidebarWidthV2") private var sidebarWidth = 252.0
     @State private var isSidebarVisible = true
     @State private var isCompanionCreatorPresented = false
@@ -97,33 +105,54 @@ struct VoiceChatView: View {
     @State private var isWorkspaceNameEditorPresented = false
     @State private var workspaceNameDraft = ""
 
+    init(
+        controller: VoiceAgentController,
+        presentation: VoiceChatPresentation = .workspace,
+        onOpenApplicationSettings: @escaping () -> Void = {},
+        onClose: @escaping () -> Void = {}
+    ) {
+        self.controller = controller
+        self.presentation = presentation
+        self.onOpenApplicationSettings = onOpenApplicationSettings
+        self.onClose = onClose
+    }
+
     var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                if isSidebarVisible {
-                    ConversationSidebar(
-                        controller: controller,
-                        onCreateCompanion: presentCompanionCreator,
-                        onHide: hideSidebar
-                    )
-                    .frame(width: resolvedSidebarWidth(in: geometry.size.width))
-                    .overlay(alignment: .trailing) {
-                        SidebarResizeHandle(
-                            width: $sidebarWidth,
-                            maximumWidth: max(248, geometry.size.width - 640))
-                            .offset(x: 1)
+            if presentation == .compactCompanion {
+                compactCompanionPane
+            } else {
+                HStack(spacing: 0) {
+                    if isSidebarVisible {
+                        ConversationSidebar(
+                            controller: controller,
+                            onCreateCompanion: presentCompanionCreator,
+                            onHide: hideSidebar,
+                            onOpenApplicationSettings: onOpenApplicationSettings
+                        )
+                        .frame(width: resolvedSidebarWidth(in: geometry.size.width))
+                        .overlay(alignment: .trailing) {
+                            SidebarResizeHandle(
+                                width: $sidebarWidth,
+                                maximumWidth: max(248, geometry.size.width - 640))
+                                .offset(x: 1)
+                        }
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                     }
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                }
 
-                detailPane
-                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    detailPane
+                        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .background(Color.clear)
             }
-            .background(Color.clear)
         }
         .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(.dark)
-        .task { await controller.prepare() }
+        .task {
+            if presentation == .workspace {
+                await controller.prepare()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             if controller.isPushToTalkPressed { controller.releasePushToTalk() }
         }
@@ -136,6 +165,78 @@ struct VoiceChatView: View {
                 creator
             }
         }
+    }
+
+    private var compactCompanionPane: some View {
+        VStack(spacing: 0) {
+            compactVoiceHeader
+
+            Rectangle()
+                .fill(TeddyPalette.hairline)
+                .frame(height: 1)
+
+            conversation
+
+            if let errorMessage = controller.errorMessage {
+                errorBanner(errorMessage)
+            }
+
+            composer
+        }
+        .background {
+            TeddyGlassLayer(depth: .conversation)
+        }
+    }
+
+    private var compactVoiceHeader: some View {
+        HStack(spacing: 8) {
+            if let companion = controller.activeCompanion,
+               let avatar = controller.companionAvatarView(for: companion.id, width: 22) {
+                avatar
+                    .frame(width: 22, height: 25)
+            } else {
+                CompanionAvatar(
+                    provider: controller.activeCompanion?.provider,
+                    phase: controller.activeCompanion?.phase,
+                    size: 21)
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(controller.activeCompanion?.name ?? "Chat vocal")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(TeddyPalette.primaryText)
+                    .lineLimit(1)
+                Text(activeCompanionPhaseLabel)
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(TeddyPalette.tertiaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: onOpenApplicationSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(TeddyPalette.secondaryText)
+                    .frame(width: 27, height: 27)
+                    .background(TeddyPalette.control, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Ouvrir les réglages")
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(TeddyPalette.secondaryText)
+                    .frame(width: 27, height: 27)
+                    .background(TeddyPalette.control, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .help("Fermer le chat vocal")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 38)
     }
 
     private var detailPane: some View {
@@ -439,7 +540,7 @@ struct VoiceChatView: View {
     }
 
     private func resolvedSidebarWidth(in totalWidth: CGFloat) -> CGFloat {
-        min(max(232, sidebarWidth), max(232, totalWidth - 680))
+        min(max(232, sidebarWidth), max(232, totalWidth - 640))
     }
 
     private func hideSidebar() {
@@ -534,8 +635,12 @@ struct VoiceChatView: View {
                     }
                     .frame(width: layout.contentWidth)
                     .padding(.horizontal, layout.horizontalInset)
-                    .padding(.top, layout.topInset)
-                    .padding(.bottom, layout.bottomInset)
+                    .padding(
+                        .top,
+                        presentation == .compactCompanion ? 12 : layout.topInset)
+                    .padding(
+                        .bottom,
+                        presentation == .compactCompanion ? 10 : layout.bottomInset)
                     .frame(maxWidth: .infinity)
                 }
                 .scrollIndicators(.hidden)
@@ -602,23 +707,28 @@ struct VoiceChatView: View {
     }
 
     private var emptyConversation: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: presentation == .compactCompanion ? 9 : 18) {
             activeDoudouHero
 
             VStack(spacing: 7) {
                 Text(controller.activeCompanion.map { "Parle à \($0.name)" }
                     ?? "Crée ton premier doudou")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(
+                        size: presentation == .compactCompanion ? 15 : 20,
+                        weight: .semibold))
                     .foregroundStyle(TeddyPalette.primaryText)
-                Text(controller.activeCompanion == nil
-                    ? "Chaque doudou devient une conversation et garde sa propre CLI."
-                    : "Teddy te répond tout de suite, puis poursuit avec le résultat réel.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(TeddyPalette.secondaryText)
-                    .multilineTextAlignment(.center)
+                if presentation != .compactCompanion {
+                    Text(controller.activeCompanion == nil
+                        ? "Chaque doudou devient une conversation et garde sa propre CLI."
+                        : "Teddy te répond tout de suite, puis poursuit avec le résultat réel.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(TeddyPalette.secondaryText)
+                        .multilineTextAlignment(.center)
+                }
             }
 
-            if controller.activeCompanion == nil {
+            if controller.activeCompanion == nil,
+               presentation != .compactCompanion {
                 Button {
                     presentCompanionCreator()
                 } label: {
@@ -628,21 +738,26 @@ struct VoiceChatView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 112)
-        .padding(.bottom, 70)
+        .padding(.top, presentation == .compactCompanion ? 18 : 112)
+        .padding(.bottom, presentation == .compactCompanion ? 12 : 70)
     }
 
     @ViewBuilder
     private var activeDoudouHero: some View {
         if let companion = controller.activeCompanion,
-           let avatar = controller.companionAvatarView(for: companion.id, width: 58) {
+           let avatar = controller.companionAvatarView(
+               for: companion.id,
+               width: presentation == .compactCompanion ? 38 : 58
+           ) {
             avatar
-                .frame(width: 58, height: 63)
+                .frame(
+                    width: presentation == .compactCompanion ? 38 : 58,
+                    height: presentation == .compactCompanion ? 42 : 63)
         } else {
             CompanionAvatar(
                 provider: controller.activeCompanion?.provider,
                 phase: controller.activeCompanion?.phase,
-                size: 54)
+                size: presentation == .compactCompanion ? 36 : 54)
         }
     }
 
@@ -658,9 +773,9 @@ struct VoiceChatView: View {
         }
         .shadow(color: .black.opacity(0.24), radius: 18, y: 8)
         .frame(maxWidth: 960)
-        .padding(.horizontal, 34)
-        .padding(.top, 10)
-        .padding(.bottom, 14)
+        .padding(.horizontal, presentation == .compactCompanion ? 10 : 34)
+        .padding(.top, presentation == .compactCompanion ? 6 : 10)
+        .padding(.bottom, presentation == .compactCompanion ? 8 : 14)
         .frame(maxWidth: .infinity)
     }
 
@@ -681,7 +796,11 @@ struct VoiceChatView: View {
                         },
                         onManage: {
                             isStylePickerPresented = false
-                            selectInspector(.personality)
+                            if presentation == .compactCompanion {
+                                onOpenApplicationSettings()
+                            } else {
+                                selectInspector(.personality)
+                            }
                         })
                 }
             }
@@ -762,20 +881,23 @@ struct VoiceChatView: View {
     }
 
     private var composerText: String {
+        let companion = controller.activeCompanion
+        let isCLIReady = controller.isActiveCompanionCLIReady
+        let canPushToTalk = controller.canPushToTalk
         if controller.pendingDirectorySelection != nil {
             return "Choisis un dossier, ou maintiens pour annuler et reparler"
         }
         if controller.isLoadingConversation { return "Ouverture de la conversation…" }
-        if controller.isCompanionMode, controller.activeCompanion == nil {
+        if controller.isCompanionMode, companion == nil {
             return "Crée un doudou pour commencer"
         }
-        if let companion = controller.activeCompanion, !companion.isCLIReady {
+        if companion != nil, !isCLIReady {
             return "Cette conversation n’a pas encore de CLI active"
         }
-        if controller.activeCompanion?.phase == .working {
-            return "\(controller.activeCompanion?.name ?? "La CLI") travaille…"
+        if companion?.phase == .working {
+            return "\(companion?.name ?? "La CLI") travaille…"
         }
-        if !controller.canPushToTalk { return "Teddy se prépare…" }
+        if !canPushToTalk { return "Teddy se prépare…" }
         if controller.state == .speaking { return "Maintiens pour interrompre Teddy" }
         if controller.isAwaitingResponse { return "Teddy prépare sa réponse…" }
         if controller.isInlineTerminalExpanded { return "Session ouverte · maintiens pour parler à Teddy" }
@@ -1133,7 +1255,9 @@ private struct ConversationSidebar: View {
     @Bindable var controller: VoiceAgentController
     let onCreateCompanion: () -> Void
     let onHide: () -> Void
+    let onOpenApplicationSettings: () -> Void
     @State private var hoveredConversationID: UUID?
+    @State private var isFooterHovered = false
     @State private var searchText = ""
 
     private var visibleConversations: [VoiceConversationSummary] {
@@ -1149,7 +1273,7 @@ private struct ConversationSidebar: View {
         VStack(spacing: 0) {
             sidebarTopBar
 
-            VStack(spacing: 2) {
+            VStack(spacing: 8) {
                 SidebarNavigationButton(
                     title: "Nouveau doudou",
                     systemName: "plus"
@@ -1157,19 +1281,32 @@ private struct ConversationSidebar: View {
 
                 SidebarSearchField(text: $searchText)
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 13)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 15)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    Text("CONVERSATIONS")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .tracking(0.65)
-                        .foregroundStyle(TeddyPalette.tertiaryText)
-                        .padding(.horizontal, 9)
-                        .padding(.top, 5)
-                        .padding(.bottom, 6)
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text("CONVERSATIONS")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .tracking(0.65)
+                            .foregroundStyle(TeddyPalette.tertiaryText)
+
+                        Spacer(minLength: 0)
+
+                        Text("\(visibleConversations.count)")
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .foregroundStyle(TeddyPalette.tertiaryText)
+                            .padding(.horizontal, 6)
+                            .frame(height: 18)
+                            .background(
+                                Color.white.opacity(0.04),
+                                in: Capsule())
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.top, 4)
+                    .padding(.bottom, 5)
 
                     ForEach(visibleConversations) { conversation in
                         ConversationSidebarRow(
@@ -1190,8 +1327,28 @@ private struct ConversationSidebar: View {
                             hoveredConversationID = hovering ? conversation.id : nil
                         }
                     }
+
+                    if visibleConversations.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: searchText.isEmpty
+                                ? "bubble.left.and.bubble.right"
+                                : "magnifyingglass")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(TeddyPalette.tertiaryText)
+
+                            Text(searchText.isEmpty
+                                ? "Aucun doudou pour l'instant"
+                                : "Aucune conversation trouvée")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(TeddyPalette.tertiaryText)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 26)
+                    }
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 8)
                 .padding(.bottom, 20)
             }
             .scrollIndicators(.hidden)
@@ -1207,17 +1364,8 @@ private struct ConversationSidebar: View {
         ZStack {
             WindowDragRegion()
 
-            HStack(spacing: 4) {
-                Text("Teddy CLI")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(TeddyPalette.primaryText)
-
-                Spacer(minLength: 4)
-
-                HeaderActionButton(
-                    systemName: "square.and.pencil",
-                    help: "Nouveau doudou"
-                ) { onCreateCompanion() }
+            HStack(spacing: 0) {
+                Spacer(minLength: 80)
 
                 HeaderActionButton(
                     systemName: "sidebar.left",
@@ -1225,38 +1373,61 @@ private struct ConversationSidebar: View {
                     action: onHide
                 )
             }
-            .padding(.leading, 80)
-            .padding(.trailing, 8)
-            .padding(.top, 1)
+            .padding(.horizontal, 8)
         }
-        .frame(height: 52)
+        .frame(height: 44)
         .background(Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.045))
+                .frame(height: 1)
+        }
     }
 
     private var sidebarFooter: some View {
-        HStack(spacing: 9) {
-            TeddyAvatar(size: 28, isActive: controller.state == .speaking)
+        Button(action: onOpenApplicationSettings) {
+            HStack(spacing: 10) {
+                TeddyAvatar(size: 30, isActive: controller.state == .speaking)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Teddy CLI")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(TeddyPalette.secondaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Teddy CLI")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(TeddyPalette.secondaryText)
 
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(controller.canPushToTalk ? TeddyPalette.online : TeddyPalette.tertiaryText)
-                        .frame(width: 4.5, height: 4.5)
-                    Text(sidebarFooterCaption)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(TeddyPalette.tertiaryText)
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(controller.canPushToTalk
+                                ? TeddyPalette.online
+                                : TeddyPalette.tertiaryText)
+                            .frame(width: 4.5, height: 4.5)
+                        Text(sidebarFooterCaption)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(TeddyPalette.tertiaryText)
+                    }
                 }
-            }
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
+
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(isFooterHovered
+                        ? TeddyPalette.secondaryText
+                        : TeddyPalette.tertiaryText)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Color.white.opacity(isFooterHovered ? 0.055 : 0),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 58)
+            .background(Color.white.opacity(isFooterHovered ? 0.025 : 0))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 13)
-        .frame(height: 52)
-        .background(Color.clear)
+        .buttonStyle(.plain)
+        .onHover { isFooterHovered = $0 }
+        .animation(.easeOut(duration: 0.13), value: isFooterHovered)
+        .help("Ouvrir les réglages de Teddy CLI")
+        .accessibilityLabel("Réglages de Teddy CLI")
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(TeddyPalette.hairline)
@@ -1282,23 +1453,34 @@ private struct SidebarNavigationButton: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(TeddyPalette.secondaryText)
-                    .frame(width: 18)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(TeddyPalette.primaryText)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        Color.white.opacity(isHovering ? 0.10 : 0.065),
+                        in: RoundedRectangle(cornerRadius: 6.5, style: .continuous))
 
                 Text(title)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(TeddyPalette.secondaryText)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(TeddyPalette.primaryText.opacity(0.88))
 
                 Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(TeddyPalette.tertiaryText)
             }
-            .padding(.horizontal, 9)
-            .frame(height: 34)
+            .padding(.horizontal, 8)
+            .frame(height: 38)
             .background(
-                Color.white.opacity(isHovering ? 0.045 : 0),
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                Color.white.opacity(isHovering ? 0.060 : 0.028),
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.white.opacity(isHovering ? 0.075 : 0.045), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -1308,6 +1490,8 @@ private struct SidebarNavigationButton: View {
 
 private struct SidebarSearchField: View {
     @Binding var text: String
+    @FocusState private var isFocused: Bool
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -1320,6 +1504,7 @@ private struct SidebarSearchField: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5, weight: .regular))
                 .foregroundStyle(TeddyPalette.primaryText)
+                .focused($isFocused)
 
             if !text.isEmpty {
                 Button {
@@ -1332,9 +1517,20 @@ private struct SidebarSearchField: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 10)
         .frame(height: 34)
-        .background(Color.clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(
+            Color.white.opacity(isFocused ? 0.065 : (isHovering ? 0.045 : 0.032)),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    Color.white.opacity(isFocused ? 0.12 : 0.055),
+                    lineWidth: 1)
+        }
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .animation(.easeOut(duration: 0.12), value: isFocused)
     }
 }
 
@@ -1349,45 +1545,82 @@ private struct ConversationSidebarRow: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 9) {
-            ConversationThreadIcon(
-                companionAvatar: companionAvatar,
-                isSelected: isSelected,
-                phase: companion?.phase)
+        Button(action: onSelect) {
+            HStack(spacing: 9) {
+                ConversationThreadIcon(
+                    companionAvatar: companionAvatar,
+                    isSelected: isSelected,
+                    phase: companion?.phase)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(conversation.title)
-                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? TeddyPalette.primaryText : TeddyPalette.secondaryText)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conversation.title)
+                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(isSelected
+                            ? TeddyPalette.primaryText
+                            : TeddyPalette.secondaryText)
+                        .lineLimit(1)
 
-                Text(companionSubtitle)
-                    .font(.system(size: 9.5, weight: .regular))
-                    .foregroundStyle(TeddyPalette.tertiaryText)
-                    .lineLimit(1)
+                    Text(companionSubtitle)
+                        .font(.system(size: 9.5, weight: .regular))
+                        .foregroundStyle(TeddyPalette.tertiaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 5)
+
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.72)
+                } else if isHovering {
+                    Color.clear
+                        .frame(width: 20, height: 20)
+                } else {
+                    Circle()
+                        .fill(phaseColor)
+                        .frame(width: 5, height: 5)
+                }
             }
-
-            Spacer(minLength: 5)
-
-            if isLoading {
-                ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.72)
-            } else if isHovering {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(TeddyPalette.tertiaryText)
-            } else {
-                Circle()
-                    .fill(phaseColor)
-                    .frame(width: 5, height: 5)
+            .padding(.horizontal, 9)
+            .frame(height: 50)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(rowBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(
+                        isSelected ? Color.white.opacity(0.055) : Color.clear,
+                        lineWidth: 1)
             }
         }
-        .padding(.horizontal, 9)
-        .frame(height: 48)
-        .contentShape(Rectangle())
-        .background(rowBackground, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .onTapGesture(perform: onSelect)
+        .buttonStyle(.plain)
+        .overlay(alignment: .trailing) {
+            if isHovering && !isLoading {
+                Menu {
+                    Button("Ouvrir", systemImage: "message") { onSelect() }
+                        .disabled(isSelected)
+                    Divider()
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label("Effacer le contexte Teddy", systemImage: "eraser")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(TeddyPalette.tertiaryText)
+                        .frame(width: 22, height: 22)
+                        .background(
+                            Color.white.opacity(0.035),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 22, height: 22)
+                .padding(.trailing, 9)
+                .help("Actions de la conversation")
+            }
+        }
         .contextMenu {
             Button("Ouvrir", systemImage: "message") { onSelect() }
                 .disabled(isSelected)
@@ -1472,10 +1705,15 @@ private struct SidebarResizeHandle: View {
                 .fill(Color.white.opacity(isHovering ? 0.10 : 0.045))
                 .frame(width: 1)
         }
-        .frame(width: 3)
+        .frame(width: 6)
         .contentShape(Rectangle())
         .onHover { hovering in
             isHovering = hovering
+            if hovering {
+                NSCursor.resizeLeftRight.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         }
         .gesture(
             DragGesture(minimumDistance: 0)
@@ -1487,6 +1725,9 @@ private struct SidebarResizeHandle: View {
                 .onEnded { _ in dragOrigin = nil }
         )
         .animation(.easeOut(duration: 0.12), value: isHovering)
+        .onDisappear {
+            if isHovering { NSCursor.arrow.set() }
+        }
         .accessibilityLabel("Redimensionner la barre latérale")
     }
 }

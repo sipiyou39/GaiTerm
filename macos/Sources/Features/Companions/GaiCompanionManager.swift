@@ -414,9 +414,14 @@ private final class GaiCompanionCompletionSoundPlayer: NSObject, NSSoundDelegate
 final class GaiCompanionRuntime: ObservableObject, Identifiable {
     let id: UUID
     private(set) var eventToken = UUID().uuidString.lowercased()
-    private var observedNativeAdapters: Set<GaiCompanionProvider> = []
 
     @Published private(set) var record: GaiCompanionRecord
+    /// Identity of the CLI process currently owning the PTY foreground.
+    ///
+    /// This is deliberately independent from `activity.provider`: activity is
+    /// the immutable provenance of one lifecycle generation, while the live
+    /// process may change from a shell to Codex (or back) between generations.
+    @Published private(set) var liveProvider: GaiCompanionProvider
     @Published var surfaceView: Ghostty.SurfaceView?
     @Published var presentation: GaiCompanionPresentation = .collapsed
     @Published var terminalPlacement: GaiCompanionTerminalPlacement = .top
@@ -428,6 +433,9 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     init(record: GaiCompanionRecord) {
         id = record.id
         self.record = record
+        // A configured command is intent, not proof that the process launched.
+        // Foreground argv or an authenticated provider event establishes life.
+        liveProvider = .terminal
         activity = GaiCompanionActivityState(surfaceID: record.id)
     }
 
@@ -469,19 +477,61 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
 
     @discardableResult
     func apply(_ action: GaiCompanionActivityAction) -> GaiCompanionReductionDisposition {
-        if case .event(let event) = action,
-           event.surfaceID == id,
-           event.source == .providerHook,
-           event.kind == .ready || event.kind == .started {
-            // A delivered authenticated hook is the runtime handshake. Until
-            // this proof exists, Return remains an optimistic fallback so an
-            // old/missing adapter cannot leave a visibly working CLI idle.
-            observedNativeAdapters.insert(event.provider)
-        }
         var next = activity
         let disposition = GaiCompanionActivityReducer.apply(action, to: &next)
         activity = next
+        reconcileLiveProvider(for: action, disposition: disposition)
         return disposition
+    }
+
+    /// Records a strong foreground-process observation without rewriting the
+    /// provider which owns the current activity generation.
+    @discardableResult
+    func observeLiveProvider(_ provider: GaiCompanionProvider) -> Bool {
+        guard provider != .terminal, liveProvider != provider else { return false }
+        liveProvider = provider
+        return true
+    }
+
+    /// Reconciles the shell Enter which launched an interactive CLI with the
+    /// provider process observed a few milliseconds later.
+    ///
+    /// The original Enter is necessarily speculative: before the child process
+    /// exists it looks like an ordinary shell command and opens a provisional
+    /// terminal generation. Once Codex, Claude or Grok owns the foreground, that
+    /// generation represents session startup rather than agent work. Settle only
+    /// this exact terminal-owned provisional state; an actual prompt already
+    /// owned by a provider must remain working.
+    @discardableResult
+    func reconcileLaunchedProvider(
+        _ provider: GaiCompanionProvider,
+        maySettleProvisionalShellLaunch: Bool
+    ) -> GaiCompanionProviderLaunchReconciliation {
+        guard provider != .terminal else { return .unchanged }
+        let providerChanged = observeLiveProvider(provider)
+        guard maySettleProvisionalShellLaunch,
+              hasProvisionalShellLaunch,
+              apply(.expireProvisionalStart(generation: activity.generation))
+                  == .expiredProvisionalStart else {
+            return providerChanged ? .providerObserved : .unchanged
+        }
+        return .settledProvisionalShellLaunch
+    }
+
+    var hasProvisionalShellLaunch: Bool {
+        activity.phase == .working
+            && activity.provider == .terminal
+            && activity.provisionalStartGeneration == activity.generation
+            && activity.generationAuthority == .userInput
+    }
+
+    /// Clears only process presence. Completion, failure and acknowledgement
+    /// remain owned by the activity reducer.
+    @discardableResult
+    func clearLiveProvider() -> Bool {
+        guard liveProvider != .terminal else { return false }
+        liveProvider = .terminal
+        return true
     }
 
     func acknowledgeCompletion() {
@@ -491,10 +541,6 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
 
     func resetActivity() {
         activity = GaiCompanionActivityState(surfaceID: id)
-    }
-
-    func hasObservedNativeAdapter(for provider: GaiCompanionProvider) -> Bool {
-        observedNativeAdapters.contains(provider)
     }
 
     /// A detached PTY is a hard incarnation boundary. Completion/failure may
@@ -512,7 +558,124 @@ final class GaiCompanionRuntime: ObservableObject, Identifiable {
     /// replaced while keeping the companion's stable identity.
     func rotateEventToken() {
         eventToken = UUID().uuidString.lowercased()
-        observedNativeAdapters.removeAll()
+        clearLiveProvider()
+    }
+
+    private func reconcileLiveProvider(
+        for action: GaiCompanionActivityAction,
+        disposition: GaiCompanionReductionDisposition
+    ) {
+        guard case .event(let event) = action,
+              disposition == .appliedEvent || disposition == .duplicateEvent else { return }
+
+        if event.source == .providerHook {
+            if event.kind != .cancelled, event.provider != .terminal {
+                observeLiveProvider(event.provider)
+            }
+        } else if event.source == .processLifecycle, event.kind == .exited {
+            clearLiveProvider()
+        }
+    }
+}
+
+enum GaiCompanionProviderLaunchReconciliation: Equatable {
+    case unchanged
+    case providerObserved
+    case settledProvisionalShellLaunch
+
+    var changedRuntimeState: Bool { self != .unchanged }
+    var settledProvisionalTurn: Bool { self == .settledProvisionalShellLaunch }
+}
+
+/// Finite foreground-process sampling used only around a real shell boundary.
+/// There is no idle timer and therefore no continuous process polling cost.
+enum GaiCompanionProviderProbeSchedule {
+    enum Purpose: Equatable {
+        case launch
+        case shellReturn
+    }
+
+    private static let launchDelays: [TimeInterval] = [
+        0.08, 0.16, 0.32, 0.64, 1.0,
+    ]
+    private static let shellReturnDelays: [TimeInterval] = [
+        0.04, 0.12, 0.28,
+    ]
+
+    static func delay(for purpose: Purpose, attempt: Int) -> TimeInterval? {
+        let delays = switch purpose {
+        case .launch: launchDelays
+        case .shellReturn: shellReturnDelays
+        }
+        guard delays.indices.contains(attempt) else { return nil }
+        return delays[attempt]
+    }
+}
+
+/// A failed process inspection is not equivalent to observing the shell.
+/// Keeping this distinction prevents a transient `sysctl` failure from
+/// invalidating an otherwise authenticated live CLI identity.
+enum GaiForegroundProviderObservation: Equatable {
+    case provider(GaiCompanionProvider)
+    case shell
+    case unavailable
+
+    /// Only an interactive shell is proof that the previous CLI returned.
+    /// An unknown foreground executable is commonly a tool spawned by that
+    /// CLI, so treating it as a shell would transiently revoke a live agent.
+    static func classify(arguments: [String]?) -> Self {
+        guard let arguments, let first = arguments.first, !first.isEmpty else {
+            return .unavailable
+        }
+        if let provider = GaiCompanionProviderClassifier.classify(argv: arguments) {
+            return .provider(provider)
+        }
+
+        var executable = URL(fileURLWithPath: first).lastPathComponent.lowercased()
+        if executable.hasPrefix("-") {
+            executable.removeFirst()
+        }
+        guard interactiveShells.contains(executable) else { return .unavailable }
+
+        let shellArguments = arguments.dropFirst()
+        let launchesCommandOrScript = shellArguments.contains { argument in
+            guard argument.hasPrefix("-") else { return true }
+            if argument == "--command" || argument.hasPrefix("--command=") {
+                return true
+            }
+            if argument.hasPrefix("--") { return false }
+            return argument.dropFirst().lowercased().contains("c")
+        }
+        return launchesCommandOrScript ? .unavailable : .shell
+    }
+
+    private static let interactiveShells: Set<String> = [
+        "bash", "csh", "dash", "fish", "ksh", "nu", "sh", "tcsh", "xonsh", "zsh",
+    ]
+}
+
+/// The final, synchronous gate applied at the exact terminal-write boundary.
+/// A caller may preserve authenticated process knowledge when inspection is
+/// temporarily unavailable, but intent (a configured launch command, title or
+/// empty shell) can never authorize a prompt.
+enum GaiCompanionPromptProviderGate: Equatable {
+    case observe(GaiCompanionProvider)
+    case preserve(GaiCompanionProvider)
+    case rejectAndClear
+    case reject
+
+    static func decision(
+        observation: GaiForegroundProviderObservation,
+        liveProvider: GaiCompanionProvider
+    ) -> Self {
+        switch observation {
+        case .provider(let provider):
+            return .observe(provider)
+        case .shell:
+            return liveProvider == .terminal ? .reject : .rejectAndClear
+        case .unavailable:
+            return liveProvider == .terminal ? .reject : .preserve(liveProvider)
+        }
     }
 }
 
@@ -537,6 +700,39 @@ private final class GaiCompanionResponseSettlementWatchdog {
         self.incarnationToken = incarnationToken
         self.generation = generation
         self.responseToken = responseToken
+    }
+
+    func cancel() {
+        workItem?.cancel()
+        workItem = nil
+    }
+}
+
+/// One finite probe created by one ambiguous manual Return. It never exists at
+/// rest and cannot open a turn until the terminal has produced a response line
+/// absent from its pre-Return baseline, keeping empty Return and static menu
+/// confirmations presentation-neutral when a native start hook is absent.
+private final class GaiCompanionResponseActivationProbe {
+    let runtimeID: UUID
+    let incarnationToken: String
+    let responseToken: GaiCompanionLastResponseStore.TurnToken
+    let provider: GaiCompanionProvider
+    let observation: GaiResponseActivityObservation
+    var workItem: DispatchWorkItem?
+
+    init(
+        runtimeID: UUID,
+        incarnationToken: String,
+        responseToken: GaiCompanionLastResponseStore.TurnToken,
+        provider: GaiCompanionProvider,
+        baselineScreenText: String
+    ) {
+        self.runtimeID = runtimeID
+        self.incarnationToken = incarnationToken
+        self.responseToken = responseToken
+        self.provider = provider
+        observation = GaiResponseActivityObservation(
+            baselineScreenText: baselineScreenText)
     }
 
     func cancel() {
@@ -575,7 +771,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var responseSettlementWatchdogs: [
         UUID: GaiCompanionResponseSettlementWatchdog
     ] = [:]
-    private var provisionalExpiryTasks: [
+    private var responseActivationProbes: [
+        UUID: GaiCompanionResponseActivationProbe
+    ] = [:]
+    private var foregroundProviderProbeTasks: [
         UUID: (nonce: UUID, workItem: DispatchWorkItem)
     ] = [:]
     private var globalFileDragMonitor: Any?
@@ -592,7 +791,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     )?
     private var terminalFocusLossProtectionUntil: [UUID: TimeInterval] = [:]
     private var fileDropFocusGeneration: [UUID: UInt64] = [:]
-    private static let provisionalStartLifetime: TimeInterval = 3
     /// Provider hooks can arrive just before their final PTY write is rendered.
     /// These bounded retries stop as soon as one complete response is captured.
     private static let responseCaptureSettlementDelays: [TimeInterval] = [
@@ -602,6 +800,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     /// sample runs only while work is active and recovers a lost Stop after a
     /// response has remained byte-identical for several consecutive samples.
     private static let responseSettlementSampleInterval: TimeInterval = 0.5
+    /// Cumulative duration is about 35 seconds, but only thirteen snapshots
+    /// are read and only after a real Return. This covers slow first-token
+    /// providers without introducing any idle polling.
+    private static let responseActivationProbeDelays: [TimeInterval] = [
+        0.05, 0.10, 0.15, 0.25, 0.40, 0.60, 1.00,
+        1.50, 2.00, 3.00, 5.00, 8.00, 12.00,
+    ]
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
@@ -623,7 +828,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for watchdog in responseSettlementWatchdogs.values {
             watchdog.cancel()
         }
-        for task in provisionalExpiryTasks.values {
+        for probe in responseActivationProbes.values {
+            probe.cancel()
+        }
+        for task in foregroundProviderProbeTasks.values {
             task.workItem.cancel()
         }
         if let globalFileDragMonitor {
@@ -976,19 +1184,33 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     /// Lightweight, on-demand state exposed to Teddy. This projection never
-    /// reads terminal contents and therefore remains safe to refresh in UI.
+    /// reads terminal contents or process state and therefore remains safe to
+    /// refresh from SwiftUI. Exact process reconciliation belongs exclusively
+    /// to explicit interaction boundaries such as `freshManagedAgentSnapshot`
+    /// and `submitPrompt`.
     func managedAgentSnapshots() -> [GaiManagedAgentSnapshot] {
-        runtimes.map { runtime in
-            GaiManagedAgentSnapshot(
-                id: runtime.id,
-                name: runtime.record.displayName,
-                provider: runtime.activity.provider ?? inferredProvider(for: runtime),
-                phase: runtime.activity.phase,
-                directoryPath: runtime.record.directoryPath,
-                launchCommand: runtime.record.launchCommand,
-                lastResponse: lastResponseStore.lastResponse(for: runtime.id),
-                isResponsePending: lastResponseStore.hasPendingTurn(for: runtime.id))
+        runtimes.map(managedAgentSnapshot)
+    }
+
+    /// Synchronously revalidates one hard-gated interaction against foreground
+    /// argv. Unlike the broad UI projection, this narrow API reconciles both
+    /// directions so a cached CLI can never authorize PTT after returning to a
+    /// shell, and a just-launched CLI needs no hook before it can be addressed.
+    func freshManagedAgentSnapshot(id: UUID) -> GaiManagedAgentSnapshot? {
+        guard let runtime = runtime(id: id) else { return nil }
+        let liveProviderChanged: Bool
+        switch foregroundProviderObservation(for: runtime) {
+        case .provider(let provider):
+            liveProviderChanged = runtime.observeLiveProvider(provider)
+        case .shell:
+            liveProviderChanged = runtime.clearLiveProvider()
+        case .unavailable:
+            liveProviderChanged = false
         }
+        if liveProviderChanged {
+            publishCompanionStateChange()
+        }
+        return managedAgentSnapshot(for: runtime)
     }
 
     /// Submits a prompt to an already-live doudou without revealing, focusing,
@@ -1007,6 +1229,31 @@ final class GaiCompanionManager: NSObject, ObservableObject {
               let surface = surfaceView.surfaceModel else {
             return .failed(.unavailableTerminal)
         }
+
+        // Revalidate at the write boundary as well as in Teddy's PTT router.
+        // This protects text tools and every future caller from submitting to
+        // a plain shell after the CLI has exited. An unavailable proc lookup
+        // may use only previously proven live-process identity.
+        let providerDecision = GaiCompanionPromptProviderGate.decision(
+            observation: foregroundProviderObservation(for: runtime),
+            liveProvider: runtime.liveProvider)
+        let validatedProvider: GaiCompanionProvider
+        switch providerDecision {
+        case .observe(let provider):
+            validatedProvider = provider
+            if runtime.observeLiveProvider(provider) {
+                publishCompanionStateChange()
+            }
+        case .preserve(let provider):
+            validatedProvider = provider
+        case .rejectAndClear:
+            if runtime.clearLiveProvider() {
+                publishCompanionStateChange()
+            }
+            return .failed(.unavailableTerminal)
+        case .reject:
+            return .failed(.unavailableTerminal)
+        }
         guard runtime.activity.phase != .working else {
             return .failed(.agentBusy)
         }
@@ -1016,7 +1263,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             surface: surfaceView,
             origin: .teddy,
             submittedText: prompt)
-        recordSubmittedInput(for: runtime, submissionIsGuaranteed: true)
+        recordSubmittedInput(
+            for: runtime,
+            submissionIsGuaranteed: true,
+            validatedProvider: validatedProvider)
         surface.sendText(prompt)
         surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .press))
         surface.sendKeyEvent(Ghostty.Input.KeyEvent(key: .enter, action: .release))
@@ -1247,8 +1497,87 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
     }
 
+    /// Opens the real compact terminal as a passive preview. It deliberately
+    /// avoids application activation and first-responder changes, so the app
+    /// underneath the pointer remains the user's working context.
+    @discardableResult
+    func presentTerminalPeek(id: UUID) -> Bool {
+        guard agentWindowsAreVisible,
+              terminalTransientCounts[id, default: 0] == 0,
+              let runtime = runtime(id: id),
+              runtime.presentation == .collapsed else { return false }
+        let hasInteractiveTerminal = runtimes.contains { other in
+            guard other.id != id,
+                  other.presentation != .collapsed,
+                  let controller = panelControllers[other.id],
+                  controller.terminalPanel.isVisible else { return false }
+            return !controller.isHoverPeekPresented
+        }
+        guard !hasInteractiveTerminal else { return false }
+        ensurePanel(for: runtime)
+        guard let controller = panelControllers[id] else { return false }
+
+        controller.restoreTerminalContentAfterVoicePresentation()
+        selectCompanion(id: id)
+        setPresentation(
+            .compact,
+            for: runtime,
+            animated: true,
+            focus: false)
+        return runtime.presentation == .compact
+            && controller.isHoverPeekPresented
+            && controller.terminalPanel.isVisible
+    }
+
+    /// Called only by the bounded pointer-presence session owned by a panel
+    /// controller. Genuine terminal interaction always wins by ending that
+    /// session before this method can run.
+    func dismissTerminalPeek(id: UUID) {
+        guard let runtime = runtime(id: id),
+              runtime.presentation == .compact,
+              let controller = panelControllers[id],
+              !controller.terminalPanel.isKeyWindow,
+              !controller.isVoiceContentPresented else { return }
+        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
+    }
+
     func toggleTerminal(id: UUID) {
+        if let runtime = runtime(id: id),
+           let controller = panelControllers[id],
+           controller.isHoverPeekPresented {
+            setPresentation(.compact, for: runtime, animated: true, focus: true)
+            return
+        }
+        if let runtime = runtime(id: id),
+           let controller = panelControllers[id],
+           controller.isVoiceContentPresented {
+            controller.restoreTerminalContentAfterVoicePresentation()
+            setPresentation(.compact, for: runtime, animated: false, focus: true)
+            return
+        }
         activateCompanion(id: id, activation: .singleClick)
+    }
+
+    /// Presents Teddy's vocal conversation in the exact compact panel normally
+    /// used by this doudou's CLI. Placement, Spaces behavior and attachment to
+    /// the mascot therefore stay identical.
+    @MainActor
+    func presentCompactVoice(id: UUID, contentView: NSView) {
+        guard let runtime = runtime(id: id), runtime.activity.phase != .exited else { return }
+        ensurePanel(for: runtime)
+        detachInlineTerminalIfNeeded(id: id)
+        guard let controller = panelControllers[id] else { return }
+        controller.presentVoiceContent(contentView)
+        setPresentation(.compact, for: runtime, animated: true, focus: true)
+    }
+
+    @MainActor
+    func dismissCompactVoice(id: UUID) {
+        guard let runtime = runtime(id: id),
+              let controller = panelControllers[id],
+              controller.isVoiceContentPresented else { return }
+        controller.restoreTerminalContentAfterVoicePresentation()
+        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
     }
 
     func openMaximizedTerminal(id: UUID) {
@@ -1553,8 +1882,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         activeCloseConfirmationIDs.remove(id)
         responseCaptureTasks.removeValue(forKey: id)?.cancel()
         responseSettlementWatchdogs.removeValue(forKey: id)?.cancel()
+        responseActivationProbes.removeValue(forKey: id)?.cancel()
         lastResponseStore.removeAgent(id)
-        provisionalExpiryTasks.removeValue(forKey: id)?.workItem.cancel()
+        cancelForegroundProviderProbe(for: id)
         let runtime = runtimes.remove(at: index)
         runtime.surfaceView?.gaiReleaseTerminalSurface()
         runtime.surfaceView = nil
@@ -1838,6 +2168,15 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
         surface.focusDidChange(false)
         runtime.surfaceView = surface
+        if config.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            // A configured CLI starts as part of surface creation and therefore
+            // produces no manual-Enter notification. Reconcile it with the same
+            // finite, event-driven probe used for a user-launched CLI so the UI
+            // becomes ready without introducing an idle poll.
+            scheduleForegroundProviderLaunchProbe(
+                for: runtime,
+                surface: surface)
+        }
         return surface
     }
 
@@ -1852,6 +2191,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         // which deliberately shares the agent's stable UUID.
         let previousSurface = runtime.surfaceView
         runtime.surfaceView = nil
+        cancelForegroundProviderProbe(for: runtime.id)
         runtime.resetActivity()
         runtime.rotateEventToken()
         runtime.replaceRecord(record)
@@ -1947,8 +2287,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             animated: animated,
             focus: shouldFocus,
             agentWindowsAreVisible: agentWindowsAreVisible)
-        updateSurfacePerformanceState(focused: shouldFocus ? runtime.surfaceView : nil)
-        if shouldFocus, let surface = runtime.surfaceView {
+        let shouldFocusTerminal = shouldFocus && !controller.isVoiceContentPresented
+        updateSurfacePerformanceState(
+            focused: shouldFocusTerminal ? runtime.surfaceView : nil)
+        if shouldFocusTerminal, let surface = runtime.surfaceView {
             requestTerminalFocus(for: runtime, surface: surface)
         }
         updateDockBadge()
@@ -1957,7 +2299,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     func panelDidBecomeKey(for id: UUID) {
         guard let runtime = runtime(id: id),
               runtime.presentation != .collapsed,
-              panelControllers[id]?.terminalPanel.isKeyWindow == true else { return }
+              let controller = panelControllers[id],
+              controller.terminalPanel.isKeyWindow,
+              !controller.isVoiceContentPresented else { return }
         guard let surface = ensureSurface(for: runtime) else { return }
         updateSurfacePerformanceState(focused: surface)
         requestTerminalFocus(for: runtime, surface: surface)
@@ -2203,6 +2547,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func handleNaturalTerminalExit(_ surface: Ghostty.SurfaceView) {
         guard let runtime = currentRuntime(for: surface) else { return }
         detachInlineTerminalIfNeeded(id: runtime.id)
+        cancelForegroundProviderProbe(for: runtime.id)
 
         let provider = inferredProvider(for: runtime)
         let event = GaiCompanionEvent(
@@ -2275,7 +2620,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             message: "Terminal is waiting for input")
         let disposition = runtime.apply(.event(event))
         if disposition == .appliedEvent {
-            reconcileProvisionalExpiry(for: runtime)
+            reconcileResponseActivationProbe(for: runtime)
             reconcileResponseSettlementWatchdog(for: runtime)
         }
         updateDockBadge()
@@ -2283,15 +2628,27 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     @objc private func didFinishShellCommand(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
-              let runtime = currentRuntime(for: surface),
-              runtime.activity.phase.belongsToActiveGeneration else { return }
+              let runtime = currentRuntime(for: surface) else { return }
+
+        cancelForegroundProviderProbe(for: runtime.id)
+        let mayHaveLiveCLI = runtime.liveProvider != .terminal
+            || runtime.activity.provider.map { $0 != .terminal } == true
+        if mayHaveLiveCLI {
+            scheduleForegroundProviderShellReturnProbe(
+                for: runtime,
+                surface: surface)
+        }
+
+        guard runtime.activity.phase.belongsToActiveGeneration else { return }
 
         let exitCode = notification.userInfo?[Notification.Name.GaiSurfaceCommandExitCodeKey]
             as? Int ?? -1
         let durationNanoseconds = (notification.userInfo?[
             Notification.Name.GaiSurfaceCommandDurationNanosecondsKey
         ] as? NSNumber)?.uint64Value ?? 0
-        let provider = runtime.activity.provider ?? inferredProvider(for: runtime)
+        let provider = runtime.liveProvider != .terminal
+            ? runtime.liveProvider
+            : runtime.activity.provider ?? inferredProvider(for: runtime)
         let kind = GaiCompanionShellCompletionPolicy.eventKind(
             provider: provider,
             exitCode: exitCode,
@@ -2316,16 +2673,52 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     @objc private func didReceiveUserInput(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView,
               let runtime = currentRuntime(for: surface) else { return }
-        beginResponseTurn(for: runtime, surface: surface, origin: .user)
+        // A Return used inside an already active TUI must not replace the
+        // response token or cancel its settlement watchdog.
+        if runtime.activity.phase != .working {
+            beginResponseTurn(for: runtime, surface: surface, origin: .user)
+        }
         recordSubmittedInput(for: runtime)
+        reconcileResponseActivationProbe(for: runtime, surface: surface)
+        // AppKit posts this semantic boundary immediately before forwarding
+        // Enter to Ghostty. The first delayed sample therefore observes the
+        // process which the shell actually launched, not the previous shell.
+        scheduleForegroundProviderLaunchProbe(
+            for: runtime,
+            surface: surface)
     }
 
     private func recordSubmittedInput(
         for runtime: GaiCompanionRuntime,
-        submissionIsGuaranteed: Bool = false
+        submissionIsGuaranteed: Bool = false,
+        validatedProvider: GaiCompanionProvider? = nil
     ) {
         runtime.acknowledgeCompletion()
-        let provider = inferredProvider(for: runtime)
+        let provider: GaiCompanionProvider
+        let liveProviderChanged: Bool
+        if let validatedProvider {
+            // `submitPrompt` performed the exact process gate immediately
+            // before this call. Reuse that proof rather than issuing another
+            // pair of sysctl reads on the same main-thread interaction.
+            provider = validatedProvider
+            liveProviderChanged = false
+        } else {
+            switch foregroundProviderObservation(for: runtime) {
+            case .provider(let observedProvider):
+                provider = observedProvider
+                liveProviderChanged = runtime.observeLiveProvider(observedProvider)
+            case .shell:
+                provider = .terminal
+                liveProviderChanged = runtime.clearLiveProvider()
+            case .unavailable:
+                // Keep authenticated/process-observed knowledge when proc_pidinfo
+                // is transiently unavailable. A configured launch command or a
+                // terminal title is only intent and must never manufacture a live
+                // CLI identity after a failed launch.
+                provider = runtime.liveProvider
+                liveProviderChanged = false
+            }
+        }
         let kind: GaiCompanionEventKind?
         if submissionIsGuaranteed {
             // The tool router has already validated a live PTY and is about to
@@ -2337,11 +2730,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         } else {
             kind = GaiCompanionInputPolicy.eventKind(
                 provider: provider,
-                phase: runtime.activity.phase,
-                nativeAdapterIsReady: runtime.hasObservedNativeAdapter(for: provider))
+                phase: runtime.activity.phase)
         }
         guard let kind else {
             updateDockBadge()
+            if liveProviderChanged {
+                publishCompanionStateChange()
+            }
             return
         }
         let event = GaiCompanionEvent(
@@ -2353,10 +2748,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             message: "Prompt submitted")
         let disposition = runtime.apply(.event(event))
         if disposition == .appliedEvent {
-            reconcileProvisionalExpiry(for: runtime)
             reconcileResponseSettlementWatchdog(for: runtime)
         }
         updateDockBadge()
+        if disposition == .appliedEvent || liveProviderChanged {
+            publishCompanionStateChange()
+        }
     }
 
     @objc private func didCancelAgentWork(_ notification: Notification) {
@@ -2419,12 +2816,28 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         notificationTitle: String,
         notificationBody: String
     ) -> GaiCompanionReductionDisposition {
+        let wasProvisionalShellLaunch = event.kind == .ready
+            && runtime.hasProvisionalShellLaunch
+        let previousLiveProvider = runtime.liveProvider
         let disposition = runtime.apply(.event(event))
+        let liveProviderChanged = runtime.liveProvider != previousLiveProvider
+        let readinessSettledShellLaunch = wasProvisionalShellLaunch
+            && disposition == .appliedEvent
+            && runtime.activity.phase == .idle
+        if readinessSettledShellLaunch {
+            cancelForegroundProviderProbe(for: runtime.id)
+            discardProvisionalShellResponseTurn(for: runtime.id)
+        }
         if disposition == .appliedEvent {
-            reconcileProvisionalExpiry(for: runtime)
+            reconcileResponseActivationProbe(for: runtime)
             reconcileResponseSettlementWatchdog(for: runtime)
         }
-        guard disposition == .appliedEvent else { return disposition }
+        guard disposition == .appliedEvent else {
+            if liveProviderChanged {
+                publishCompanionStateChange()
+            }
+            return disposition
+        }
 
         switch event.kind {
         case .stop, .failed, .awaitingInput, .awaitingApproval:
@@ -2432,15 +2845,14 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         case .cancelled, .exited:
             responseCaptureTasks.removeValue(forKey: runtime.id)?.cancel()
             responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+            responseActivationProbes.removeValue(forKey: runtime.id)?.cancel()
             lastResponseStore.resetTurn(for: runtime.id)
         case .ready, .started, .resumed:
             break
         }
 
         updateDockBadge()
-        NotificationCenter.default.post(
-            name: .gaiCompanionStateDidChange,
-            object: self)
+        publishCompanionStateChange()
         if event.kind == .stop, runtime.record.completionSoundEnabled {
             // Playback happens only after the reducer accepts this exact event,
             // so duplicate Stop hooks cannot replay the completion sound.
@@ -2473,11 +2885,19 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     ) {
         responseCaptureTasks.removeValue(forKey: runtime.id)?.cancel()
         responseSettlementWatchdogs.removeValue(forKey: runtime.id)?.cancel()
+        responseActivationProbes.removeValue(forKey: runtime.id)?.cancel()
         _ = lastResponseStore.begin(
             agentID: runtime.id,
             origin: origin,
             screenText: surface.gaiResponseCaptureScreenText(),
             submittedText: submittedText)
+    }
+
+    private func discardProvisionalShellResponseTurn(for runtimeID: UUID) {
+        responseCaptureTasks.removeValue(forKey: runtimeID)?.cancel()
+        responseSettlementWatchdogs.removeValue(forKey: runtimeID)?.cancel()
+        responseActivationProbes.removeValue(forKey: runtimeID)?.cancel()
+        lastResponseStore.resetTurn(for: runtimeID)
     }
 
     private func scheduleResponseCapture(
@@ -2552,6 +2972,139 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(
             deadline: .now() + Self.responseCaptureSettlementDelays[attempt],
             execute: workItem)
+    }
+
+    /// Starts or reconciles the finite fallback attached to one ambiguous
+    /// physical Return. Calls without a surface only cancel a probe after an
+    /// authoritative lifecycle transition; they never create background work.
+    private func reconcileResponseActivationProbe(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView? = nil
+    ) {
+        guard runtime.activity.phase == .idle,
+              let responseToken = lastResponseStore.token(for: runtime.id) else {
+            responseActivationProbes.removeValue(forKey: runtime.id)?.cancel()
+            return
+        }
+        guard let surface else { return }
+        let provider = runtime.liveProvider
+        guard provider != .terminal else {
+            responseActivationProbes.removeValue(forKey: runtime.id)?.cancel()
+            return
+        }
+
+        if let current = responseActivationProbes[runtime.id],
+           current.incarnationToken == runtime.eventToken,
+           current.responseToken == responseToken,
+           current.provider == provider {
+            return
+        }
+
+        responseActivationProbes.removeValue(forKey: runtime.id)?.cancel()
+        guard let baselineScreenText = lastResponseStore.baselineScreenText(
+            for: responseToken) else { return }
+        let probe = GaiCompanionResponseActivationProbe(
+            runtimeID: runtime.id,
+            incarnationToken: runtime.eventToken,
+            responseToken: responseToken,
+            provider: provider,
+            baselineScreenText: baselineScreenText)
+        responseActivationProbes[runtime.id] = probe
+        scheduleResponseActivationSample(
+            probe,
+            runtime: runtime,
+            surface: surface,
+            attempt: 0)
+    }
+
+    private func scheduleResponseActivationSample(
+        _ probe: GaiCompanionResponseActivationProbe,
+        runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView,
+        attempt: Int
+    ) {
+        guard Self.responseActivationProbeDelays.indices.contains(attempt) else {
+            finishResponseActivationProbe(probe, resetPendingTurn: true)
+            return
+        }
+        let delay = Self.responseActivationProbeDelays[attempt]
+        let workItem = DispatchWorkItem { [weak self, weak runtime, weak surface, weak probe] in
+            guard let self,
+                  let runtime,
+                  let surface,
+                  let probe,
+                  self.responseActivationProbes[probe.runtimeID] === probe,
+                  self.runtime(id: probe.runtimeID) === runtime,
+                  runtime.surfaceView === surface,
+                  runtime.eventToken == probe.incarnationToken,
+                  runtime.activity.phase == .idle,
+                  self.lastResponseStore.token(for: probe.runtimeID)
+                      == probe.responseToken else {
+                probe?.cancel()
+                return
+            }
+            probe.workItem = nil
+
+            switch self.foregroundProviderObservation(for: runtime) {
+            case .provider(let provider) where provider == probe.provider:
+                _ = runtime.observeLiveProvider(provider)
+            case .unavailable:
+                // A transient proc lookup may preserve the provider identity
+                // already proven at the Return boundary.
+                break
+            case .provider, .shell:
+                if runtime.clearLiveProvider() {
+                    self.publishCompanionStateChange()
+                }
+                self.finishResponseActivationProbe(probe, resetPendingTurn: true)
+                return
+            }
+
+            let screenText = surface.gaiResponseCaptureScreenText()
+            let candidate = self.lastResponseStore.candidateResponse(
+                token: probe.responseToken,
+                screenText: screenText)
+            guard probe.observation.observe(
+                screenText: screenText,
+                candidateResponse: candidate) else {
+                self.scheduleResponseActivationSample(
+                    probe,
+                    runtime: runtime,
+                    surface: surface,
+                    attempt: attempt + 1)
+                return
+            }
+
+            self.finishResponseActivationProbe(probe, resetPendingTurn: false)
+            let event = GaiCompanionEvent(
+                surfaceID: runtime.id,
+                provider: probe.provider,
+                eventID: self.nextEventID(prefix: "observed-input-activity"),
+                kind: .started,
+                source: .userInput,
+                message: "Prompt activity observed")
+            _ = self.applyLifecycleEvent(
+                event,
+                to: runtime,
+                notificationTitle: self.providerDisplayName(probe.provider),
+                notificationBody: "Work started")
+        }
+        probe.workItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem)
+    }
+
+    private func finishResponseActivationProbe(
+        _ probe: GaiCompanionResponseActivationProbe,
+        resetPendingTurn: Bool
+    ) {
+        guard responseActivationProbes[probe.runtimeID] === probe else { return }
+        responseActivationProbes.removeValue(forKey: probe.runtimeID)?.cancel()
+        guard resetPendingTurn,
+              lastResponseStore.token(for: probe.runtimeID) == probe.responseToken else { return }
+        lastResponseStore.resetTurn(for: probe.runtimeID)
+        publishCompanionStateChange()
     }
 
     private func reconcileResponseSettlementWatchdog(
@@ -2645,41 +3198,162 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             userInfo: [GaiCompanionControl.responseUserInfoKey: response])
     }
 
-    private func reconcileProvisionalExpiry(for runtime: GaiCompanionRuntime) {
-        provisionalExpiryTasks.removeValue(forKey: runtime.id)?.workItem.cancel()
-        guard runtime.activity.phase == .working,
-              let generation = runtime.activity.provisionalStartGeneration else { return }
+    private func publishCompanionStateChange() {
+        NotificationCenter.default.post(
+            name: .gaiCompanionStateDidChange,
+            object: self)
+    }
+
+    private func cancelForegroundProviderProbe(for runtimeID: UUID) {
+        foregroundProviderProbeTasks.removeValue(forKey: runtimeID)?.workItem.cancel()
+    }
+
+    private func scheduleForegroundProviderLaunchProbe(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView
+    ) {
+        startForegroundProviderProbe(
+            for: runtime,
+            surface: surface,
+            purpose: .launch)
+    }
+
+    private func scheduleForegroundProviderShellReturnProbe(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView
+    ) {
+        startForegroundProviderProbe(
+            for: runtime,
+            surface: surface,
+            purpose: .shellReturn)
+    }
+
+    private func startForegroundProviderProbe(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView,
+        purpose: GaiCompanionProviderProbeSchedule.Purpose
+    ) {
+        cancelForegroundProviderProbe(for: runtime.id)
+        scheduleForegroundProviderProbeAttempt(
+            for: runtime,
+            surface: surface,
+            incarnationToken: runtime.eventToken,
+            purpose: purpose,
+            attempt: 0,
+            nonce: UUID())
+    }
+
+    private func scheduleForegroundProviderProbeAttempt(
+        for runtime: GaiCompanionRuntime,
+        surface: Ghostty.SurfaceView,
+        incarnationToken: String,
+        purpose: GaiCompanionProviderProbeSchedule.Purpose,
+        attempt: Int,
+        nonce: UUID
+    ) {
+        guard let delay = GaiCompanionProviderProbeSchedule.delay(
+            for: purpose,
+            attempt: attempt) else {
+            finishForegroundProviderProbe(for: runtime.id, nonce: nonce)
+            return
+        }
 
         let runtimeID = runtime.id
-        let token = runtime.eventToken
-        let nonce = UUID()
-        let workItem = DispatchWorkItem { [weak self, weak runtime] in
+        let workItem = DispatchWorkItem { [weak self, weak runtime, weak surface] in
             guard let self,
-                  let runtime,
-                  self.provisionalExpiryTasks[runtimeID]?.nonce == nonce else { return }
-            self.provisionalExpiryTasks.removeValue(forKey: runtimeID)
-            guard self.runtime(id: runtimeID) === runtime,
-                  runtime.eventToken == token else { return }
-            let provider = self.inferredProvider(
-                for: runtime,
-                allowTitleFallback: false)
-            guard GaiCompanionProvisionalExpiryPolicy.shouldExpire(
-                stronglyInferredProvider: provider),
-                  !runtime.hasObservedNativeAdapter(for: provider) else { return }
-            let disposition = runtime.apply(
-                .expireProvisionalStart(generation: generation))
-            if disposition == .expiredProvisionalStart {
-                self.reconcileResponseSettlementWatchdog(for: runtime)
-                self.updateDockBadge()
+                  self.foregroundProviderProbeTasks[runtimeID]?.nonce == nonce else { return }
+            guard let runtime,
+                  let surface,
+                  self.runtime(id: runtimeID) === runtime,
+                  runtime.surfaceView === surface,
+                  runtime.eventToken == incarnationToken else {
+                self.finishForegroundProviderProbe(for: runtimeID, nonce: nonce)
+                return
+            }
+
+            if purpose == .shellReturn, runtime.liveProvider == .terminal {
+                self.finishForegroundProviderProbe(for: runtimeID, nonce: nonce)
+                return
+            }
+
+            let foregroundArguments = self.foregroundProcessArguments(for: runtime)
+            let observation = GaiForegroundProviderObservation.classify(
+                arguments: foregroundArguments)
+            switch (purpose, observation) {
+            case (.launch, .provider(let provider)):
+                let isIdleInteractiveLaunch = foregroundArguments.map {
+                    GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+                        provider: provider,
+                        argv: $0)
+                } ?? false
+                let reconciliation = runtime.reconcileLaunchedProvider(
+                    provider,
+                    maySettleProvisionalShellLaunch: isIdleInteractiveLaunch)
+                self.finishForegroundProviderProbe(for: runtimeID, nonce: nonce)
+                if reconciliation.settledProvisionalTurn {
+                    self.discardProvisionalShellResponseTurn(for: runtimeID)
+                }
+                if reconciliation.changedRuntimeState {
+                    self.updateDockBadge()
+                    self.publishCompanionStateChange()
+                }
+
+            case (.launch, .shell):
+                let changed = runtime.clearLiveProvider()
+                if changed {
+                    self.publishCompanionStateChange()
+                }
+                self.scheduleForegroundProviderProbeAttempt(
+                    for: runtime,
+                    surface: surface,
+                    incarnationToken: incarnationToken,
+                    purpose: purpose,
+                    attempt: attempt + 1,
+                    nonce: nonce)
+
+            case (.shellReturn, .shell):
+                let changed = runtime.clearLiveProvider()
+                self.finishForegroundProviderProbe(for: runtimeID, nonce: nonce)
+                if changed {
+                    self.publishCompanionStateChange()
+                }
+
+            default:
+                self.scheduleForegroundProviderProbeAttempt(
+                    for: runtime,
+                    surface: surface,
+                    incarnationToken: incarnationToken,
+                    purpose: purpose,
+                    attempt: attempt + 1,
+                    nonce: nonce)
             }
         }
-        provisionalExpiryTasks[runtimeID] = (nonce, workItem)
+        foregroundProviderProbeTasks[runtimeID] = (nonce, workItem)
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.provisionalStartLifetime,
+            deadline: .now() + delay,
             execute: workItem)
     }
 
+    private func finishForegroundProviderProbe(for runtimeID: UUID, nonce: UUID) {
+        guard foregroundProviderProbeTasks[runtimeID]?.nonce == nonce else { return }
+        foregroundProviderProbeTasks.removeValue(forKey: runtimeID)?.workItem.cancel()
+    }
+
     // MARK: Helpers
+
+    private func managedAgentSnapshot(
+        for runtime: GaiCompanionRuntime
+    ) -> GaiManagedAgentSnapshot {
+        GaiManagedAgentSnapshot(
+            id: runtime.id,
+            name: runtime.record.displayName,
+            provider: runtime.liveProvider,
+            phase: runtime.activity.phase,
+            directoryPath: runtime.record.directoryPath,
+            launchCommand: runtime.record.launchCommand,
+            lastResponse: lastResponseStore.lastResponse(for: runtime.id),
+            isResponsePending: lastResponseStore.hasPendingTurn(for: runtime.id))
+    }
 
     private func runtime(id: UUID) -> GaiCompanionRuntime? {
         runtimes.first { $0.id == id }
@@ -2740,6 +3414,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func providerDisplayName(_ provider: GaiCompanionProvider) -> String {
         if provider == .codex { return "Codex" }
         if provider == .claude { return "Claude Code" }
+        if provider == .grok { return "Grok Build" }
         if provider == .agy { return "Agy" }
         if provider == .opencode { return "OpenCode" }
         return "Terminal"
@@ -2777,21 +3452,33 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func inferredProvider(
         for runtime: GaiCompanionRuntime,
-        allowTitleFallback: Bool = true
+        allowTitleFallback: Bool = true,
+        allowLaunchCommandFallback: Bool = true
     ) -> GaiCompanionProvider {
-        let surface = runtime.surfaceView
-        let foregroundPID = surface.flatMap { surface -> Int? in
-            guard let rawSurface = surface.surface else { return nil }
-            let pid = ghostty_surface_foreground_pid(rawSurface)
-            guard pid != 0 else { return nil }
-            return Int(exactly: pid)
-        }
-        let arguments = foregroundPID.map(
-            GaiCompanionProcessArguments.arguments(forPID:)) ?? []
+        let arguments = foregroundProcessArguments(for: runtime) ?? []
         return GaiCompanionProviderClassifier.classify(
-            launchCommand: runtime.record.launchCommand,
-            terminalTitle: allowTitleFallback ? surface?.title : nil,
+            launchCommand: allowLaunchCommandFallback
+                ? runtime.record.launchCommand
+                : nil,
+            terminalTitle: allowTitleFallback ? runtime.surfaceView?.title : nil,
             argv: arguments) ?? .terminal
+    }
+
+    private func foregroundProviderObservation(
+        for runtime: GaiCompanionRuntime
+    ) -> GaiForegroundProviderObservation {
+        GaiForegroundProviderObservation.classify(
+            arguments: foregroundProcessArguments(for: runtime))
+    }
+
+    private func foregroundProcessArguments(
+        for runtime: GaiCompanionRuntime
+    ) -> [String]? {
+        guard let rawSurface = runtime.surfaceView?.surface else { return nil }
+        let rawPID = ghostty_surface_foreground_pid(rawSurface)
+        guard rawPID != 0, let foregroundPID = Int(exactly: rawPID) else { return nil }
+        let arguments = GaiCompanionProcessArguments.arguments(forPID: foregroundPID)
+        return arguments.isEmpty ? nil : arguments
     }
 
     private func nextEventID(prefix: String) -> String {

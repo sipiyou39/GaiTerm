@@ -81,10 +81,10 @@ final class TeddyCompanionToolRouter {
             required: []),
         definition(
             name: "create_agent",
-            description: "Affiche un explorateur compact dans la conversation puis crée un doudou dans le dossier choisi. Démarre Codex par défaut ; utilise terminal seulement si l’utilisateur demande explicitement un shell vide.",
+            description: "Affiche un explorateur compact dans la conversation puis crée un doudou dans le dossier choisi. Démarre Codex par défaut et peut aussi ouvrir Claude Code, Grok Build ou un shell vide.",
             properties: [
                 "cli": enumProperty(
-                    "Programme à ouvrir. Omettre pour créer le terminal vide par défaut.",
+                    "Programme à ouvrir. Omettre pour démarrer Codex.",
                     values: GaiCompanionCreationCLI.allCases.map(\.rawValue)),
             ],
             required: []),
@@ -429,6 +429,7 @@ final class TeddyCompanionToolRouter {
         switch provider {
         case .codex: "codex"
         case .claude: "claude"
+        case .grok: "grok"
         case .agy: "agy"
         case .opencode: "opencode"
         default: "terminal"

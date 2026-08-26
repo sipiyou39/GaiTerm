@@ -4,24 +4,30 @@ import Foundation
 
 /// Ordered, process-local transport for authenticated agent lifecycle events.
 ///
-/// Clients send exactly one UTF-8 URL followed by `\n`. The handler runs on the
-/// main actor, where it can validate the URL's capability token and apply the
-/// event. The server replies with `OK\n` only after that handler returns `true`.
-/// Connections are handled in accept order, including the handler and ACK, so
-/// separate hook processes cannot reorder lifecycle transitions.
+/// Clients send exactly one UTF-8 URL followed by `\n`. Once the complete frame
+/// has passed a lightweight capability admission, the server replies with
+/// `OK\n` and releases the hook process. The heavier handler then runs on the
+/// main actor. This prevents an unauthenticated frame from being acknowledged
+/// while still keeping slow event application out of the hook's critical path.
 final class GaiCompanionEventSocketServer: @unchecked Sendable {
     struct Frame: Equatable, Sendable {
         let url: URL
         let responseBody: Data?
     }
 
+    typealias Admission = @MainActor @Sendable (Frame) -> Bool
     typealias Handler = @MainActor @Sendable (Frame) -> Bool
 
     static let acknowledgement = Data("OK\n".utf8)
+    /// An incomplete local client must not hold the ordered queue long enough
+    /// to delay later provider hooks. Complete frames are only a few KiB (up to
+    /// one bounded final response) and traverse a process-local Unix socket.
+    static let defaultClientDeadline: TimeInterval = 0.25
     /// A Codex Stop event may carry one bounded final assistant message. The
     /// base64url envelope needs roughly 4/3 of the original UTF-8 size.
     static let maximumFrameByteCount = 96 * 1_024
 
+    private let admission: Admission
     private let handler: Handler
     private let clientDeadline: TimeInterval
     private let queue = DispatchQueue(
@@ -33,13 +39,17 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
     private var boundSocket: BoundSocket?
     private var clients: [Int32: Client] = [:]
     private var acceptOrder: [Int32] = []
-    private var activeClientFileDescriptor: Int32?
+    private var queuedDeliveries: [QueuedDelivery] = []
+    private var activeDeliveryID: UInt64?
+    private var nextDeliveryID: UInt64 = 1
 
     init(
-        clientDeadline: TimeInterval = 2,
+        clientDeadline: TimeInterval = GaiCompanionEventSocketServer.defaultClientDeadline,
+        admission: @escaping Admission,
         handler: @escaping Handler
     ) {
         self.clientDeadline = max(0.1, clientDeadline)
+        self.admission = admission
         self.handler = handler
     }
 
@@ -278,7 +288,6 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
 
     private func drainAcceptedClients() {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard activeClientFileDescriptor == nil else { return }
 
         while let firstFileDescriptor = acceptOrder.first,
               clients[firstFileDescriptor] == nil {
@@ -291,35 +300,39 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
             return
         }
 
-        activeClientFileDescriptor = fileDescriptor
-        client.phase = .handling
-        let handler = handler
+        client.phase = .admitting(frame)
+        let admission = admission
+        let clientID = client.id
 
         Task { @MainActor [weak self] in
-            let accepted = handler(frame)
+            let admitted = admission(frame)
             self?.queue.async { [weak self] in
-                self?.handlerCompleted(
+                self?.admissionCompleted(
                     for: fileDescriptor,
-                    accepted: accepted)
+                    clientID: clientID,
+                    admitted: admitted)
             }
         }
     }
 
-    private func handlerCompleted(for fileDescriptor: Int32, accepted: Bool) {
+    private func admissionCompleted(
+        for fileDescriptor: Int32,
+        clientID: UUID,
+        admitted: Bool
+    ) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard activeClientFileDescriptor == fileDescriptor,
-              let client = clients[fileDescriptor],
-              client.phase == .handling else {
+        guard let client = clients[fileDescriptor],
+              client.id == clientID,
+              case let .admitting(frame) = client.phase else {
             return
         }
 
-        guard accepted else {
-            closeClient(fileDescriptor)
-            drainAcceptedClients()
+        guard admitted else {
+            rejectAndAdvance(fileDescriptor)
             return
         }
 
-        client.phase = .responding(offset: 0)
+        client.phase = .responding(frame: frame, offset: 0)
         installDeadline(for: client, phase: .responding)
         writeAcknowledgement(to: fileDescriptor)
     }
@@ -327,7 +340,7 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
     private func writeAcknowledgement(to fileDescriptor: Int32) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let client = clients[fileDescriptor],
-              case let .responding(offset) = client.phase else {
+              case let .responding(frame, offset) = client.phase else {
             return
         }
 
@@ -343,10 +356,12 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
         if sent > 0 {
             let nextOffset = offset + sent
             if nextOffset == Self.acknowledgement.count {
+                enqueue(frame)
                 closeClient(fileDescriptor)
+                dispatchNextDeliveryIfNeeded()
                 drainAcceptedClients()
             } else {
-                client.phase = .responding(offset: nextOffset)
+                client.phase = .responding(frame: frame, offset: nextOffset)
                 installWriteSourceIfNeeded(for: client)
             }
             return
@@ -363,6 +378,41 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
 
         closeClient(fileDescriptor)
         drainAcceptedClients()
+    }
+
+    private func enqueue(_ frame: Frame) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let deliveryID = nextDeliveryID
+        nextDeliveryID &+= 1
+        if nextDeliveryID == 0 {
+            nextDeliveryID = 1
+        }
+        queuedDeliveries.append(QueuedDelivery(id: deliveryID, frame: frame))
+    }
+
+    private func dispatchNextDeliveryIfNeeded() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard activeDeliveryID == nil, !queuedDeliveries.isEmpty else { return }
+
+        let delivery = queuedDeliveries.removeFirst()
+        activeDeliveryID = delivery.id
+        let handler = handler
+
+        Task { @MainActor [weak self] in
+            let accepted = handler(delivery.frame)
+            self?.queue.async { [weak self] in
+                self?.handlerCompleted(
+                    deliveryID: delivery.id,
+                    accepted: accepted)
+            }
+        }
+    }
+
+    private func handlerCompleted(deliveryID: UInt64, accepted _: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard activeDeliveryID == deliveryID else { return }
+        activeDeliveryID = nil
+        dispatchNextDeliveryIfNeeded()
     }
 
     private func installWriteSourceIfNeeded(for client: Client) {
@@ -411,9 +461,6 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
         client.cancelAllSources()
         Darwin.close(fileDescriptor)
         acceptOrder.removeAll { $0 == fileDescriptor }
-        if activeClientFileDescriptor == fileDescriptor {
-            activeClientFileDescriptor = nil
-        }
     }
 
     private func stopOnQueue() {
@@ -430,7 +477,8 @@ final class GaiCompanionEventSocketServer: @unchecked Sendable {
             closeClient(fileDescriptor)
         }
         acceptOrder.removeAll(keepingCapacity: false)
-        activeClientFileDescriptor = nil
+        queuedDeliveries.removeAll(keepingCapacity: false)
+        activeDeliveryID = nil
 
         if let socket = boundSocket,
            let current = Self.socketIdentity(at: socket.path),
@@ -556,12 +604,17 @@ private extension GaiCompanionEventSocketServer {
         let inode: ino_t
     }
 
+    struct QueuedDelivery {
+        let id: UInt64
+        let frame: Frame
+    }
+
     final class Client {
         enum Phase: Equatable {
             case receiving
             case ready(Frame)
-            case handling
-            case responding(offset: Int)
+            case admitting(Frame)
+            case responding(frame: Frame, offset: Int)
         }
 
         enum DeadlinePhase: Equatable {
@@ -569,6 +622,7 @@ private extension GaiCompanionEventSocketServer {
             case responding
         }
 
+        let id = UUID()
         let fileDescriptor: Int32
         var phase: Phase = .receiving
         var deadlinePhase: DeadlinePhase?

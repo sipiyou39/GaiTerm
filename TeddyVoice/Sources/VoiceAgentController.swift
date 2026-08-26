@@ -248,6 +248,16 @@ final class VoiceAgentController {
         refreshCompanionConversations(preferredSelection: activeCompanion.id)
     }
 
+    /// Render-path projection. This must stay cache-only; the PTT action owns
+    /// the synchronous source-of-truth check immediately before capture.
+    var isActiveCompanionCLIReady: Bool {
+        guard isCompanionMode else { return true }
+        return activeCompanion?.isCLIReady == true
+    }
+
+    /// Cheap UI affordance derived exclusively from observable cached state.
+    /// `pressPushToTalk()` revalidates the selected process before authorizing
+    /// recording, so a stale visual state can never become a stale write.
     var canPushToTalk: Bool {
         let baseReady = credential != nil
             && isMicrophoneReady
@@ -256,9 +266,9 @@ final class VoiceAgentController {
         guard baseReady else { return false }
         guard isCompanionMode else { return true }
         guard let activeCompanion else { return false }
-        return activeCompanion.isCLIReady
-            && activeCompanion.phase.acceptsPrompt
-            && !pendingCompanionPromptIDs.contains(activeCompanion.id)
+        return TeddyCompanionReadinessGate.permitsPrompt(
+            activeCompanion,
+            hasPendingPrompt: pendingCompanionPromptIDs.contains(activeCompanion.id))
     }
     var hasResumableConversation: Bool {
         !conversationHistory.isEmpty
@@ -610,11 +620,12 @@ final class VoiceAgentController {
             return
         }
         if isCompanionMode {
-            guard let companion = activeCompanion else {
+            guard let companion = revalidatedActiveCompanion() else {
                 errorMessage = "Crée ou sélectionne d’abord un doudou."
                 state = .failed
                 return
             }
+            cacheCompanionSnapshot(companion)
             guard companion.isCLIReady else {
                 errorMessage = "Ouvre d’abord une CLI dans ce terminal."
                 state = .failed
@@ -960,6 +971,7 @@ final class VoiceAgentController {
     /// Reconciles the lightweight Teddy history with the actual live doudous.
     /// The UUID of the terminal is also the UUID of its voice conversation, so
     /// switching either representation can never point at a different CLI.
+    /// This broad UI refresh consumes the cached router projection only.
     func refreshCompanionConversations(preferredSelection: UUID? = nil) {
         guard let companionRouter else { return }
         let snapshots = companionRouter.companionSnapshots()
@@ -1002,6 +1014,14 @@ final class VoiceAgentController {
         companions.first { $0.id == id }
     }
 
+    /// Reconciles only the selected lightweight snapshot. This is used when
+    /// leaving the inline terminal, where the foreground process may have
+    /// changed without any terminal lifecycle notification.
+    func refreshActiveCompanionReadiness() {
+        guard let snapshot = revalidatedActiveCompanion() else { return }
+        cacheCompanionSnapshot(snapshot)
+    }
+
     func toggleInlineTerminal() {
         if isInlineTerminalExpanded {
             collapseInlineTerminal()
@@ -1039,6 +1059,19 @@ final class VoiceAgentController {
         guard isInlineTerminalExpanded || inlineTerminalContent != nil else { return }
         isInlineTerminalExpanded = false
         inlineTerminalContent = nil
+    }
+
+    private func revalidatedActiveCompanion() -> TeddyCompanionSnapshot? {
+        TeddyCompanionReadinessGate.revalidatedSnapshot(activeCompanion) {
+            companionRouter?.freshCompanionSnapshot(for: $0)
+        }
+    }
+
+    private func cacheCompanionSnapshot(_ snapshot: TeddyCompanionSnapshot) {
+        guard let index = companions.firstIndex(where: { $0.id == snapshot.id }) else {
+            return
+        }
+        companions[index] = snapshot
     }
 
     func interruptActiveCompanion() {

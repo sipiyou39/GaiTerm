@@ -4,6 +4,13 @@ import Testing
 @testable import TeddyCLI
 
 struct GaiCompanionProviderClassifierTests {
+    @Test func companionCreationUsesOfficialProviderExecutables() {
+        #expect(GaiCompanionCreationCLI.terminal.launchCommand == nil)
+        #expect(GaiCompanionCreationCLI.codex.launchCommand == "codex")
+        #expect(GaiCompanionCreationCLI.claude.launchCommand == "claude")
+        #expect(GaiCompanionCreationCLI.grok.launchCommand == "grok")
+    }
+
     @Test func parsesBoundedKernProcargsPayload() {
         let arguments = ["node", "/Users/me/.npm-global/bin/codex", "--full-auto"]
         let payload = makeProcessArgumentsPayload(
@@ -37,6 +44,9 @@ struct GaiCompanionProviderClassifierTests {
             argv: ["node", "/Users/me/.npm-global/bin/codex"]) == .codex)
         #expect(GaiCompanionProviderClassifier.classify(
             argv: ["/opt/homebrew/bin/claude", "--resume"]) == .claude)
+        #expect(GaiCompanionProviderClassifier.classify(argv: ["grok"]) == .grok)
+        #expect(GaiCompanionProviderClassifier.classify(
+            argv: ["/Users/me/.grok/bin/xai-grok-pager"]) == .grok)
         #expect(GaiCompanionProviderClassifier.classify(argv: ["agy"]) == .agy)
         #expect(GaiCompanionProviderClassifier.classify(
             argv: ["/usr/local/bin/opencode"]) == .opencode)
@@ -48,9 +58,64 @@ struct GaiCompanionProviderClassifierTests {
         #expect(GaiCompanionProviderClassifier.classify(
             launchCommand: "npm exec @anthropic-ai/claude-code") == .claude)
         #expect(GaiCompanionProviderClassifier.classify(
+            launchCommand: "npx --yes @xai-official/grok") == .grok)
+        #expect(GaiCompanionProviderClassifier.classify(
             launchCommand: "pnpm dlx opencode-ai") == .opencode)
         #expect(GaiCompanionProviderClassifier.classify(
             launchCommand: "env NODE_NO_WARNINGS=1 codex --full-auto") == .codex)
+    }
+
+    @Test func distinguishesIdleCodexTUIStartupFromImmediateWork() {
+        let idleInvocations = [
+            ["codex"],
+            ["codex", "--model", "gpt-5.6-terra", "--yolo"],
+            ["codex", "--cd=/tmp", "--no-alt-screen"],
+            ["node", "/Users/me/.npm-global/bin/codex", "--full-auto"],
+            ["npx", "--yes", "@openai/codex"],
+            ["codex", "resume"],
+            ["codex", "resume", "session-id"],
+            ["codex", "resume", "--last"],
+            ["codex", "fork", "--all"],
+        ]
+        for arguments in idleInvocations {
+            #expect(GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+                provider: .codex,
+                argv: arguments))
+        }
+
+        let workingInvocations = [
+            ["codex", "corrige ce bug"],
+            ["codex", "--", "corrige ce bug"],
+            ["codex", "exec", "corrige ce bug"],
+            ["codex", "e", "corrige ce bug"],
+            ["codex", "review", "--uncommitted"],
+            ["codex", "resume", "session-id", "continue"],
+            ["codex", "resume", "--last", "continue"],
+            ["codex", "--unknown-startup-option"],
+        ]
+        for arguments in workingInvocations {
+            #expect(!GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+                provider: .codex,
+                argv: arguments))
+        }
+    }
+
+    @Test func idleLaunchProofIsProviderExactAndConservativeForOtherCLIs() {
+        #expect(GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+            provider: .claude,
+            argv: ["claude"]))
+        #expect(GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+            provider: .grok,
+            argv: ["grok"]))
+        #expect(!GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+            provider: .claude,
+            argv: ["claude", "--resume"]))
+        #expect(!GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+            provider: .grok,
+            argv: ["grok", "build this"]))
+        #expect(!GaiCompanionProviderClassifier.isProvenIdleInteractiveLaunch(
+            provider: .claude,
+            argv: ["codex"]))
     }
 
     @Test func argumentsTakePrecedenceOverWeakerSignals() {
@@ -67,6 +132,8 @@ struct GaiCompanionProviderClassifierTests {
             terminalTitle: "Codex — GaiTerm") == .codex)
         #expect(GaiCompanionProviderClassifier.classify(
             terminalTitle: "Claude Code: project") == .claude)
+        #expect(GaiCompanionProviderClassifier.classify(
+            terminalTitle: "Grok Build — project") == .grok)
         #expect(GaiCompanionProviderClassifier.classify(
             terminalTitle: "OpenCode") == .opencode)
         #expect(GaiCompanionProviderClassifier.classify(
@@ -114,20 +181,107 @@ struct GaiCompanionProviderClassifierTests {
 }
 
 struct GaiAgentHookInstallerTests {
-    @Test func codexTrustInstallationIsTextuallyIdempotent() {
-        let existing = "[model]\nname = \"gpt-5\"\n"
-        let installed = GaiAgentHookInstaller.codexTrustContentForTesting(existing)
-        let reinstalled = GaiAgentHookInstaller.codexTrustContentForTesting(installed)
-
-        #expect(reinstalled == installed)
-        #expect(installed.contains(existing.trimmingCharacters(in: .newlines)))
-        #expect(installed.components(separatedBy: "gaiterm-codex-agent-event-trust-v1 begin")
-            .count == 2)
-        #expect(installed.components(separatedBy: "gaiterm-codex-hook-trust begin")
-            .count == 2)
+    @Test func integrationRequiresEveryHookAndExplicitRepairRestoresPartialSets() throws {
+        try expectRepairOfPartialIntegration(
+            provider: .codex,
+            installed: GaiAgentHookInstaller.codexHooksConfigurationForTesting([:]),
+            removedCommandMarker: "gaiterm-codex-stop-notify",
+            repair: GaiAgentHookInstaller.codexHooksConfigurationForTesting)
+        try expectRepairOfPartialIntegration(
+            provider: .claude,
+            installed: GaiAgentHookInstaller.claudeHooksConfigurationForTesting([:]),
+            removedCommandMarker: "gaiterm-claude-stop-notify",
+            repair: GaiAgentHookInstaller.claudeHooksConfigurationForTesting)
+        try expectRepairOfPartialIntegration(
+            provider: .grok,
+            installed: GaiAgentHookInstaller.grokHooksConfigurationForTesting([:]),
+            removedCommandMarker: "gaiterm-agent-event-v1-grok-ready",
+            repair: GaiAgentHookInstaller.grokHooksConfigurationForTesting)
     }
 
-    @Test func claudeDebugAndReleaseHooksShareTheSupportedGlobalScope() throws {
+    @Test func codexHooksAreIdempotentAndNeverForgeInternalTrustState() throws {
+        let existing: [String: Any] = [
+            "description": "user hooks",
+            "hooks": [
+                "Stop": [[
+                    "hooks": [[
+                        "type": "command",
+                        "command": "user-stop-hook",
+                    ]],
+                ]],
+            ],
+        ]
+
+        let installed = try GaiAgentHookInstaller
+            .codexHooksConfigurationForTesting(existing)
+        let reinstalled = try GaiAgentHookInstaller
+            .codexHooksConfigurationForTesting(installed)
+
+        #expect(try canonicalJSON(installed) == canonicalJSON(reinstalled))
+        #expect(installed["description"] as? String == "user hooks")
+
+        let hooks = try #require(installed["hooks"] as? [String: Any])
+        let stopGroups = try #require(hooks["Stop"] as? [[String: Any]])
+        let stopCommands = hookCommands(in: stopGroups)
+        #expect(stopCommands.contains("user-stop-hook"))
+        #expect(stopCommands.filter {
+            $0.contains("gaiterm-agent-event-v1-codex-stop")
+        }.count == 1)
+        #expect(stopCommands.filter {
+            $0.contains("gaiterm-codex-stop-notify")
+        }.count == 1)
+
+        let serializedData = try canonicalJSON(installed)
+        let serialized = try #require(String(data: serializedData, encoding: .utf8))
+        #expect(!serialized.contains("trusted_hash"))
+        #expect(!serialized.contains("hooks.state"))
+    }
+
+    @Test func generatedProviderHookCommandsAreShellSafe() throws {
+        let configurations = try [
+            GaiAgentHookInstaller.codexHooksConfigurationForTesting([:]),
+            GaiAgentHookInstaller.claudeHooksConfigurationForTesting([:]),
+            GaiAgentHookInstaller.grokHooksConfigurationForTesting([:]),
+        ]
+
+        for configuration in configurations {
+            let hooks = try #require(configuration["hooks"] as? [String: Any])
+            let commands = hooks.values.flatMap { value in
+                hookCommands(in: value as? [[String: Any]] ?? [])
+            }
+            #expect(!commands.isEmpty)
+            for command in commands {
+                let result = try executeHookCommand(
+                    command,
+                    payload: #"{"session_id":"session-1","turn_id":"turn-1","promptId":"prompt-1","reason":"end_turn","last_assistant_message":"Terminé","lastAssistantMessage":"Terminé"}"#)
+                #expect(result.status == 0)
+            }
+        }
+    }
+
+    @Test func generatedProviderHooksUseOneSubsecondSocketAttempt() throws {
+        let configurations = try [
+            GaiAgentHookInstaller.codexHooksConfigurationForTesting([:]),
+            GaiAgentHookInstaller.claudeHooksConfigurationForTesting([:]),
+            GaiAgentHookInstaller.grokHooksConfigurationForTesting([:]),
+        ]
+
+        for configuration in configurations {
+            let hooks = try #require(configuration["hooks"] as? [String: Any])
+            let commands = hooks.values.flatMap { value in
+                hookCommands(in: value as? [[String: Any]] ?? [])
+            }.filter { $0.contains("gaiterm-agent-event-v1-") }
+            #expect(!commands.isEmpty)
+            for command in commands {
+                #expect(command.components(separatedBy: "/usr/bin/nc -U").count == 2)
+                #expect(command.contains("/bin/sleep 0.2"))
+                #expect(command.contains("/usr/bin/nc -U -w 1"))
+                #expect(!command.contains("/usr/bin/nc -U -w 2"))
+            }
+        }
+    }
+
+    @Test func claudeGlobalHooksPreserveUserConfigurationAndAreIdempotent() throws {
         let existing: [String: Any] = [
             "theme": "dark",
             "hooks": [
@@ -144,18 +298,15 @@ struct GaiAgentHookInstallerTests {
         #expect(
             GaiAgentHookInstaller.claudeGlobalSettingsFilenameForTesting
                 == "settings.json")
-        let debugInstalled = try GaiAgentHookInstaller
+        let installed = try GaiAgentHookInstaller
             .claudeHooksConfigurationForTesting(existing)
-        let releaseMaintained = try GaiAgentHookInstaller
-            .claudeLegacyHooksConfigurationForTesting(debugInstalled)
-        let debugReinstalled = try GaiAgentHookInstaller
-            .claudeHooksConfigurationForTesting(releaseMaintained)
+        let reinstalled = try GaiAgentHookInstaller
+            .claudeHooksConfigurationForTesting(installed)
 
-        #expect(try canonicalJSON(debugInstalled) == canonicalJSON(releaseMaintained))
-        #expect(try canonicalJSON(debugInstalled) == canonicalJSON(debugReinstalled))
-        #expect(debugInstalled["theme"] as? String == "dark")
+        #expect(try canonicalJSON(installed) == canonicalJSON(reinstalled))
+        #expect(installed["theme"] as? String == "dark")
 
-        let hooks = try #require(debugInstalled["hooks"] as? [String: Any])
+        let hooks = try #require(installed["hooks"] as? [String: Any])
         let stopGroups = try #require(hooks["Stop"] as? [[String: Any]])
         let stopCommands = stopGroups.flatMap { group in
             (group["hooks"] as? [[String: Any]] ?? []).compactMap {
@@ -167,6 +318,10 @@ struct GaiAgentHookInstallerTests {
             .count == 1)
         #expect(stopCommands.filter { $0.contains("gaiterm-claude-stop-notify") }
             .count == 1)
+        #expect(stopCommands.contains { command in
+            command.contains("gaiterm-agent-event-v1-claude-stop")
+                && command.contains("last_assistant_message")
+        })
 
         let startGroups = try #require(hooks["UserPromptSubmit"] as? [[String: Any]])
         let startCommands = startGroups.flatMap { group in
@@ -280,23 +435,82 @@ struct GaiAgentHookInstallerTests {
         #expect(notIdleGuard.lowerBound < socketTransport.lowerBound)
         #expect(notIdleGuard.lowerBound < fallbackTransport.lowerBound)
 
-        let invocationResult = try executeAgyHook(
+        let invocationResult = try executeHookCommand(
             invocationCommand,
             payload: #"{"conversationId":"conversation-1"}"#)
         #expect(invocationResult.status == 0)
         #expect(invocationResult.stdout == "{}\n")
 
-        let toolResult = try executeAgyHook(
+        let toolResult = try executeHookCommand(
             toolCommand,
             payload: #"{"conversationId":"conversation-1","stepIdx":1}"#)
         #expect(toolResult.status == 0)
         #expect(toolResult.stdout == "{}\n")
 
-        let notIdleResult = try executeAgyHook(
+        let notIdleResult = try executeHookCommand(
             stopCommand,
             payload: #"{"conversationId":"conversation-1","terminationReason":"model_stop","error":"","fullyIdle":false}"#)
         #expect(notIdleResult.status == 0)
         #expect(notIdleResult.stdout == #"{"decision":""}"# + "\n")
+    }
+
+    @Test func grokBuildInstallerUsesAlwaysTrustedGlobalHookSchema() throws {
+        let existing: [String: Any] = [
+            "metadata": "preserved",
+            "hooks": [
+                "Stop": [[
+                    "hooks": [[
+                        "type": "command",
+                        "command": "user-grok-stop-hook",
+                    ]],
+                ]],
+            ],
+        ]
+
+        let installed = try GaiAgentHookInstaller
+            .grokHooksConfigurationForTesting(existing)
+        let reinstalled = try GaiAgentHookInstaller
+            .grokHooksConfigurationForTesting(installed)
+
+        #expect(try canonicalJSON(installed) == canonicalJSON(reinstalled))
+        #expect(installed["metadata"] as? String == "preserved")
+
+        let hooks = try #require(installed["hooks"] as? [String: Any])
+        let stopGroups = try #require(hooks["Stop"] as? [[String: Any]])
+        #expect(stopGroups.count == 2)
+        #expect(stopGroups[1]["matcher"] == nil)
+        let stopHandlers = try #require(stopGroups[1]["hooks"] as? [[String: Any]])
+        let stop = try #require(stopHandlers.first)
+        #expect(stop["timeout"] as? Int == 5)
+        let stopCommand = try #require(stop["command"] as? String)
+        #expect(stopCommand.contains("gaiterm-agent-event-v1-grok-stop"))
+        #expect(stopCommand.contains("lastAssistantMessage"))
+        #expect(stopCommand.contains("promptId"))
+        #expect(stopCommand.contains("sessionId"))
+        #expect(stopCommand.contains("subagentType"))
+        #expect(stopCommand.contains(#"[ "$reason" != "end_turn" ]"#))
+
+        let cancelledGroups = try #require(hooks["StopCancelled"] as? [[String: Any]])
+        let cancelledHandlers = try #require(
+            cancelledGroups.first?["hooks"] as? [[String: Any]])
+        let cancelledCommand = try #require(
+            cancelledHandlers.first?["command"] as? String)
+        #expect(cancelledCommand.contains("gaiterm-agent-event-v1-grok-cancelled"))
+
+        let notificationGroups = try #require(
+            hooks["Notification"] as? [[String: Any]])
+        #expect(notificationGroups.count == 2)
+        let notificationPairs = notificationGroups.compactMap { group -> (String, String)? in
+            guard let matcher = group["matcher"] as? String,
+                  let handlers = group["hooks"] as? [[String: Any]],
+                  let command = handlers.first?["command"] as? String else { return nil }
+            return (matcher, command)
+        }
+        let notifications = Dictionary(uniqueKeysWithValues: notificationPairs)
+        #expect(notifications["permission_prompt"]?.contains(
+            "gaiterm-agent-event-v1-grok-awaitingApproval") == true)
+        #expect(notifications["idle_prompt"]?.contains(
+            "gaiterm-agent-event-v1-grok-stop") == true)
     }
 
     @Test func openCodePluginKeepsJavaScriptNewlineEscapesLiteral() {
@@ -325,7 +539,69 @@ struct GaiAgentHookInstallerTests {
             options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
-    private func executeAgyHook(
+    private func expectRepairOfPartialIntegration(
+        provider: GaiAgentHookInstaller.SupportedProvider,
+        installed: [String: Any],
+        removedCommandMarker: String,
+        repair: ([String: Any]) throws -> [String: Any]
+    ) throws {
+        #expect(GaiAgentHookInstaller.integrationIsCompleteForTesting(
+            provider: provider,
+            configuration: installed))
+
+        let partial = configuration(
+            installed,
+            removingCommandContaining: removedCommandMarker)
+        #expect(!GaiAgentHookInstaller.integrationIsCompleteForTesting(
+            provider: provider,
+            configuration: partial))
+
+        let repaired = try repair(partial)
+        #expect(GaiAgentHookInstaller.integrationIsCompleteForTesting(
+            provider: provider,
+            configuration: repaired))
+    }
+
+    private func configuration(
+        _ configuration: [String: Any],
+        removingCommandContaining marker: String
+    ) -> [String: Any] {
+        var updated = configuration
+        guard var hooks = updated["hooks"] as? [String: Any] else { return updated }
+
+        for (eventName, value) in hooks {
+            guard let groups = value as? [[String: Any]] else { continue }
+            let retained = groups.compactMap { group -> [String: Any]? in
+                var updatedGroup = group
+                guard var handlers = group["hooks"] as? [[String: Any]] else {
+                    return updatedGroup
+                }
+                handlers.removeAll { handler in
+                    (handler["command"] as? String)?.contains(marker) == true
+                }
+                guard !handlers.isEmpty else { return nil }
+                updatedGroup["hooks"] = handlers
+                return updatedGroup
+            }
+            if retained.isEmpty {
+                hooks.removeValue(forKey: eventName)
+            } else {
+                hooks[eventName] = retained
+            }
+        }
+        updated["hooks"] = hooks
+        return updated
+    }
+
+    private func hookCommands(in groups: [[String: Any]]) -> [String] {
+        groups.flatMap { group in
+            (group["hooks"] as? [[String: Any]] ?? []).compactMap {
+                $0["command"] as? String
+            }
+        }
+    }
+
+    private func executeHookCommand(
         _ command: String,
         payload: String
     ) throws -> (status: Int32, stdout: String) {
@@ -353,7 +629,7 @@ struct GaiAgentHookInstallerTests {
         let outputData = output.fileHandleForReading.readDataToEndOfFile()
         return (
             status: process.terminationStatus,
-            stdout: String(decoding: outputData, as: UTF8.self))
+            stdout: String(data: outputData, encoding: .utf8) ?? "")
     }
 }
 #endif

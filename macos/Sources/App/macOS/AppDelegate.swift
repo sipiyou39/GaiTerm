@@ -101,8 +101,15 @@ class AppDelegate: NSObject,
     /// macOS configuration. Debug keeps a separate bundle identity so it can
     /// coexist safely with the installed release.
     lazy var gaiWorkspaceManager = GaiCompanionManager(ghostty: ghostty)
+    private lazy var teddyApplicationWindowController = MainActor.assumeIsolated {
+        TeddyApplicationWindowController(manager: gaiWorkspaceManager)
+    }
     private lazy var teddyVoiceWindowController = MainActor.assumeIsolated {
-        TeddyVoiceWindowController(manager: gaiWorkspaceManager)
+        TeddyVoiceWindowController(
+            manager: gaiWorkspaceManager,
+            onOpenApplicationSettings: { [weak self] in
+                self?.teddyApplicationWindowController.showSettings()
+            })
     }
     private var gaiAgentEventSocketServer: GaiCompanionEventSocketServer?
     private lazy var gaiAgentVisibilityShortcutMonitor =
@@ -166,6 +173,10 @@ class AppDelegate: NSObject,
         }
         #endif
         UserDefaults.ghostty.register(defaults: [
+            // Teddy Peek is the default desktop interaction. It remains a
+            // preference so the former click-only behavior is one toggle away.
+            GaiPreferenceKey.teddyPeekEnabled: true,
+
             // Disable the automatic full screen menu item because we handle
             // it manually.
             "NSFullScreenMenuItemEverywhere": false,
@@ -202,11 +213,15 @@ class AppDelegate: NSObject,
 
         // Start the ordered local transport before creating any PTYs so every
         // hosted CLI inherits its private socket path from the first process.
-        let eventServer = GaiCompanionEventSocketServer { [weak self] frame in
-            self?.handleGaiTermURL(
-                frame.url,
-                responseBody: frame.responseBody) ?? false
-        }
+        let eventServer = GaiCompanionEventSocketServer(
+            admission: { [weak self] frame in
+                self?.canAdmitGaiAgentEvent(frame) ?? false
+            },
+            handler: { [weak self] frame in
+                self?.handleGaiTermURL(
+                    frame.url,
+                    responseBody: frame.responseBody) ?? false
+            })
         do {
             _ = try eventServer.start()
             gaiAgentEventSocketServer = eventServer
@@ -217,13 +232,13 @@ class AppDelegate: NSObject,
                 "ordered agent transport unavailable: \(String(describing: error), privacy: .public)")
         }
 
-        // A provider reads its hook/plugin configuration when its process is
-        // created. Finish the bounded local installation before GaiTerm can
-        // create the first agent PTY; otherwise that first agent session could
-        // miss every lifecycle signal until it is restarted.
-        GaiAgentHookInstaller.installBeforeLaunchingCompanionSurfaces()
+        // Provider hooks are optional precision adapters. They are installed
+        // only after an explicit action in Settings > CLI so launching Teddy
+        // CLI never rewrites a user's Codex, Claude or Grok configuration.
+        // Foreground-process detection remains the baseline source of truth.
         gaiWorkspaceManager.start()
-        teddyVoiceWindowController.show(activate: true)
+        teddyVoiceWindowController.start()
+        teddyApplicationWindowController.show(activate: true)
 
         // Start our update checker.
         updateController.startUpdater()
@@ -436,7 +451,7 @@ class AppDelegate: NSObject,
         // Teddy CLI's home is the agent library, not a classic terminal
         // window. Reopening it preserves the independent Hide Agents choice.
         gaiWorkspaceManager.reveal()
-        teddyVoiceWindowController.show(activate: true)
+        teddyApplicationWindowController.show(activate: true)
         reloadDockMenu()
         return false
     }
@@ -559,6 +574,23 @@ class AppDelegate: NSObject,
             title: value("title", maxLength: 80),
             body: value("body", maxLength: 240))
         return true
+    }
+
+    /// Performs only the capability check required before the local socket may
+    /// acknowledge ownership of a frame. Event reduction remains in
+    /// `handleGaiTermURL`, after the hook process has been released.
+    private func canAdmitGaiAgentEvent(
+        _ frame: GaiCompanionEventSocketServer.Frame
+    ) -> Bool {
+        guard let envelope = try? GaiCompanionEventEnvelope(
+            url: frame.url,
+            responseBody: frame.responseBody),
+              let runtime = gaiWorkspaceManager.runtimes.first(where: {
+                  $0.id == envelope.event.surfaceID
+              }) else {
+            return false
+        }
+        return envelope.token == runtime.eventToken
     }
 
     /// Setup signal handlers
@@ -920,7 +952,7 @@ class AppDelegate: NSObject,
     // MARK: - IB Actions
 
     @IBAction func openGaiSettings(_ sender: Any?) {
-        GaiSettingsWindowController.shared.show()
+        teddyApplicationWindowController.showSettings()
     }
 
     @IBAction func openConfig(_ sender: Any?) {
@@ -981,7 +1013,7 @@ class AppDelegate: NSObject,
 
     @IBAction func showGaiTerm(_ sender: Any) {
         gaiWorkspaceManager.reveal()
-        teddyVoiceWindowController.show(activate: true)
+        teddyApplicationWindowController.show(activate: true)
         reloadDockMenu()
     }
 

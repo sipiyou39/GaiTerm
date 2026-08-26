@@ -73,7 +73,10 @@ enum GaiCompanionProcessArguments {
                 cursor += 1
             }
             guard cursor < end else { return [] }
-            result.append(String(decoding: bytes[start..<cursor], as: UTF8.self))
+            guard let argument = String(
+                bytes: bytes[start..<cursor],
+                encoding: .utf8) else { return [] }
+            result.append(argument)
             cursor += 1
         }
         return result
@@ -91,6 +94,11 @@ enum GaiCompanionProcessArguments {
 /// well-known product name followed by a title separator. Ambiguous text
 /// deliberately returns `nil` instead of guessing.
 enum GaiCompanionProviderClassifier {
+    private struct ProviderInvocation {
+        let provider: GaiCompanionProvider
+        let arguments: [String]
+    }
+
     static func classify(
         launchCommand: String? = nil,
         terminalTitle: String? = nil,
@@ -106,12 +114,46 @@ enum GaiCompanionProviderClassifier {
         return classify(title: terminalTitle)
     }
 
+    /// Returns true only when foreground argv proves that a provider has
+    /// opened an interactive UI without starting a prompt. This intentionally
+    /// rejects ambiguous invocations: incorrectly keeping a real task active
+    /// is recoverable through its Stop hook, while declaring that task idle
+    /// would let Teddy submit a second prompt into live work.
+    static func isProvenIdleInteractiveLaunch(
+        provider: GaiCompanionProvider,
+        argv: [String]
+    ) -> Bool {
+        guard provider != .terminal,
+              let invocation = providerInvocation(arguments: argv),
+              invocation.provider == provider else { return false }
+
+        switch provider {
+        case .codex:
+            return codexLaunchesIdleInteractiveSession(
+                arguments: invocation.arguments)
+        case .claude, .grok, .agy, .opencode:
+            // Their bare executables open an interactive session. Until their
+            // full flag grammars are modeled, any argument remains ambiguous.
+            return invocation.arguments.isEmpty
+        default:
+            return false
+        }
+    }
+
     private static func classify(arguments: [String]) -> GaiCompanionProvider? {
-        let arguments = arguments.filter { !$0.isEmpty }
+        providerInvocation(arguments: arguments)?.provider
+    }
+
+    private static func providerInvocation(
+        arguments rawArguments: [String]
+    ) -> ProviderInvocation? {
+        let arguments = rawArguments.filter { !$0.isEmpty }
         guard let first = arguments.first else { return nil }
 
         if let provider = provider(forExecutable: first) {
-            return provider
+            return ProviderInvocation(
+                provider: provider,
+                arguments: Array(arguments.dropFirst()))
         }
 
         let executable = executableName(first)
@@ -120,51 +162,217 @@ enum GaiCompanionProviderClassifier {
             let remaining = Array(arguments.dropFirst().drop {
                 $0.hasPrefix("-") || isEnvironmentAssignment($0)
             })
-            return classify(arguments: remaining)
+            return providerInvocation(arguments: remaining)
 
         case "node", "nodejs", "bun", "deno":
-            guard let script = arguments.dropFirst().first(where: { !$0.hasPrefix("-") }) else {
+            guard let scriptIndex = arguments.indices.dropFirst().first(where: {
+                !arguments[$0].hasPrefix("-")
+            }) else {
                 return nil
             }
-            return provider(forExecutable: script) ?? provider(forPackage: script)
+            let script = arguments[scriptIndex]
+            guard let provider = provider(forExecutable: script)
+                    ?? provider(forPackage: script) else { return nil }
+            return ProviderInvocation(
+                provider: provider,
+                arguments: Array(arguments.dropFirst(scriptIndex + 1)))
 
         case "npx", "bunx":
-            guard let package = arguments.dropFirst().first(where: { !$0.hasPrefix("-") }) else {
+            guard let packageIndex = arguments.indices.dropFirst().first(where: {
+                !arguments[$0].hasPrefix("-")
+            }) else {
                 return nil
             }
-            return provider(forPackage: package) ?? provider(forExecutable: package)
+            let package = arguments[packageIndex]
+            guard let provider = provider(forPackage: package)
+                    ?? provider(forExecutable: package) else { return nil }
+            return ProviderInvocation(
+                provider: provider,
+                arguments: Array(arguments.dropFirst(packageIndex + 1)))
 
         case "pnpm":
-            return classifyPackageRunner(arguments: arguments, subcommands: ["dlx", "exec"])
+            return packageRunnerInvocation(
+                arguments: arguments,
+                subcommands: ["dlx", "exec"])
 
         case "npm":
-            return classifyPackageRunner(arguments: arguments, subcommands: ["exec", "x"])
+            return packageRunnerInvocation(
+                arguments: arguments,
+                subcommands: ["exec", "x"])
 
         case "yarn":
-            return classifyPackageRunner(arguments: arguments, subcommands: ["dlx", "exec"])
+            return packageRunnerInvocation(
+                arguments: arguments,
+                subcommands: ["dlx", "exec"])
 
         default:
             return nil
         }
     }
 
-    private static func classifyPackageRunner(
+    private static func packageRunnerInvocation(
         arguments: [String],
         subcommands: Set<String>
-    ) -> GaiCompanionProvider? {
-        let remainder = Array(arguments.dropFirst())
-        guard let subcommandIndex = remainder.firstIndex(where: {
-            subcommands.contains($0.lowercased())
+    ) -> ProviderInvocation? {
+        guard let subcommandIndex = arguments.indices.dropFirst().first(where: {
+            subcommands.contains(arguments[$0].lowercased())
         }) else {
             return nil
         }
-        guard let package = remainder.dropFirst(subcommandIndex + 1).first(where: {
-            !$0.hasPrefix("-")
+        guard let packageIndex = arguments.indices.first(where: {
+            $0 > subcommandIndex && !arguments[$0].hasPrefix("-")
         }) else {
             return nil
         }
-        return provider(forPackage: package) ?? provider(forExecutable: package)
+        let package = arguments[packageIndex]
+        guard let provider = provider(forPackage: package)
+                ?? provider(forExecutable: package) else { return nil }
+        return ProviderInvocation(
+            provider: provider,
+            arguments: Array(arguments.dropFirst(packageIndex + 1)))
     }
+
+    /// Codex documents `PROMPT` as optional for the base command: without it
+    /// the TUI is merely ready, while `exec` and `review` are non-interactive
+    /// work. `resume` and `fork` also open an interactive UI and may name one
+    /// session, so those forms are idle unless extra prompt-like text remains.
+    private static func codexLaunchesIdleInteractiveSession(
+        arguments: [String]
+    ) -> Bool {
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--" {
+                return index + 1 == arguments.count
+            }
+            if argument.hasPrefix("-") {
+                guard consumeCodexOption(arguments, index: &index) else {
+                    return false
+                }
+                continue
+            }
+
+            switch argument.lowercased() {
+            case "resume", "fork":
+                return codexInteractiveSubcommandIsIdle(
+                    arguments: Array(arguments.dropFirst(index + 1)))
+            default:
+                // A base-command positional is either PROMPT or a command such
+                // as exec/review; both start work rather than an idle TUI.
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func codexInteractiveSubcommandIsIdle(
+        arguments: [String]
+    ) -> Bool {
+        var index = 0
+        var selectsLastSession = false
+        var positionalCount = 0
+
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--" {
+                positionalCount += arguments.count - index - 1
+                break
+            }
+            if argument == "--all" || argument == "--include-non-interactive" {
+                index += 1
+                continue
+            }
+            if argument == "--last" {
+                selectsLastSession = true
+                index += 1
+                continue
+            }
+            if argument.hasPrefix("-") {
+                guard consumeCodexOption(arguments, index: &index) else {
+                    return false
+                }
+                continue
+            }
+            positionalCount += 1
+            index += 1
+        }
+
+        // With --last, any positional is prompt-like. Otherwise one
+        // positional may be the documented SESSION_ID/session name.
+        return selectsLastSession ? positionalCount == 0 : positionalCount <= 1
+    }
+
+    private static func consumeCodexOption(
+        _ arguments: [String],
+        index: inout Int
+    ) -> Bool {
+        let argument = arguments[index]
+        let optionName = argument.split(separator: "=", maxSplits: 1)
+            .first.map(String.init) ?? argument
+
+        if codexBooleanOptions.contains(optionName) {
+            index += 1
+            return true
+        }
+        if codexValueOptions.contains(optionName) {
+            if argument.contains("=") {
+                index += 1
+                return true
+            }
+            guard index + 1 < arguments.count else { return false }
+            index += 2
+            return true
+        }
+        if codexCompactValueOptionPrefixes.contains(where: {
+            argument.hasPrefix($0) && argument.count > $0.count
+        }) {
+            index += 1
+            return true
+        }
+        return false
+    }
+
+    private static let codexBooleanOptions: Set<String> = [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--full-auto",
+        "--help",
+        "--no-alt-screen",
+        "--oss",
+        "--search",
+        "--strict-config",
+        "--version",
+        "--yolo",
+        "-h",
+        "-V",
+    ]
+
+    private static let codexValueOptions: Set<String> = [
+        "--add-dir",
+        "--ask-for-approval",
+        "--cd",
+        "--config",
+        "--disable",
+        "--enable",
+        "--image",
+        "--local-provider",
+        "--model",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "-C",
+        "-a",
+        "-c",
+        "-i",
+        "-m",
+        "-p",
+        "-s",
+    ]
+
+    private static let codexCompactValueOptionPrefixes = [
+        "-C", "-a", "-c", "-i", "-m", "-p", "-s",
+    ]
 
     private static func provider(forExecutable value: String) -> GaiCompanionProvider? {
         switch executableName(value) {
@@ -172,6 +380,8 @@ enum GaiCompanionProviderClassifier {
             return GaiCompanionProvider.codex
         case "claude", "claude-code":
             return GaiCompanionProvider.claude
+        case "grok", "xai-grok-pager":
+            return GaiCompanionProvider.grok
         case "agy":
             return GaiCompanionProvider.agy
         case "opencode":
@@ -188,6 +398,8 @@ enum GaiCompanionProviderClassifier {
             return GaiCompanionProvider.codex
         case "@anthropic-ai/claude-code":
             return GaiCompanionProvider.claude
+        case "@xai-official/grok":
+            return GaiCompanionProvider.grok
         case "opencode-ai", "@sst/opencode":
             return GaiCompanionProvider.opencode
         default:
@@ -200,8 +412,10 @@ enum GaiCompanionProviderClassifier {
         let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let candidates: [(String, GaiCompanionProvider)] = [
             ("claude code", .claude),
+            ("grok build", .grok),
             ("opencode", .opencode),
             ("codex", .codex),
+            ("grok", .grok),
             ("agy", .agy),
         ]
 

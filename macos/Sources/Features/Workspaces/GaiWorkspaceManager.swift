@@ -1,7 +1,6 @@
 #if os(macOS)
 import AppKit
 import Combine
-import CryptoKit
 import Darwin
 import GhosttyKit
 import SwiftUI
@@ -2103,30 +2102,71 @@ private struct GaiStageScreenTabProxyView: View {
 /// Company. Typed events use the identity inherited from each terminal, so the
 /// installed Release and a Debug build can coexist without cross-talk.
 enum GaiAgentHookInstaller {
+    enum SupportedProvider: String, CaseIterable, Identifiable, Sendable {
+        case codex
+        case claude
+        case grok
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .codex: "Codex"
+            case .claude: "Claude Code"
+            case .grok: "Grok Build"
+            }
+        }
+
+        var executableName: String {
+            switch self {
+            case .codex: "codex"
+            case .claude: "claude"
+            case .grok: "grok"
+            }
+        }
+
+        var trustDetail: String {
+            switch self {
+            case .codex:
+                "Codex contrôle l’empreinte exacte des hooks. Si elle change, valide-la une fois dans /hooks."
+            case .claude:
+                "Configuration utilisateur globale, sans modification des projets."
+            case .grok:
+                "Hook global ~/.grok/hooks, approuvé automatiquement par Grok Build."
+            }
+        }
+    }
+
+    struct IntegrationStatus: Equatable, Sendable {
+        enum State: Equatable, Sendable {
+            case ready
+            case missing
+            case invalid
+        }
+
+        let state: State
+        let configurationPath: String
+        let detail: String
+    }
+
     private static let codexHookMarker = "gaiterm-codex-stop-notify"
     private static let claudeHookMarker = "gaiterm-claude-stop-notify"
+    private static let grokHookFilename = "teddy-cli-agent-events.json"
     private static let agyHookMarker = "gaiterm-agy-stop-notify"
     private static let agentEventHookMarker = "gaiterm-agent-event-v1"
     private static let agyHookGroupName = "gaiterm-agent-lifecycle-v1"
 
-    // Older GaiTerm builds may have written this feature block. Keep its marker
-    // constants for compatibility, but never mutate the user's TOML features.
-    private static let codexFeatureBegin = "# gaiterm-codex-hooks-feature begin"
-    private static let codexFeatureEnd = "# gaiterm-codex-hooks-feature end"
-    private static let codexTrustBegin = "# gaiterm-codex-hook-trust begin"
-    private static let codexTrustEnd = "# gaiterm-codex-hook-trust end"
-    private static let codexTypedTrustBegin = "# gaiterm-codex-agent-event-trust-v1 begin"
-    private static let codexTypedTrustEnd = "# gaiterm-codex-agent-event-trust-v1 end"
-
     private struct HookSpec: Sendable {
         let eventName: String
         let eventLabel: String
+        let matcher: String?
         let command: String
         let timeout: Int
 
         init(
             eventName: String,
             eventLabel: String? = nil,
+            matcher: String? = nil,
             provider: String,
             kind: String,
             includesLastAssistantMessage: Bool = false,
@@ -2134,6 +2174,7 @@ enum GaiAgentHookInstaller {
         ) {
             self.eventName = eventName
             self.eventLabel = eventLabel ?? eventName
+            self.matcher = matcher
             self.command = GaiAgentHookInstaller.agentEventCommand(
                 provider: provider,
                 kind: kind,
@@ -2148,17 +2189,13 @@ enum GaiAgentHookInstaller {
         ) {
             self.eventName = "Stop"
             self.eventLabel = "stop"
+            self.matcher = nil
             self.command = GaiAgentHookInstaller.legacyStopCommand(
                 provider: provider,
                 title: title,
                 marker: marker)
             self.timeout = 5
         }
-    }
-
-    private struct CodexTrustEntry: Sendable {
-        let key: String
-        let trustedHash: String
     }
 
     private static let codexHookSpecs = [
@@ -2205,7 +2242,11 @@ enum GaiAgentHookInstaller {
         HookSpec(eventName: "UserPromptSubmit", provider: "claude", kind: "started"),
         HookSpec(eventName: "PermissionRequest", provider: "claude", kind: "awaitingApproval"),
         HookSpec(eventName: "PostToolUse", provider: "claude", kind: "resumed"),
-        HookSpec(eventName: "Stop", provider: "claude", kind: "stop"),
+        HookSpec(
+            eventName: "Stop",
+            provider: "claude",
+            kind: "stop",
+            includesLastAssistantMessage: true),
         HookSpec(eventName: "StopFailure", provider: "claude", kind: "failed"),
         HookSpec(eventName: "SessionEnd", provider: "claude", kind: "cancelled"),
     ]
@@ -2213,6 +2254,34 @@ enum GaiAgentHookInstaller {
         legacyStopProvider: "claude",
         title: "Claude%20Code",
         marker: claudeHookMarker)
+
+    /// Grok Build's global hook directory is an official, always-trusted user
+    /// scope. `promptId` is minted once per turn and `lastAssistantMessage` is
+    /// delivered on a genuine Stop, so this adapter never parses scrollback to
+    /// infer a completed answer.
+    private static let grokHookSpecs = [
+        HookSpec(eventName: "SessionStart", provider: "grok", kind: "ready"),
+        HookSpec(eventName: "UserPromptSubmit", provider: "grok", kind: "started"),
+        HookSpec(eventName: "PostToolUse", provider: "grok", kind: "resumed"),
+        HookSpec(
+            eventName: "Notification",
+            matcher: "permission_prompt",
+            provider: "grok",
+            kind: "awaitingApproval"),
+        HookSpec(
+            eventName: "Notification",
+            matcher: "idle_prompt",
+            provider: "grok",
+            kind: "stop"),
+        HookSpec(
+            eventName: "Stop",
+            provider: "grok",
+            kind: "stop",
+            includesLastAssistantMessage: true),
+        HookSpec(eventName: "StopFailure", provider: "grok", kind: "failed"),
+        HookSpec(eventName: "StopCancelled", provider: "grok", kind: "cancelled"),
+        HookSpec(eventName: "SessionEnd", provider: "grok", kind: "cancelled"),
+    ]
 
     /// Filtering occurs before both typed and legacy transport decisions so a
     /// child agent can never change the desktop state of its parent terminal.
@@ -2229,10 +2298,42 @@ enum GaiAgentHookInstaller {
                 "if [ -n \"$agent_id\" ] || [ \"$hook_event\" = \"SubagentStop\" ]; " +
                 "then exit 0; fi; "
         }
+        if provider == "grok" {
+            return agentID +
+                "subagent_type=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+                "/usr/bin/plutil -extract subagentType raw -o - -- - 2>/dev/null || true); " +
+                "if [ -n \"$agent_id\" ] || [ -n \"$subagent_type\" ]; then exit 0; fi; "
+        }
         return agentID +
             "agent_type=$(/usr/bin/printf \"%s\" \"$payload\" | " +
             "/usr/bin/plutil -extract agent_type raw -o - -- - || true); " +
             "if [ -n \"$agent_id\" ] || [ -n \"$agent_type\" ]; then exit 0; fi; "
+    }
+
+    /// `nc -w` only accepts whole seconds on macOS. A provider waits for its
+    /// command hook to exit, so relying on that flag alone can freeze the CLI
+    /// for seconds when the app is stopping or its main actor is saturated.
+    /// Keep one local attempt, preserve the server's authenticated ACK, and
+    /// bound only the client's wait with a short watchdog.
+    private static func boundedSocketExchange(
+        writesResponseBody: Bool
+    ) -> String {
+        let payloadWriter = writesResponseBody
+            ? "{ /usr/bin/printf \"%s\\n\" \"$url$response_query\"; "
+                + "if [ -n \"$response_bytes\" ]; then "
+                + "/usr/bin/printf \"%s\" \"$response\"; fi; }"
+            : "/usr/bin/printf \"%s\\n\" \"$url\""
+        return
+            "gaiterm_socket_exchange() { " +
+            payloadWriter + " | /usr/bin/nc -U -w 1 \"$socket\" & " +
+            "gaiterm_nc_pid=$!; " +
+            "( /bin/sleep 0.2; /bin/kill -TERM \"$gaiterm_nc_pid\" " +
+            "2>/dev/null || true ) >/dev/null 2>&1 & " +
+            "gaiterm_watchdog_pid=$!; " +
+            "wait \"$gaiterm_nc_pid\" 2>/dev/null || true; " +
+            "/bin/kill -TERM \"$gaiterm_watchdog_pid\" 2>/dev/null || true; " +
+            "wait \"$gaiterm_watchdog_pid\" 2>/dev/null || true; " +
+            "}; reply=$(gaiterm_socket_exchange); "
     }
 
     /// This command is deliberately self-contained: hook processes inherit the
@@ -2252,6 +2353,9 @@ enum GaiAgentHookInstaller {
             ? "response=$(/usr/bin/printf \"%s\" \"$payload\" | "
                 + "/usr/bin/plutil -extract last_assistant_message raw -o - -- - "
                 + "2>/dev/null || true); "
+                + "if [ -z \"$response\" ]; then response=$(/usr/bin/printf \"%s\" \"$payload\" | "
+                + "/usr/bin/plutil -extract lastAssistantMessage raw -o - -- - "
+                + "2>/dev/null || true); fi; "
                 + "response_query=; response_bytes=; if [ -n \"$response\" ]; then "
                 + "response=$(/usr/bin/printf \"%.65536s\" \"$response\"); "
                 + "response_bytes=$(/usr/bin/printf \"%s\" \"$response\" | "
@@ -2260,11 +2364,17 @@ enum GaiAgentHookInstaller {
                 + "response=; response_bytes= ;; "
                 + "*) response_query=\"&response_bytes=$response_bytes\" ;; esac; fi; "
             : "response=; response_query=; response_bytes=; "
+        let eventGuard = provider == "grok" && kind == "stop"
+            ? "reason=$(/usr/bin/printf \"%s\" \"$payload\" | "
+                + "/usr/bin/plutil -extract reason raw -o - -- - 2>/dev/null || true); "
+                + "if [ -n \"$reason\" ] && [ \"$reason\" != \"end_turn\" ]; then exit 0; fi; "
+            : ""
         return
             "/bin/sh -c ': \(agentEventHookMarker)-\(provider)-\(kind); " +
             outputSetup +
             "payload=$(/bin/cat || true); " +
             rootAgentPayloadGuard(provider: provider) +
+            eventGuard +
             responseExtraction +
             "surface=\"${GAITERM_SURFACE_ID:-}\"; token=\"${GAITERM_EVENT_TOKEN:-}\"; " +
             "case \"$surface\" in \"\"|*[!A-Za-z0-9._:-]*) exit 0 ;; esac; " +
@@ -2276,11 +2386,16 @@ enum GaiAgentHookInstaller {
             "/usr/bin/plutil -extract prompt_id raw -o - -- - || true); " +
             "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
             "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract promptId raw -o - -- - 2>/dev/null || true); " +
+            "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
+            "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
             "/usr/bin/plutil -extract user_prompt_id raw -o - -- - || true); " +
             "if [ -n \"$turn\" ]; then turn=\"turn:$turn\"; else " +
             "turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
             "/usr/bin/plutil -extract session_id raw -o - -- - || true); " +
-            "if [ -n \"$turn\" ]; then turn=\"session:$turn\"; fi; fi; fi; fi; " +
+            "if [ -z \"$turn\" ]; then turn=$(/usr/bin/printf \"%s\" \"$payload\" | " +
+            "/usr/bin/plutil -extract sessionId raw -o - -- - 2>/dev/null || true); fi; " +
+            "if [ -n \"$turn\" ]; then turn=\"session:$turn\"; fi; fi; fi; fi; fi; " +
             "case \"$turn\" in *[!A-Za-z0-9._:-]*) turn= ;; esac; " +
             "event=$(/usr/bin/uuidgen | /usr/bin/tr \"[:upper:]\" \"[:lower:]\"); " +
             "scheme=\"${GAITERM_NOTIFY_URL_SCHEME:-teddycli}\"; " +
@@ -2291,16 +2406,7 @@ enum GaiAgentHookInstaller {
             "if [ -n \"$turn\" ]; then url=\"$url&turn=$turn\"; fi; " +
             "socket=\"${GAITERM_EVENT_SOCKET:-}\"; " +
             "case \"$socket\" in /*) " +
-            "reply=$({ /usr/bin/printf \"%s\\n\" \"$url$response_query\"; " +
-            "if [ -n \"$response_bytes\" ]; then " +
-            "/usr/bin/printf \"%s\" \"$response\"; fi; } | " +
-            "/usr/bin/nc -U -w 2 \"$socket\" || true); " +
-            "if [ \"$reply\" = \"OK\" ]; then exit 0; fi; " +
-            "/bin/sleep 0.05; " +
-            "reply=$({ /usr/bin/printf \"%s\\n\" \"$url$response_query\"; " +
-            "if [ -n \"$response_bytes\" ]; then " +
-            "/usr/bin/printf \"%s\" \"$response\"; fi; } | " +
-            "/usr/bin/nc -U -w 2 \"$socket\" || true); " +
+            boundedSocketExchange(writesResponseBody: true) +
             "if [ \"$reply\" = \"OK\" ]; then exit 0; fi ;; esac; " +
             "app=\"${GAITERM_NOTIFY_APP_PATH:-}\"; " +
             "case \"$app\" in /*.app) " +
@@ -2393,131 +2499,136 @@ enum GaiAgentHookInstaller {
             "if [ -n \"$turn\" ]; then url=\"$url&turn=$turn\"; fi; " +
             "socket=\"${GAITERM_EVENT_SOCKET:-}\"; " +
             "case \"$socket\" in /*) " +
-            "reply=$(/usr/bin/printf \"%s\\n\" \"$url\" | " +
-            "/usr/bin/nc -U -w 2 \"$socket\" 2>/dev/null || true); " +
+            boundedSocketExchange(writesResponseBody: false) +
             "if [ \"$reply\" = \"OK\" ]; then respond; exit 0; fi ;; esac; " +
             "/usr/bin/open -g -b \"$bundle\" \"$url\" " +
             ">/dev/null 2>&1 || true; respond; exit 0'"
     }
 
-    /// Provider processes snapshot these files when they launch. Keep this
-    /// bounded file-only work synchronous so no agent PTY can beat its adapter.
-    static func installBeforeLaunchingCompanionSurfaces() {
-        install("Codex") {
-            try installCodexHooks()
+    /// Read-only diagnostics used by the in-app setup screen. Presence of a
+    /// hook improves end-of-turn precision, but never determines whether the
+    /// CLI itself is considered available.
+    static func integrationStatus(for provider: SupportedProvider) -> IntegrationStatus {
+        let url = integrationConfigurationURL(for: provider)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return IntegrationStatus(
+                state: .missing,
+                configurationPath: url.path,
+                detail: "Optimisation optionnelle non installée.")
         }
-        install("Claude Code") {
-            try installClaudeHooks()
-        }
-        install("Agy") {
-            try installAgyHooks()
-        }
-        install("OpenCode") {
-            try installOpenCodePlugin()
+
+        do {
+            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            guard !data.isEmpty,
+                  let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                return IntegrationStatus(
+                    state: .invalid,
+                    configurationPath: url.path,
+                    detail: "Le fichier existe mais son format n’est pas exploitable.")
+            }
+            guard containsCompleteIntegration(for: provider, in: root) else {
+                return IntegrationStatus(
+                    state: .missing,
+                    configurationPath: url.path,
+                    detail: "Le fichier est valide, mais l’adaptateur Teddy CLI est absent ou incomplet.")
+            }
+            return IntegrationStatus(
+                state: .ready,
+                configurationPath: url.path,
+                detail: provider.trustDetail)
+        } catch {
+            return IntegrationStatus(
+                state: .invalid,
+                configurationPath: url.path,
+                detail: "Lecture impossible : \(error.localizedDescription)")
         }
     }
 
-    private static func install(_ name: String, _ work: () throws -> Void) {
-        do {
-            try work()
-        } catch {
-            Ghostty.logger.error("Failed to install \(name, privacy: .public) notification hook: \(error.localizedDescription, privacy: .public)")
+    /// Idempotent, provider-scoped repair. User hooks and unrelated settings
+    /// are retained by each native adapter's merge routine.
+    static func configureIntegration(for provider: SupportedProvider) throws {
+        switch provider {
+        case .codex:
+            try installCodexHooks()
+        case .claude:
+            try installClaudeHooks()
+        case .grok:
+            try installGrokHooks()
+        }
+    }
+
+    private static func integrationConfigurationURL(
+        for provider: SupportedProvider
+    ) -> URL {
+        switch provider {
+        case .codex:
+            codexHome().appendingPathComponent("hooks.json", isDirectory: false)
+        case .claude:
+            claudeGlobalSettingsURL(in: claudeConfigDirectory())
+        case .grok:
+            grokHome()
+                .appendingPathComponent("hooks", isDirectory: true)
+                .appendingPathComponent(grokHookFilename, isDirectory: false)
+        }
+    }
+
+    private static func containsCompleteIntegration(
+        for provider: SupportedProvider,
+        in root: [String: Any]
+    ) -> Bool {
+        guard let hooks = root["hooks"] as? [String: Any] else { return false }
+        let plan = requiredHookPlan(for: provider)
+
+        return plan.specs.allSatisfy { spec in
+            guard let groups = hooks[spec.eventName] as? [[String: Any]] else {
+                return false
+            }
+            let expectedMatcher = plan.includeMatcher || spec.matcher != nil
+                ? spec.matcher ?? ""
+                : nil
+
+            return groups.contains { group in
+                if expectedMatcher != group["matcher"] as? String {
+                    return false
+                }
+                guard let handlers = group["hooks"] as? [[String: Any]] else {
+                    return false
+                }
+                return handlers.contains { handler in
+                    guard handler["type"] as? String == "command",
+                          handler["command"] as? String == spec.command,
+                          let timeout = handler["timeout"] as? NSNumber else {
+                        return false
+                    }
+                    return timeout.intValue == spec.timeout
+                }
+            }
+        }
+    }
+
+    private static func requiredHookPlan(
+        for provider: SupportedProvider
+    ) -> (specs: [HookSpec], includeMatcher: Bool) {
+        switch provider {
+        case .codex:
+            (codexHookSpecs + [codexLegacyStopSpec], false)
+        case .claude:
+            (claudeHookSpecs + [claudeLegacyStopSpec], true)
+        case .grok:
+            (grokHookSpecs, false)
         }
     }
 
     private static func installCodexHooks() throws {
         let home = codexHome()
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-
-        let hooksURL = home.appendingPathComponent("hooks.json", isDirectory: false)
-        var root = try readJSONObject(at: hooksURL)
-        let existingHooks = root["hooks"]
-        guard existingHooks == nil || existingHooks is [String: Any] else {
-            throw HookInstallError.invalidHooksObject(provider: "Codex")
-        }
-        var hooks = existingHooks as? [String: Any] ?? [:]
-        removeManagedHooks(from: &hooks)
-
-        var typedTrustEntries: [CodexTrustEntry] = []
-        for spec in codexHookSpecs {
-            typedTrustEntries.append(try appendCodexHook(spec, to: &hooks, at: hooksURL))
-        }
-        let legacyTrustEntry = try appendCodexHook(
-            codexLegacyStopSpec,
-            to: &hooks,
-            at: hooksURL)
-        root["hooks"] = hooks
-        try writeJSONObjectIfChanged(root, to: hooksURL)
-
-        try installCodexTrust(
-            in: home.appendingPathComponent("config.toml", isDirectory: false),
-            typedEntries: typedTrustEntries,
-            legacyEntries: [legacyTrustEntry])
-    }
-
-    /// Retained for migration tests and older compatibility maintenance.
-    private static func installCodexLegacyStopHook() throws {
-        let home = codexHome()
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-
-        let hooksURL = home.appendingPathComponent("hooks.json", isDirectory: false)
-        var root = try readJSONObject(at: hooksURL)
-        let existingHooks = root["hooks"]
-        guard existingHooks == nil || existingHooks is [String: Any] else {
-            throw HookInstallError.invalidHooksObject(provider: "Codex")
-        }
-        var hooks = existingHooks as? [String: Any] ?? [:]
-        var groups = try hookGroups(for: "Stop", in: hooks, provider: "Codex")
-        groups = removingHookMarker(codexHookMarker, from: groups)
-        groups.append([
-            "hooks": [[
-                "type": "command",
-                "command": codexLegacyStopSpec.command,
-                "timeout": 5,
-            ]],
-        ])
-        hooks["Stop"] = groups
-        root["hooks"] = hooks
-        try writeJSONObjectIfChanged(root, to: hooksURL)
-
-        let hookIndex = max(groups.count - 1, 0)
-        let key = "\(normalizedHookSourcePath(hooksURL.path)):stop:\(hookIndex):0"
-        let hash = codexCommandHookHash(
-            eventLabel: "stop",
-            matcher: nil,
-            command: codexLegacyStopSpec.command,
-            timeout: 5,
-            statusMessage: nil)
-        try installCodexLegacyTrust(
-            in: home.appendingPathComponent("config.toml", isDirectory: false),
-            entry: CodexTrustEntry(key: key, trustedHash: hash))
-    }
-
-    private static func appendCodexHook(
-        _ spec: HookSpec,
-        to hooks: inout [String: Any],
-        at hooksURL: URL
-    ) throws -> CodexTrustEntry {
-        var groups = try hookGroups(for: spec.eventName, in: hooks, provider: "Codex")
-        groups.append([
-            "hooks": [[
-                "type": "command",
-                "command": spec.command,
-                "timeout": spec.timeout,
-            ]],
-        ])
-        hooks[spec.eventName] = groups
-
-        let hookIndex = max(groups.count - 1, 0)
-        let trustKey =
-            "\(normalizedHookSourcePath(hooksURL.path)):\(spec.eventLabel):\(hookIndex):0"
-        let trustedHash = codexCommandHookHash(
-            eventLabel: spec.eventLabel,
-            matcher: nil,
-            command: spec.command,
-            timeout: spec.timeout,
-            statusMessage: nil)
-        return CodexTrustEntry(key: trustKey, trustedHash: trustedHash)
+        let plan = requiredHookPlan(for: .codex)
+        try installJSONHooks(
+            plan.specs,
+            at: home.appendingPathComponent("hooks.json", isDirectory: false),
+            providerName: "Codex",
+            includeMatcher: plan.includeMatcher)
     }
 
     private static func installClaudeHooks() throws {
@@ -2528,45 +2639,25 @@ enum GaiAgentHookInstaller {
         // authenticated adapter and the token-gated legacy compatibility
         // handler in that one supported scope so either build may run without
         // disabling the other.
+        let plan = requiredHookPlan(for: .claude)
         try installJSONHooks(
-            claudeHookSpecs + [claudeLegacyStopSpec],
+            plan.specs,
             at: claudeGlobalSettingsURL(in: home),
             providerName: "Claude Code",
-            includeMatcher: true)
+            includeMatcher: plan.includeMatcher)
     }
 
-    private static func installClaudeLegacyStopHook() throws {
-        let home = claudeConfigDirectory()
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        let settingsURL = claudeGlobalSettingsURL(in: home)
-        var root = try readJSONObject(at: settingsURL)
-        root = try claudeLegacyHooksConfiguration(from: root)
-        try writeJSONObjectIfChanged(root, to: settingsURL)
-    }
-
-    /// Compatibility-only updater retained for older configuration migrations.
-    /// Typed handlers and every user hook remain represented in the JSON model.
-    private static func claudeLegacyHooksConfiguration(
-        from existing: [String: Any]
-    ) throws -> [String: Any] {
-        var root = existing
-        let existingHooks = root["hooks"]
-        guard existingHooks == nil || existingHooks is [String: Any] else {
-            throw HookInstallError.invalidHooksObject(provider: "Claude Code")
-        }
-        var hooks = existingHooks as? [String: Any] ?? [:]
-        var groups = try hookGroups(for: "Stop", in: hooks, provider: "Claude Code")
-        groups = removingHookMarker(claudeHookMarker, from: groups)
-        groups.append([
-            "matcher": "",
-            "hooks": [[
-                "type": "command",
-                "command": claudeLegacyStopSpec.command,
-            ]],
-        ])
-        hooks["Stop"] = groups
-        root["hooks"] = hooks
-        return root
+    private static func installGrokHooks() throws {
+        let hooksDirectory = grokHome().appendingPathComponent("hooks", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: hooksDirectory,
+            withIntermediateDirectories: true)
+        let plan = requiredHookPlan(for: .grok)
+        try installJSONHooks(
+            plan.specs,
+            at: hooksDirectory.appendingPathComponent(grokHookFilename, isDirectory: false),
+            providerName: "Grok Build",
+            includeMatcher: plan.includeMatcher)
     }
 
     private static func installAgyHooks() throws {
@@ -2726,9 +2817,12 @@ enum GaiAgentHookInstaller {
                 "hooks": [[
                     "type": "command",
                     "command": spec.command,
+                    "timeout": spec.timeout,
                 ]],
             ]
-            if includeMatcher { group["matcher"] = "" }
+            if includeMatcher || spec.matcher != nil {
+                group["matcher"] = spec.matcher ?? ""
+            }
             groups.append(group)
             hooks[spec.eventName] = groups
         }
@@ -2802,11 +2896,11 @@ enum GaiAgentHookInstaller {
         try writeDataIfChanged(Data(openCodePluginSource.utf8), to: pluginURL)
     }
 
-    /// OpenCode exposes lifecycle state directly rather than through command
-    /// hooks. One terminal represents one employee, so aggregate every root
-    /// session in that process into a single work cycle. Child sessions never
-    /// affect desktop state, and the employee completes only when the final
-    /// active root session becomes idle.
+    // OpenCode exposes lifecycle state directly rather than through command
+    // hooks. One terminal represents one employee, so aggregate every root
+    // session in that process into a single work cycle. Child sessions never
+    // affect desktop state, and the employee completes only when the final
+    // active root session becomes idle.
     // Keep JavaScript escape sequences literal. A normal Swift multiline string
     // would turn `\n` and `\r\n` into real line breaks inside JavaScript string
     // literals, producing a plugin which OpenCode cannot parse.
@@ -2995,31 +3089,26 @@ enum GaiAgentHookInstaller {
         codexHookSpecs.first { $0.eventName == eventName }?.timeout
     }
 
-    static func codexTrustContentForTesting(_ existing: String) -> String {
-        codexTrustContent(
-            existing: existing,
-            typedEntries: [CodexTrustEntry(
-                key: "/tmp/hooks.json:stop:0:0",
-                trustedHash: "sha256:typed")],
-            legacyEntries: [CodexTrustEntry(
-                key: "/tmp/hooks.json:stop:1:0",
-                trustedHash: "sha256:legacy")])
+    static func codexHooksConfigurationForTesting(
+        _ existing: [String: Any]
+    ) throws -> [String: Any] {
+        let plan = requiredHookPlan(for: .codex)
+        return try jsonHooksConfiguration(
+            plan.specs,
+            from: existing,
+            providerName: "Codex",
+            includeMatcher: plan.includeMatcher)
     }
 
     static func claudeHooksConfigurationForTesting(
         _ existing: [String: Any]
     ) throws -> [String: Any] {
-        try jsonHooksConfiguration(
-            claudeHookSpecs + [claudeLegacyStopSpec],
+        let plan = requiredHookPlan(for: .claude)
+        return try jsonHooksConfiguration(
+            plan.specs,
             from: existing,
             providerName: "Claude Code",
-            includeMatcher: true)
-    }
-
-    static func claudeLegacyHooksConfigurationForTesting(
-        _ existing: [String: Any]
-    ) throws -> [String: Any] {
-        try claudeLegacyHooksConfiguration(from: existing)
+            includeMatcher: plan.includeMatcher)
     }
 
     static var claudeGlobalSettingsFilenameForTesting: String {
@@ -3030,6 +3119,24 @@ enum GaiAgentHookInstaller {
         _ existing: [String: Any]
     ) throws -> [String: Any] {
         try agyHooksConfiguration(from: existing)
+    }
+
+    static func grokHooksConfigurationForTesting(
+        _ existing: [String: Any]
+    ) throws -> [String: Any] {
+        let plan = requiredHookPlan(for: .grok)
+        return try jsonHooksConfiguration(
+            plan.specs,
+            from: existing,
+            providerName: "Grok Build",
+            includeMatcher: plan.includeMatcher)
+    }
+
+    static func integrationIsCompleteForTesting(
+        provider: SupportedProvider,
+        configuration: [String: Any]
+    ) -> Bool {
+        containsCompleteIntegration(for: provider, in: configuration)
     }
 
     static var openCodePluginSourceForTesting: String {
@@ -3064,6 +3171,12 @@ enum GaiAgentHookInstaller {
         environmentDirectory(named: "CLAUDE_CONFIG_DIR")
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude", isDirectory: true)
+    }
+
+    private static func grokHome() -> URL {
+        environmentDirectory(named: "GROK_HOME")
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".grok", isDirectory: true)
     }
 
     private static func claudeGlobalSettingsURL(in directory: URL) -> URL {
@@ -3104,259 +3217,6 @@ enum GaiAgentHookInstaller {
         var data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         data.append(0x0A)
         try writeDataIfChanged(data, to: url)
-    }
-
-    private static func installCodexTrust(
-        in url: URL,
-        typedEntries: [CodexTrustEntry],
-        legacyEntries: [CodexTrustEntry]
-    ) throws {
-        let existing: String
-        if FileManager.default.fileExists(atPath: url.path) {
-            existing = try String(contentsOf: url, encoding: .utf8)
-        } else {
-            existing = ""
-        }
-
-        let content = codexTrustContent(
-            existing: existing,
-            typedEntries: typedEntries,
-            legacyEntries: legacyEntries)
-        try writeDataIfChanged(Data(content.utf8), to: url)
-    }
-
-    private static func codexTrustContent(
-        existing: String,
-        typedEntries: [CodexTrustEntry],
-        legacyEntries: [CodexTrustEntry]
-    ) -> String {
-        var lines = tomlLines(existing)
-        removeMarkedBlock(begin: codexTypedTrustBegin, end: codexTypedTrustEnd, from: &lines)
-        removeMarkedBlock(begin: codexTrustBegin, end: codexTrustEnd, from: &lines)
-        for entry in typedEntries + legacyEntries {
-            removeCodexTrustTable(
-                forEscapedKey: tomlBasicStringContent(entry.key),
-                from: &lines)
-        }
-        appendCodexTrustBlock(
-            begin: codexTypedTrustBegin,
-            end: codexTypedTrustEnd,
-            entries: typedEntries,
-            to: &lines)
-        appendCodexTrustBlock(
-            begin: codexTrustBegin,
-            end: codexTrustEnd,
-            entries: legacyEntries,
-            to: &lines)
-        return tomlContent(lines)
-    }
-
-    private static func installCodexLegacyTrust(
-        in url: URL,
-        entry: CodexTrustEntry
-    ) throws {
-        let existing: String
-        if FileManager.default.fileExists(atPath: url.path) {
-            existing = try String(contentsOf: url, encoding: .utf8)
-        } else {
-            existing = ""
-        }
-
-        var lines = tomlLines(existing)
-        removeMarkedBlock(begin: codexTrustBegin, end: codexTrustEnd, from: &lines)
-        removeCodexTrustTable(
-            forEscapedKey: tomlBasicStringContent(entry.key),
-            from: &lines)
-        appendCodexTrustBlock(
-            begin: codexTrustBegin,
-            end: codexTrustEnd,
-            entries: [entry],
-            to: &lines)
-
-        let content = tomlContent(lines)
-        try writeDataIfChanged(Data(content.utf8), to: url)
-    }
-
-    private static func appendCodexTrustBlock(
-        begin: String,
-        end: String,
-        entries: [CodexTrustEntry],
-        to lines: inout [String]
-    ) {
-        guard !entries.isEmpty else { return }
-        if !lines.isEmpty, lines.last?.isEmpty == false {
-            lines.append("")
-        }
-        lines.append(begin)
-        for entry in entries {
-            lines.append("[hooks.state.\"\(tomlBasicStringContent(entry.key))\"]")
-            lines.append("trusted_hash = \"\(tomlBasicStringContent(entry.trustedHash))\"")
-        }
-        lines.append(end)
-    }
-
-    private static func removeMarkedBlock(begin: String, end: String, from lines: inout [String]) {
-        while let start = lines.firstIndex(of: begin) {
-            guard let stop = lines[start...].firstIndex(of: end) else {
-                lines.remove(at: start)
-                collapseEmptyLines(at: start, in: &lines)
-                continue
-            }
-            lines.removeSubrange(start...stop)
-            collapseEmptyLines(at: start, in: &lines)
-        }
-    }
-
-    /// Removing a managed block must not leave one additional blank line on
-    /// every launch. Limit cleanup to the block boundary so user formatting
-    /// elsewhere in the TOML remains untouched.
-    private static func collapseEmptyLines(at boundary: Int, in lines: inout [String]) {
-        guard lines.count > 1 else { return }
-        var index = min(max(boundary, 1), lines.count - 1)
-        while index < lines.count,
-              lines[index].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.remove(at: index)
-            guard lines.count > 1 else { break }
-            if index >= lines.count { index = lines.count - 1 }
-            guard index > 0 else { break }
-        }
-    }
-
-    private static func removeCodexTrustTable(forEscapedKey escapedKey: String, from lines: inout [String]) {
-        let header = "[hooks.state.\"\(escapedKey)\"]"
-        var index = 0
-        while index < lines.count {
-            guard lines[index].trimmingCharacters(in: .whitespacesAndNewlines) == header else {
-                index += 1
-                continue
-            }
-            let tableEnd = tomlTableEndIndex(in: lines, after: index)
-            lines.removeSubrange(index..<tableEnd)
-        }
-    }
-
-    private static func tomlLines(_ content: String) -> [String] {
-        content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-    }
-
-    private static func tomlContent(_ lines: [String]) -> String {
-        var content = lines.joined(separator: "\n")
-        if !content.hasSuffix("\n") { content.append("\n") }
-        return content
-    }
-
-    private static func tomlTableEndIndex(in lines: [String], after start: Int) -> Int {
-        guard start + 1 < lines.count else { return lines.count }
-        for index in (start + 1)..<lines.count where tomlLineStartsTable(lines[index]) {
-            return index
-        }
-        return lines.count
-    }
-
-    private static func tomlLineStartsTable(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("[") && !trimmed.hasPrefix("#")
-    }
-
-    private static func tomlLineIsTable(_ table: String, line: String) -> Bool {
-        line.trimmingCharacters(in: .whitespacesAndNewlines) == "[\(table)]"
-    }
-
-    private static func tomlLineDefinesKey(_ key: String, line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.hasPrefix("#") else { return false }
-        let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-        guard let rawKey = parts.first else { return false }
-        return rawKey.trimmingCharacters(in: .whitespacesAndNewlines) == key
-    }
-
-    private static func codexCommandHookHash(
-        eventLabel: String,
-        matcher: String?,
-        command: String,
-        timeout: Int,
-        statusMessage: String?
-    ) -> String {
-        var handler: [String: Any] = [
-            "async": false,
-            "command": command,
-            "timeout": max(timeout, 1),
-            "type": "command",
-        ]
-        if let statusMessage {
-            handler["statusMessage"] = statusMessage
-        }
-        var identity: [String: Any] = [
-            "event_name": eventLabel,
-            "hooks": [handler],
-        ]
-        if let matcher {
-            identity["matcher"] = matcher
-        }
-
-        let data = (try? JSONSerialization.data(
-            withJSONObject: identity,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )) ?? Data()
-        return "sha256:" + SHA256.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
-    }
-
-    private static func normalizedHookSourcePath(_ path: String) -> String {
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        if let resolved = realPath(url.path) { return resolved }
-
-        let parent = url.deletingLastPathComponent()
-        if let resolvedParent = realPath(parent.path) {
-            return URL(fileURLWithPath: resolvedParent, isDirectory: true)
-                .appendingPathComponent(url.lastPathComponent)
-                .path
-        }
-        return url.path
-    }
-
-    private static func realPath(_ path: String) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-        return path.withCString { pointer in
-            guard realpath(pointer, &buffer) != nil else { return nil }
-            return String(cString: buffer)
-        }
-    }
-
-    private static func tomlBasicStringContent(_ value: String) -> String {
-        var escaped = ""
-        escaped.reserveCapacity(value.count)
-
-        for scalar in value.unicodeScalars {
-            switch scalar.value {
-            case 0x08:
-                escaped += "\\b"
-            case 0x09:
-                escaped += "\\t"
-            case 0x0A:
-                escaped += "\\n"
-            case 0x0C:
-                escaped += "\\f"
-            case 0x0D:
-                escaped += "\\r"
-            case 0x22:
-                escaped += "\\\""
-            case 0x5C:
-                escaped += "\\\\"
-            case 0x00...0x1F, 0x7F...0x9F:
-                if scalar.value <= 0xFFFF {
-                    escaped += String(format: "\\u%04X", scalar.value)
-                } else {
-                    escaped += String(format: "\\U%08X", scalar.value)
-                }
-            default:
-                escaped.unicodeScalars.append(scalar)
-            }
-        }
-
-        return escaped
     }
 
     private static func writeDataIfChanged(_ data: Data, to url: URL) throws {

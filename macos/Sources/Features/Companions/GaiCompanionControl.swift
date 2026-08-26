@@ -63,11 +63,15 @@ enum GaiCompanionTeddyPresentation: String, Sendable {
 enum GaiCompanionCreationCLI: String, CaseIterable, Sendable {
     case terminal
     case codex
+    case claude
+    case grok
 
     var launchCommand: String? {
         switch self {
         case .terminal: nil
         case .codex: "codex"
+        case .claude: "claude"
+        case .grok: "grok"
         }
     }
 }

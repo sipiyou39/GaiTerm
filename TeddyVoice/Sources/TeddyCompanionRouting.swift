@@ -167,6 +167,31 @@ struct TeddyCompanionSnapshot: Identifiable, Equatable, Sendable {
     }
 }
 
+/// Single gate shared by the composer and the actual push-to-talk action.
+/// The cached sidebar projection keeps rendering cheap; the action boundary
+/// replaces it with the router's synchronous source-of-truth. The native
+/// router already preserves a previously proven CLI when macOS process
+/// inspection is transiently unavailable; a `nil` router result therefore
+/// means the companion no longer exists and must never authorize a stale PTT.
+enum TeddyCompanionReadinessGate {
+    static func revalidatedSnapshot(
+        _ cachedSnapshot: TeddyCompanionSnapshot?,
+        readFreshSnapshot: (UUID) -> TeddyCompanionSnapshot?
+    ) -> TeddyCompanionSnapshot? {
+        guard let cachedSnapshot else { return nil }
+        return readFreshSnapshot(cachedSnapshot.id)
+    }
+
+    static func permitsPrompt(
+        _ snapshot: TeddyCompanionSnapshot,
+        hasPendingPrompt: Bool
+    ) -> Bool {
+        snapshot.isCLIReady
+            && snapshot.phase.acceptsPrompt
+            && !hasPendingPrompt
+    }
+}
+
 enum TeddyCompanionControlFailure: String, Error, Equatable, Sendable {
     case unknownCompanion
     case emptyPrompt
@@ -189,6 +214,11 @@ protocol TeddyCompanionRouting: AnyObject {
     var toolDefinitions: [GrokTextToolDefinition] { get }
     func currentAgentContext() -> String
     func companionSnapshots() -> [TeddyCompanionSnapshot]
+    /// Re-reads the selected terminal's live process state before an action
+    /// whose safety depends on CLI availability. Unlike `companionSnapshots`,
+    /// this method must consult the live source first, falling back to hook
+    /// state only when the operating system cannot inspect that source.
+    func freshCompanionSnapshot(for companionID: UUID) -> TeddyCompanionSnapshot?
     /// Mirrors Teddy's active conversation onto the desktop presentation.
     /// Selecting a representation must never create, focus or restart a PTY.
     func selectCompanion(_ companionID: UUID)

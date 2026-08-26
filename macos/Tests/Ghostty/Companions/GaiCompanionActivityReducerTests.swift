@@ -1814,29 +1814,35 @@ struct GaiCompanionInputPolicyTests {
         for provider in [
             GaiCompanionProvider.codex,
             .claude,
+            .grok,
             .agy,
             .opencode,
         ] {
             #expect(
                 GaiCompanionInputPolicy.eventKind(
                     provider: provider,
-                    phase: .idle,
-                    nativeAdapterIsReady: true) == nil)
+                    phase: .idle) == nil)
         }
     }
 
-    @Test func unconfirmedNativeAdapterKeepsOptimisticInputFallback() {
+    @Test func interactiveProviderReturnStaysAmbiguousAfterEarlierHookedTurns() {
         for provider in [
             GaiCompanionProvider.codex,
             .claude,
+            .grok,
             .agy,
             .opencode,
         ] {
-            #expect(
-                GaiCompanionInputPolicy.eventKind(
-                    provider: provider,
-                    phase: .idle,
-                    nativeAdapterIsReady: false) == .started)
+            for phase in [
+                GaiCompanionPhase.completedUnseen,
+                .failed,
+                .exited,
+            ] {
+                #expect(
+                    GaiCompanionInputPolicy.eventKind(
+                        provider: provider,
+                        phase: phase) == nil)
+            }
         }
     }
 
@@ -1888,6 +1894,246 @@ struct GaiCompanionAgentEventReceiptTests {
 
 @MainActor
 struct GaiCompanionRuntimeProjectionTests {
+    @Test func observingLaunchedCodexSettlesOnlyTheSpeculativeShellStart() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let speculativeShellStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .terminal,
+            eventID: "shell-enter-before-codex-spawn",
+            kind: .started,
+            source: .userInput)
+
+        #expect(runtime.apply(.event(speculativeShellStart)) == .appliedEvent)
+        #expect(runtime.activity.provider == .terminal)
+        #expect(runtime.liveProvider == .terminal)
+
+        #expect(
+            runtime.reconcileLaunchedProvider(
+                .codex,
+                maySettleProvisionalShellLaunch: true)
+                == .settledProvisionalShellLaunch)
+        #expect(runtime.activity.phase == .idle)
+        #expect(runtime.activity.provider == .terminal)
+        #expect(runtime.liveProvider == .codex)
+        #expect(
+            runtime.reconcileLaunchedProvider(
+                .codex,
+                maySettleProvisionalShellLaunch: true) == .unchanged)
+    }
+
+    @Test func launchReconciliationNeverSettlesAnActualProviderPrompt() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let providerStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "real-codex-prompt",
+            kind: .started,
+            source: .userInput)
+
+        #expect(runtime.apply(.event(providerStart)) == .appliedEvent)
+        #expect(runtime.activity.phase == .working)
+        #expect(runtime.liveProvider == .terminal)
+
+        #expect(
+            runtime.reconcileLaunchedProvider(
+                .codex,
+                maySettleProvisionalShellLaunch: true) == .providerObserved)
+        #expect(runtime.activity.phase == .working)
+        #expect(runtime.activity.provider == .codex)
+        #expect(runtime.liveProvider == .codex)
+    }
+
+    @Test func foregroundProbeCannotSettleAProviderConfirmedPrompt() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let shellStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .terminal,
+            eventID: "shell-enter",
+            kind: .started,
+            source: .userInput)
+        let providerStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-prompt-start",
+            turnID: "turn:1",
+            kind: .started,
+            source: .providerHook)
+
+        #expect(runtime.apply(.event(shellStart)) == .appliedEvent)
+        #expect(runtime.hasProvisionalShellLaunch)
+        #expect(runtime.apply(.event(providerStart)) == .appliedEvent)
+        #expect(!runtime.hasProvisionalShellLaunch)
+        #expect(runtime.activity.phase == .working)
+        #expect(runtime.activity.provider == .codex)
+
+        #expect(
+            runtime.reconcileLaunchedProvider(
+                .codex,
+                maySettleProvisionalShellLaunch: true) == .unchanged)
+        #expect(runtime.activity.phase == .working)
+        #expect(runtime.activity.provider == .codex)
+    }
+
+    @Test func ambiguousInitialCodexWorkNeverSettlesFromProcessPresenceAlone() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let shellStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .terminal,
+            eventID: "shell-enter-before-codex-prompt",
+            kind: .started,
+            source: .userInput)
+
+        #expect(runtime.apply(.event(shellStart)) == .appliedEvent)
+        #expect(
+            runtime.reconcileLaunchedProvider(
+                .codex,
+                maySettleProvisionalShellLaunch: false) == .providerObserved)
+        #expect(runtime.activity.phase == .working)
+        #expect(runtime.activity.provider == .terminal)
+        #expect(runtime.liveProvider == .codex)
+    }
+
+    @Test func sessionReadinessSettlesOnlyTheProvisionalShellLaunch() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let shellStart = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .terminal,
+            eventID: "shell-enter-before-ready",
+            kind: .started,
+            source: .userInput)
+        let ready = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-session-ready",
+            turnID: "session:1",
+            kind: .ready,
+            source: .providerHook)
+
+        #expect(runtime.apply(.event(shellStart)) == .appliedEvent)
+        #expect(runtime.hasProvisionalShellLaunch)
+        #expect(runtime.apply(.event(ready)) == .appliedEvent)
+        #expect(runtime.activity.phase == .idle)
+        #expect(runtime.activity.provider == .codex)
+        #expect(runtime.liveProvider == .codex)
+        #expect(!runtime.hasProvisionalShellLaunch)
+    }
+
+    @Test func shellReturnReconciliationClearsLiveIdentityOnly() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let start = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-start",
+            turnID: "session:codex-session",
+            kind: .started,
+            timestamp: Date(timeIntervalSince1970: 0))
+        let stop = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-stop",
+            turnID: "session:codex-session",
+            kind: .stop,
+            timestamp: Date(timeIntervalSince1970: 1))
+
+        #expect(runtime.apply(.event(start)) == .appliedEvent)
+        #expect(runtime.liveProvider == .codex)
+        #expect(runtime.apply(.event(stop)) == .appliedEvent)
+        #expect(runtime.activity.phase == .completedUnseen)
+        #expect(runtime.liveProvider == .codex)
+
+        #expect(runtime.clearLiveProvider())
+        #expect(runtime.activity.phase == .completedUnseen)
+        #expect(runtime.liveProvider == .terminal)
+    }
+
+    @Test func cancelledTurnDoesNotPretendTheCLIProcessExited() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+        let start = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-start",
+            turnID: "turn:one",
+            kind: .started,
+            timestamp: Date(timeIntervalSince1970: 0))
+        let cancellation = GaiCompanionEvent(
+            surfaceID: runtime.id,
+            provider: .codex,
+            eventID: "codex-stop-cancelled",
+            turnID: "turn:one",
+            kind: .cancelled,
+            timestamp: Date(timeIntervalSince1970: 1))
+
+        #expect(runtime.apply(.event(start)) == .appliedEvent)
+        #expect(runtime.apply(.event(cancellation)) == .appliedEvent)
+        #expect(runtime.activity.phase == .idle)
+        #expect(runtime.liveProvider == .codex)
+    }
+
+    @Test func foregroundProviderProbesHaveFiniteBoundarySchedules() {
+        let launchDelays = (0..<10).compactMap {
+            GaiCompanionProviderProbeSchedule.delay(for: .launch, attempt: $0)
+        }
+        let shellReturnDelays = (0..<10).compactMap {
+            GaiCompanionProviderProbeSchedule.delay(for: .shellReturn, attempt: $0)
+        }
+
+        #expect(launchDelays == [0.08, 0.16, 0.32, 0.64, 1.0])
+        #expect(shellReturnDelays == [0.04, 0.12, 0.28])
+        #expect(GaiCompanionProviderProbeSchedule.delay(for: .launch, attempt: 5) == nil)
+        #expect(
+            GaiCompanionProviderProbeSchedule.delay(
+                for: .shellReturn,
+                attempt: 3) == nil)
+    }
+
+    @Test func onlyAnInteractiveShellIsProviderExitProof() {
+        #expect(
+            GaiForegroundProviderObservation.classify(arguments: ["codex"])
+                == .provider(.codex))
+        #expect(
+            GaiForegroundProviderObservation.classify(arguments: ["-zsh"])
+                == .shell)
+        #expect(
+            GaiForegroundProviderObservation.classify(arguments: ["/bin/bash", "--login"])
+                == .shell)
+        #expect(
+            GaiForegroundProviderObservation.classify(
+                arguments: ["/bin/zsh", "-lc", "rg needle"])
+                == .unavailable)
+        #expect(
+            GaiForegroundProviderObservation.classify(arguments: ["rg", "needle"])
+                == .unavailable)
+        #expect(GaiForegroundProviderObservation.classify(arguments: nil) == .unavailable)
+    }
+
+    @Test func promptGateRequiresFreshOrPreviouslyProvenCLIPresence() {
+        #expect(
+            GaiCompanionPromptProviderGate.decision(
+                observation: .provider(.codex),
+                liveProvider: .terminal)
+                == .observe(.codex))
+        #expect(
+            GaiCompanionPromptProviderGate.decision(
+                observation: .unavailable,
+                liveProvider: .codex)
+                == .preserve(.codex))
+        #expect(
+            GaiCompanionPromptProviderGate.decision(
+                observation: .unavailable,
+                liveProvider: .terminal)
+                == .reject)
+        #expect(
+            GaiCompanionPromptProviderGate.decision(
+                observation: .shell,
+                liveProvider: .codex)
+                == .rejectAndClear)
+        #expect(
+            GaiCompanionPromptProviderGate.decision(
+                observation: .shell,
+                liveProvider: .terminal)
+                == .reject)
+    }
+
     @Test func completionJumpsUntilAnExplicitAcknowledgement() throws {
         let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(
             name: "Nova",
@@ -1912,46 +2158,19 @@ struct GaiCompanionRuntimeProjectionTests {
         #expect(runtime.renderedColorway == .red)
     }
 
-    @Test func replacingAPTYRotatesItsCapabilityToken() {
-        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
+    @Test func configuredLaunchIsNotTreatedAsALiveProcessAndPTYRotationClearsProof() {
+        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(
+            name: "Nova",
+            launchCommand: "codex"))
         let firstToken = runtime.eventToken
+        #expect(runtime.liveProvider == .terminal)
+        #expect(runtime.observeLiveProvider(.codex))
 
         runtime.rotateEventToken()
 
         #expect(!firstToken.isEmpty)
         #expect(runtime.eventToken != firstToken)
-    }
-
-    @Test func nativeAdapterHandshakeIsScopedToOnePTYIncarnation() {
-        let runtime = GaiCompanionRuntime(record: GaiCompanionRecord(name: "Nova"))
-        #expect(!runtime.hasObservedNativeAdapter(for: .claude))
-
-        _ = runtime.apply(.event(GaiCompanionEvent(
-            surfaceID: runtime.id,
-            provider: .claude,
-            eventID: "claude-ready",
-            turnID: "session:session-1",
-            kind: .ready)))
-        #expect(runtime.hasObservedNativeAdapter(for: .claude))
-
-        runtime.rotateEventToken()
-        #expect(!runtime.hasObservedNativeAdapter(for: .claude))
-
-        _ = runtime.apply(.event(GaiCompanionEvent(
-            surfaceID: runtime.id,
-            provider: .agy,
-            eventID: "legacy-post-tool",
-            turnID: "session:session-2",
-            kind: .resumed)))
-        #expect(!runtime.hasObservedNativeAdapter(for: .agy))
-
-        _ = runtime.apply(.event(GaiCompanionEvent(
-            surfaceID: runtime.id,
-            provider: .agy,
-            eventID: "agy-pre-invocation",
-            turnID: "session:session-2",
-            kind: .started)))
-        #expect(runtime.hasObservedNativeAdapter(for: .agy))
+        #expect(runtime.liveProvider == .terminal)
     }
 
     @Test func newPTYIncarnationCannotInheritOfflineFailure() {

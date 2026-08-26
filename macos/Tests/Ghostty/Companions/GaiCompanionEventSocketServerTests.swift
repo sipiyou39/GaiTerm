@@ -6,14 +6,16 @@ import Testing
 
 @MainActor
 struct GaiCompanionEventSocketServerTests {
-    @Test func deliversOneFrameOnMainActorBeforeAcknowledging() async throws {
+    @Test func acknowledgesAndDeliversOneFrameOnMainActor() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { frame in
-            recorder.wasOnMainThread = Thread.isMainThread
-            recorder.urls.append(frame.url)
-            recorder.responseBodies.append(frame.responseBody)
-            return true
-        }
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.wasOnMainThread = Thread.isMainThread
+                recorder.urls.append(frame.url)
+                recorder.responseBodies.append(frame.responseBody)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -23,6 +25,11 @@ struct GaiCompanionEventSocketServerTests {
         }
 
         #expect(response == GaiCompanionEventSocketServer.acknowledgement)
+        await waitForEventCount(1, recorder: recorder)
+        // A successful ACK transfers ownership exactly once. Give any
+        // accidental duplicate queued delivery enough time to surface before
+        // asserting the final count.
+        try? await Task.sleep(for: .milliseconds(50))
         #expect(recorder.wasOnMainThread)
         #expect(recorder.urls == [url])
         #expect(recorder.responseBodies == [nil])
@@ -30,10 +37,12 @@ struct GaiCompanionEventSocketServerTests {
 
     @Test func serializesHandlerAndAcknowledgementInAcceptOrder() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { frame in
-            recorder.urls.append(frame.url)
-            return true
-        }
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -46,15 +55,18 @@ struct GaiCompanionEventSocketServerTests {
 
         #expect(responses.first == GaiCompanionEventSocketServer.acknowledgement)
         #expect(responses.second == GaiCompanionEventSocketServer.acknowledgement)
+        await waitForEventCount(2, recorder: recorder)
         #expect(recorder.urls.map(\.absoluteString) == [socketTestFirstURL, socketTestSecondURL])
     }
 
     @Test func rejectsOversizedAndMultipleFramesWithoutCallingHandler() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { frame in
-            recorder.urls.append(frame.url)
-            return true
-        }
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -75,12 +87,36 @@ struct GaiCompanionEventSocketServerTests {
         #expect(recorder.urls.isEmpty)
     }
 
-    @Test func rejectsUnauthenticatedHandlerResultWithoutAcknowledging() async throws {
+    @Test func admittedFrameIsAcknowledgedEvenWhenHandlerRejectsIt() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { frame in
-            recorder.urls.append(frame.url)
-            return false
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return false
+            })
+        let path = try server.start()
+        defer { server.stop() }
+
+        let response = try await runSocketClient {
+            try socketExchange(
+                path: path,
+                payload: Data("\(socketTestFirstURL)\n".utf8))
         }
+
+        #expect(response == GaiCompanionEventSocketServer.acknowledgement)
+        await waitForEventCount(1, recorder: recorder)
+        #expect(recorder.urls.map(\.absoluteString) == [socketTestFirstURL])
+    }
+
+    @Test func invalidCapabilityAdmissionIsNotAcknowledgedOrDelivered() async throws {
+        let recorder = EventRecorder()
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in false },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -91,11 +127,42 @@ struct GaiCompanionEventSocketServerTests {
         }
 
         #expect(response.isEmpty)
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(recorder.urls.isEmpty)
+    }
+
+    @Test func acknowledgementDoesNotWaitForSlowMainActorHandler() async throws {
+        let recorder = EventRecorder()
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                Thread.sleep(forTimeInterval: 0.45)
+                recorder.urls.append(frame.url)
+                return true
+            })
+        let path = try server.start()
+        defer { server.stop() }
+
+        let result = try await runSocketClient {
+            let start = Date.timeIntervalSinceReferenceDate
+            let response = try socketExchange(
+                path: path,
+                payload: Data("\(socketTestFirstURL)\n".utf8))
+            return (
+                response: response,
+                duration: Date.timeIntervalSinceReferenceDate - start)
+        }
+
+        #expect(result.response == GaiCompanionEventSocketServer.acknowledgement)
+        #expect(result.duration < 0.3)
+        await waitForEventCount(1, recorder: recorder)
         #expect(recorder.urls.map(\.absoluteString) == [socketTestFirstURL])
     }
 
     @Test func socketIsPrivateUniqueAndRemovedSafely() throws {
-        let server = GaiCompanionEventSocketServer { _ in true }
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { _ in true })
         let path = try server.start()
 
         #expect(path.hasPrefix("/tmp/gaiterm-agent-events-"))
@@ -117,10 +184,13 @@ struct GaiCompanionEventSocketServerTests {
 
     @Test func incompleteClientIsClosedAtDeadline() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer(clientDeadline: 0.1) { frame in
-            recorder.urls.append(frame.url)
-            return true
-        }
+        let server = GaiCompanionEventSocketServer(
+            clientDeadline: 0.1,
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -135,13 +205,41 @@ struct GaiCompanionEventSocketServerTests {
         #expect(recorder.urls.isEmpty)
     }
 
+    @Test func incompleteClientCannotBlockFollowingHookForSeconds() async throws {
+        let recorder = EventRecorder()
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                return true
+            })
+        let path = try server.start()
+        defer { server.stop() }
+
+        #expect(GaiCompanionEventSocketServer.defaultClientDeadline == 0.25)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let response = try await runSocketClient {
+            try socketExchangeAfterIncompleteClient(
+                path: path,
+                payload: Data("\(socketTestSecondURL)\n".utf8))
+        }
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(response == GaiCompanionEventSocketServer.acknowledgement)
+        #expect(elapsed < .seconds(1))
+        #expect(recorder.urls.map(\.absoluteString) == [socketTestSecondURL])
+    }
+
     @Test func deliversExactLengthRawResponseBody() async throws {
         let recorder = EventRecorder()
-        let server = GaiCompanionEventSocketServer { frame in
-            recorder.urls.append(frame.url)
-            recorder.responseBodies.append(frame.responseBody)
-            return true
-        }
+        let server = GaiCompanionEventSocketServer(
+            admission: { _ in true },
+            handler: { frame in
+                recorder.urls.append(frame.url)
+                recorder.responseBodies.append(frame.responseBody)
+                return true
+            })
         let path = try server.start()
         defer { server.stop() }
 
@@ -155,6 +253,7 @@ struct GaiCompanionEventSocketServerTests {
         }
 
         #expect(response == GaiCompanionEventSocketServer.acknowledgement)
+        await waitForEventCount(1, recorder: recorder)
         #expect(recorder.urls.map(\.absoluteString) == [header])
         #expect(recorder.responseBodies == [answer])
     }
@@ -173,6 +272,13 @@ private final class EventRecorder {
     var urls: [URL] = []
     var responseBodies: [Data?] = []
     var wasOnMainThread = false
+}
+
+@MainActor
+private func waitForEventCount(_ count: Int, recorder: EventRecorder) async {
+    for _ in 0..<100 where recorder.urls.count < count {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
 }
 
 private enum SocketClientTestError: Error {
@@ -225,6 +331,23 @@ private func orderedSocketExchange(
     return (
         first: try readResponse(from: first),
         second: try readResponse(from: second))
+}
+
+private func socketExchangeAfterIncompleteClient(
+    path: String,
+    payload: Data
+) throws -> Data {
+    let incomplete = try connectedSocket(path: path, receiveTimeout: 1)
+    defer { Darwin.close(incomplete) }
+    try writeAll(Data(socketTestFirstURL.utf8), to: incomplete)
+
+    // Ensure the incomplete client owns the head of the accept queue before a
+    // complete hook arrives behind it.
+    usleep(20_000)
+    let complete = try connectedSocket(path: path, receiveTimeout: 1)
+    defer { Darwin.close(complete) }
+    try writeAll(payload, to: complete)
+    return try readResponse(from: complete)
 }
 
 private func connectedSocket(

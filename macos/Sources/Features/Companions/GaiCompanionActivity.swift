@@ -10,6 +10,7 @@ struct GaiCompanionProvider: RawRepresentable, Hashable, Sendable {
 
     static let codex = Self(rawValue: "codex")
     static let claude = Self(rawValue: "claude")
+    static let grok = Self(rawValue: "grok")
     static let agy = Self(rawValue: "agy")
     static let opencode = Self(rawValue: "opencode")
     static let terminal = Self(rawValue: "terminal")
@@ -115,15 +116,16 @@ enum GaiCompanionShellCompletionPolicy {
 }
 
 /// Decides whether a local Return key is itself evidence of agent work.
-/// Native provider adapters expose prompt-start/busy hooks, so their menus and
-/// selectors must not optimistically animate. An unknown terminal has no
-/// provider protocol and retains the local fallback. Answering an explicit
-/// wait is always immediate.
+/// A Return inside an interactive provider is ambiguous: it may submit a
+/// prompt, confirm a menu item, or do nothing on an empty editor. The manager
+/// therefore opens those turns only after a bounded screen-activity probe (or
+/// an authoritative provider hook). An unknown terminal has no provider
+/// protocol and retains the local fallback. Answering an explicit wait is
+/// always immediate.
 enum GaiCompanionInputPolicy {
     static func eventKind(
         provider: GaiCompanionProvider,
-        phase: GaiCompanionPhase,
-        nativeAdapterIsReady: Bool = true
+        phase: GaiCompanionPhase
     ) -> GaiCompanionEventKind? {
         switch phase {
         case .awaitingInput, .awaitingApproval:
@@ -133,9 +135,9 @@ enum GaiCompanionInputPolicy {
         case .idle, .completedUnseen, .failed, .exited:
             if provider == .codex
                 || provider == .claude
+                || provider == .grok
                 || provider == .agy
-                || provider == .opencode,
-               nativeAdapterIsReady {
+                || provider == .opencode {
                 return nil
             }
             return .started

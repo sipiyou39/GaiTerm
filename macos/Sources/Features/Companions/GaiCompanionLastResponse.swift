@@ -212,6 +212,12 @@ final class GaiCompanionLastResponseStore {
         pendingTurns[agentID]?.token
     }
 
+    func baselineScreenText(for token: TurnToken) -> String? {
+        guard let pending = pendingTurns[token.agentID],
+              pending.token == token else { return nil }
+        return pending.baseline.text
+    }
+
     func pendingTurn(for agentID: UUID) -> PendingTurnContext? {
         guard let pending = pendingTurns[agentID] else { return nil }
         return PendingTurnContext(
@@ -401,6 +407,41 @@ struct GaiResponseSettlementObservation {
     mutating func reset() {
         lastSnapshot = nil
         identicalSampleCount = 0
+    }
+}
+
+/// Conservative evidence that an ambiguous Return actually started provider
+/// work. A candidate must contain at least one significant line absent from the
+/// pre-Return baseline, so closing a menu to a strict subset stays neutral while
+/// a complete fast response can activate the turn on the very first sample.
+/// The manager samples this only for a bounded period after a manual Return.
+struct GaiResponseActivityObservation {
+    private let baselineSnapshot: String
+    private let baselineLines: Set<String>
+
+    init(baselineScreenText: String) {
+        baselineSnapshot = GaiCompanionResponseExtraction.snapshot(
+            baselineScreenText).text
+        baselineLines = Self.significantLines(in: baselineSnapshot)
+    }
+
+    func observe(
+        screenText: String,
+        candidateResponse: GaiCompanionResponseExtraction.Result?
+    ) -> Bool {
+        guard candidateResponse != nil else { return false }
+        let snapshot = GaiCompanionResponseExtraction.snapshot(screenText).text
+        guard !snapshot.isEmpty, snapshot != baselineSnapshot else { return false }
+        // Closing a selector commonly redraws a strict subset of the baseline.
+        // It is not provider work unless the terminal also emitted a novel line.
+        return !Self.significantLines(in: snapshot).isSubset(of: baselineLines)
+    }
+
+    private static func significantLines(in text: String) -> Set<String> {
+        Set(text.split(separator: "\n").compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            return line.isEmpty ? nil : line
+        })
     }
 }
 

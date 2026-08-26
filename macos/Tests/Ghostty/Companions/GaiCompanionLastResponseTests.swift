@@ -134,6 +134,82 @@ struct GaiCompanionLastResponseTests {
         #expect(observation.identicalSampleCount == 1)
     }
 
+    @Test func ambiguousReturnNeedsContinuingOutputBeforeItLooksLikeWork() {
+        let observation = GaiResponseActivityObservation(
+            baselineScreenText: "Codex ready\nChoose a model\n1. Fast\n2. Smart")
+        let menuCandidate = GaiCompanionResponseExtraction.Result(
+            text: "Menu closed",
+            wasTruncated: false)
+
+        #expect(!observation.observe(
+            screenText: "Codex ready\nChoose a model\n1. Fast\n2. Smart",
+            candidateResponse: nil))
+        #expect(!observation.observe(
+            screenText: "Codex ready",
+            candidateResponse: menuCandidate))
+
+        let streamingCandidate = GaiCompanionResponseExtraction.Result(
+            text: "Analyse en cours…",
+            wasTruncated: false)
+        #expect(observation.observe(
+            screenText: "Codex ready\nAnalyse en cours…",
+            candidateResponse: streamingCandidate))
+    }
+
+    @Test func completeResponseBeforeFirstProbeIsImmediatePositiveEvidence() {
+        let observation = GaiResponseActivityObservation(
+            baselineScreenText: "Codex ready\n› Corrige le bug")
+        let candidate = GaiCompanionResponseExtraction.Result(
+            text: "Le bug est corrigé.",
+            wasTruncated: false)
+
+        #expect(observation.observe(
+            screenText: "Codex ready\n› Corrige le bug\nLe bug est corrigé.",
+            candidateResponse: candidate))
+    }
+
+    @Test func completeResponseArrivingAtTheLastProbeIsStillPositiveEvidence() {
+        let baseline = "Claude ready\n› Vérifie les tests"
+        let observation = GaiResponseActivityObservation(
+            baselineScreenText: baseline)
+
+        for _ in 0..<12 {
+            #expect(!observation.observe(
+                screenText: baseline,
+                candidateResponse: nil))
+        }
+        let candidate = GaiCompanionResponseExtraction.Result(
+            text: "Tous les tests passent.",
+            wasTruncated: false)
+        #expect(observation.observe(
+            screenText: "\(baseline)\nTous les tests passent.",
+            candidateResponse: candidate))
+    }
+
+    @Test func hooklessTurnCanSettleAfterMoreThanTheFormerThreeSecondWindow() {
+        var observation = GaiResponseSettlementObservation()
+        let candidate = GaiCompanionResponseExtraction.Result(
+            text: "Réponse finale après un long calcul.",
+            wasTruncated: false)
+
+        for index in 0..<20 {
+            let settled = observation.observe(
+                screenText: "Calcul en cours \(index)",
+                candidateResponse: candidate)
+            #expect(!settled)
+        }
+        for _ in 1..<GaiResponseSettlementObservation.requiredIdenticalSamples {
+            let settled = observation.observe(
+                screenText: "Réponse finale après un long calcul.",
+                candidateResponse: candidate)
+            #expect(!settled)
+        }
+        let settled = observation.observe(
+            screenText: "Réponse finale après un long calcul.",
+            candidateResponse: candidate)
+        #expect(settled)
+    }
+
     @Test func interactiveChromeRedrawUsesABoundedLineAnchor() {
         let baseline = GaiCompanionResponseExtraction.snapshot(
             "Codex\n────────\n› Analyse ce fichier\nworking…")

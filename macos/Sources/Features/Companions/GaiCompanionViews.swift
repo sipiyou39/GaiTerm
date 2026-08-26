@@ -60,11 +60,24 @@ private enum GaiCompanionQuickAction: Hashable {
     case voice
 }
 
+private enum GaiCompanionHoverPeekPreference {
+    static var isEnabled: Bool {
+        let defaults = UserDefaults.ghostty
+        guard defaults.object(forKey: GaiPreferenceKey.teddyPeekEnabled) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: GaiPreferenceKey.teddyPeekEnabled)
+    }
+}
+
 /// A native, accessibility-visible action which sits above the mascot's
 /// SwiftUI renderer. Keeping these controls in AppKit lets ordinary button
 /// clicks bypass the custom drag recognizer without adding another panel.
 private final class GaiCompanionQuickActionButton: NSButton {
     private let activation: () -> Void
+    private let materialView = NSVisualEffectView(frame: .zero)
+    private let tintView = NSView(frame: .zero)
+    private let symbolView = NSImageView(frame: .zero)
     private var trackingAreaReference: NSTrackingArea?
     private var isPointerInside = false
 
@@ -76,16 +89,40 @@ private final class GaiCompanionQuickActionButton: NSButton {
     ) {
         self.activation = activation
         super.init(frame: .zero)
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityLabel)
-        imagePosition = .imageOnly
+        image = nil
+        title = ""
         isBordered = false
         bezelStyle = .regularSquare
         focusRingType = .none
-        contentTintColor = NSColor.white.withAlphaComponent(0.82)
         toolTip = help
         wantsLayer = true
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 0.8
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.28
+        layer?.shadowRadius = 5
+        layer?.shadowOffset = NSSize(width: 0, height: -2)
+
+        materialView.material = .hudWindow
+        materialView.blendingMode = .behindWindow
+        materialView.state = .active
+        materialView.wantsLayer = true
+        materialView.layer?.cornerCurve = .continuous
+        materialView.layer?.masksToBounds = true
+        addSubview(materialView)
+
+        tintView.wantsLayer = true
+        tintView.layer?.cornerCurve = .continuous
+        tintView.layer?.masksToBounds = true
+        addSubview(tintView)
+
+        symbolView.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: accessibilityLabel)
+        symbolView.imageScaling = .scaleProportionallyDown
+        symbolView.contentTintColor = NSColor.white.withAlphaComponent(0.86)
+        addSubview(symbolView)
+
         setAccessibilityLabel(accessibilityLabel)
         target = self
         action = #selector(activate)
@@ -98,6 +135,27 @@ private final class GaiCompanionQuickActionButton: NSButton {
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func layout() {
+        super.layout()
+        materialView.frame = bounds
+        tintView.frame = bounds
+        let cornerRadius = min(bounds.width, bounds.height) / 2
+        layer?.cornerRadius = cornerRadius
+        materialView.layer?.cornerRadius = cornerRadius
+        tintView.layer?.cornerRadius = cornerRadius
+
+        let symbolSide = (min(bounds.width, bounds.height) * 0.50).rounded()
+        symbolView.frame = NSRect(
+            x: ((bounds.width - symbolSide) / 2).rounded(),
+            y: ((bounds.height - symbolSide) / 2).rounded(),
+            width: symbolSide,
+            height: symbolSide)
+    }
 
     override func updateTrackingAreas() {
         if let trackingAreaReference {
@@ -134,10 +192,13 @@ private final class GaiCompanionQuickActionButton: NSButton {
     }
 
     private func refreshAppearance() {
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(
-            isPointerInside ? 0.16 : 0.095).cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
         layer?.borderColor = NSColor.white.withAlphaComponent(
-            isPointerInside ? 0.20 : 0.11).cgColor
+            isPointerInside ? 0.38 : 0.28).cgColor
+        tintView.layer?.backgroundColor = NSColor.gray.withAlphaComponent(
+            isPointerInside ? 0.22 : 0.16).cgColor
+        symbolView.contentTintColor = NSColor.white.withAlphaComponent(
+            isPointerInside ? 0.96 : 0.86)
     }
 }
 
@@ -177,6 +238,8 @@ private final class GaiCompanionDropFeedback: ObservableObject {
 private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     var onClick: (() -> Void)?
     var onDoubleClick: (() -> Void)?
+    var onPointerEntered: (() -> Void)?
+    var onPointerExited: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
     var onFileDropTargetChanged: ((Bool) -> Void)?
@@ -185,6 +248,7 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     private let hostingView: NSHostingView<Content>
     private var quickActionButtons: [GaiCompanionQuickAction: GaiCompanionQuickActionButton] = [:]
     private var quickActionsAreVisible = false
+    private var mascotTrackingArea: NSTrackingArea?
 
     init(rootView: Content) {
         hostingView = NSHostingView(rootView: rootView)
@@ -201,6 +265,28 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        if let mascotTrackingArea {
+            removeTrackingArea(mascotTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: mascotPointerRect,
+            options: [.activeAlways, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil)
+        addTrackingArea(area)
+        mascotTrackingArea = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onPointerEntered?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onPointerExited?()
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(point) else { return nil }
@@ -261,6 +347,8 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
                 button.isHidden = false
                 button.alphaValue = animated ? 0 : 1
             }
+            needsLayout = true
+            layoutSubtreeIfNeeded()
         }
 
         NSAnimationContext.runAnimationGroup { context in
@@ -298,6 +386,22 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             quickActionButtons[action]?.layer?.cornerRadius = diameter / 2
             x += diameter + gap
         }
+    }
+
+    private var mascotPointerRect: NSRect {
+        let scale = max(
+            0.72,
+            bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth))
+        let spriteWidth = CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth) * scale
+        let width = min(bounds.width, spriteWidth + 16 * scale)
+        let height = min(
+            bounds.height,
+            CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth + 34) * scale)
+        return NSRect(
+            x: bounds.midX - width / 2,
+            y: bounds.minY,
+            width: width,
+            height: height)
     }
 
     override func viewDidMoveToWindow() {
@@ -582,7 +686,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
     private var terminalHostView: NSView?
+    private weak var voiceContentView: NSView?
     private var mascotHostView: GaiCompanionDragClickContainerView<GaiCompanionMascotView>?
+    private var hoverIntentWorkItem: DispatchWorkItem?
+    private var hoverPresenceTimer: DispatchSourceTimer?
+    private var pointerIsOverMascot = false
+    private var hoverPeekOwnsPresentation = false
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
         self?.advanceLivePlacementAnimation(at: timestamp)
     }
@@ -592,6 +701,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// and perform one exact final layout once the pointer has settled.
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
+    private static let hoverIntentDelay: TimeInterval = 0.18
+    private static let hoverPresenceInterval: DispatchTimeInterval = .milliseconds(16)
+    private static let hoverHitSlop: CGFloat = 12
     private static let restingCompanionLevel = NSWindow.Level(
         rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
     // AppKit's drag image lives at CGWindowLevelKey.draggingWindow. A panel
@@ -680,6 +792,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         mascotHost.onDoubleClick = { [weak manager] in
             manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
         }
+        mascotHost.onPointerEntered = { [weak self] in
+            self?.mascotPointerEntered()
+        }
+        mascotHost.onPointerExited = { [weak self] in
+            self?.mascotPointerExited()
+        }
         mascotHost.configureQuickActions(
             onReplay: { [weak manager] in
                 manager?.requestReplayLatestVoice(id: runtime.id)
@@ -723,7 +841,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         let terminalRoot = GaiCompanionTerminalView(
             runtime: runtime,
             onToggleMaximized: { [weak manager] in
-                manager?.requestOpenTeddy(id: runtime.id, presentation: .terminal)
+                manager?.toggleMaximized(id: runtime.id)
             },
             onApplyLayoutPreset: { [weak manager] preset in
                 manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
@@ -761,11 +879,27 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         mascotHostView?.setQuickActionsVisible(selected && !dropIsTargeted)
     }
 
+    var isHoverPeekPresented: Bool {
+        hoverPeekOwnsPresentation
+            && presentation == .compact
+            && terminalPanel.isVisible
+    }
+
+    /// A hover preview becomes an ordinary compact terminal as soon as the
+    /// user interacts with it. From that point onward only the established
+    /// close/focus rules are allowed to dismiss it.
+    func pinHoverPeekForInteraction() {
+        guard hoverPeekOwnsPresentation else { return }
+        hoverPeekOwnsPresentation = false
+        stopHoverPresenceTimer()
+    }
+
     /// Moves the existing native terminal hierarchy into Teddy without
     /// creating a second renderer. Keeping the whole host together avoids two
     /// SwiftUI representables competing for the same Metal-backed SurfaceView.
     func detachTerminalContentForInlinePresentation() -> NSView? {
         guard let terminalHostView else { return nil }
+        restoreTerminalContentAfterVoicePresentation()
         terminalPanel.orderOut(nil)
 
         if terminalPanel.contentView === terminalHostView {
@@ -783,7 +917,41 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// its inline terminal. The PTY, scrollback and renderer all stay alive.
     func restoreTerminalContentAfterInlinePresentation() {
         guard let terminalHostView,
+              voiceContentView == nil,
               terminalPanel.contentView !== terminalHostView else { return }
+        terminalHostView.removeFromSuperview()
+        terminalHostView.autoresizingMask = [.width, .height]
+        terminalPanel.contentView = terminalHostView
+    }
+
+    var isVoiceContentPresented: Bool {
+        guard let voiceContentView else { return false }
+        return terminalPanel.contentView === voiceContentView
+    }
+
+    /// Reuses the doudou's compact floating panel for its vocal conversation.
+    /// The live Ghostty hierarchy stays retained and is restored verbatim when
+    /// the user switches back to the CLI.
+    func presentVoiceContent(_ contentView: NSView) {
+        guard terminalPanel.contentView !== contentView else { return }
+        voiceContentView?.removeFromSuperview()
+        contentView.removeFromSuperview()
+        contentView.frame = terminalPanel.contentView?.bounds ?? terminalPanel.contentLayoutRect
+        contentView.autoresizingMask = [.width, .height]
+        contentView.wantsLayer = true
+        contentView.layer?.cornerRadius = 8
+        contentView.layer?.masksToBounds = true
+        voiceContentView = contentView
+        terminalPanel.contentView = contentView
+    }
+
+    func restoreTerminalContentAfterVoicePresentation() {
+        guard let voiceContentView else { return }
+        if terminalPanel.contentView === voiceContentView {
+            voiceContentView.removeFromSuperview()
+        }
+        self.voiceContentView = nil
+        guard let terminalHostView else { return }
         terminalHostView.removeFromSuperview()
         terminalHostView.autoresizingMask = [.width, .height]
         terminalPanel.contentView = terminalHostView
@@ -799,6 +967,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         focus: Bool,
         agentWindowsAreVisible: Bool
     ) {
+        if presentation != .compact {
+            cancelHoverPeekLifecycle()
+        } else if focus {
+            pinHoverPeekForInteraction()
+        }
         visibilityGeneration += 1
         let generation = visibilityGeneration
         self.presentation = presentation
@@ -888,6 +1061,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         visibilityGeneration += 1
         resetLivePlacementAnimation()
         guard visible else {
+            cancelHoverPeekLifecycle()
             terminalPanel.orderOut(nil)
             companionPanel.orderOut(nil)
             return
@@ -931,6 +1105,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// following the mascot for the duration of the fade.
     func hideTerminalForCompanionDrag() {
         guard presentation != .collapsed else { return }
+        cancelHoverPeekLifecycle()
         visibilityGeneration += 1
         let generation = visibilityGeneration
         presentation = .collapsed
@@ -943,6 +1118,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        cancelHoverPeekLifecycle()
         resetLivePlacementAnimation()
         terminalMoveSettleGeneration += 1
         terminalMoveSettleWorkItem?.cancel()
@@ -957,6 +1133,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             companionPanel.onFileDrop = nil
         }
         companionPanel.unregisterDraggedTypes()
+        restoreTerminalContentAfterVoicePresentation()
         companionPanel.orderOut(nil)
         terminalPanel.orderOut(nil)
         companionPanel.close()
@@ -965,6 +1142,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard notification.object as? NSWindow === terminalPanel else { return }
+        pinHoverPeekForInteraction()
         manager?.panelDidBecomeKey(for: runtimeID)
     }
 
@@ -1046,9 +1224,112 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private func updateDropTarget(_ targeted: Bool) {
         guard targeted != dropIsTargeted else { return }
         dropIsTargeted = targeted
+        if targeted {
+            cancelHoverIntent()
+        }
         dropFeedback.setTargeted(targeted)
         mascotHostView?.setQuickActionsVisible(
             !targeted && manager?.selectedCompanionID == runtimeID)
+    }
+
+    private func mascotPointerEntered() {
+        pointerIsOverMascot = true
+        guard GaiCompanionHoverPeekPreference.isEnabled,
+              !dropIsTargeted,
+              !interceptingExternalFileDrag,
+              presentation == .collapsed else { return }
+
+        cancelHoverIntent()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pointerIsOverMascot,
+                  GaiCompanionHoverPeekPreference.isEnabled,
+                  !self.dropIsTargeted,
+                  !self.interceptingExternalFileDrag,
+                  self.presentation == .collapsed else { return }
+            self.hoverPeekOwnsPresentation = true
+            guard self.manager?.presentTerminalPeek(id: self.runtimeID) == true else {
+                self.hoverPeekOwnsPresentation = false
+                return
+            }
+            self.startHoverPresenceTimer()
+        }
+        hoverIntentWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.hoverIntentDelay,
+            execute: workItem)
+    }
+
+    private func mascotPointerExited() {
+        pointerIsOverMascot = false
+        cancelHoverIntent()
+    }
+
+    private func startHoverPresenceTimer() {
+        stopHoverPresenceTimer()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now(),
+            repeating: Self.hoverPresenceInterval,
+            leeway: .milliseconds(10))
+        timer.setEventHandler { [weak self] in
+            self?.updateHoverPresence()
+        }
+        hoverPresenceTimer = timer
+        timer.resume()
+    }
+
+    private func updateHoverPresence() {
+        guard hoverPeekOwnsPresentation,
+              presentation == .compact,
+              terminalPanel.isVisible else {
+            stopHoverPresenceTimer()
+            return
+        }
+        guard GaiCompanionHoverPeekPreference.isEnabled else {
+            dismissHoverPeek()
+            return
+        }
+
+        guard hoverInteractionRegionContains(NSEvent.mouseLocation) else {
+            dismissHoverPeek()
+            return
+        }
+    }
+
+    private func hoverInteractionRegionContains(_ point: NSPoint) -> Bool {
+        let mascotRegion = companionPanel.frame.insetBy(
+            dx: -Self.hoverHitSlop,
+            dy: -Self.hoverHitSlop)
+        if mascotRegion.contains(point) { return true }
+
+        let terminalRegion = terminalPanel.frame.insetBy(
+            dx: -Self.hoverHitSlop,
+            dy: -Self.hoverHitSlop)
+        return terminalRegion.contains(point)
+    }
+
+    private func dismissHoverPeek() {
+        guard hoverPeekOwnsPresentation else { return }
+        hoverPeekOwnsPresentation = false
+        stopHoverPresenceTimer()
+        manager?.dismissTerminalPeek(id: runtimeID)
+    }
+
+    private func cancelHoverPeekLifecycle() {
+        hoverPeekOwnsPresentation = false
+        cancelHoverIntent()
+        stopHoverPresenceTimer()
+    }
+
+    private func cancelHoverIntent() {
+        hoverIntentWorkItem?.cancel()
+        hoverIntentWorkItem = nil
+    }
+
+    private func stopHoverPresenceTimer() {
+        hoverPresenceTimer?.cancel()
+        hoverPresenceTimer = nil
     }
 
     /// Starts one bounded FLIP only when the selected side changes. During all
@@ -1785,7 +2066,26 @@ private extension GaiCompanionTerminalLayoutPreset {
     }
 }
 
-/// Shared presentation background for the embedded companion creator.
+private enum GaiCompanionSizingMode: String, CaseIterable {
+    case together
+    case individual
+
+    var title: String {
+        switch self {
+        case .together: "Whole team"
+        case .individual: "One agent"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .together: "link"
+        case .individual: "person.fill"
+        }
+    }
+}
+
+/// Shared presentation background for the companion library and creator.
 private struct GaiCompanionEditorialBackground: View {
     let accent: Color
 
@@ -1798,6 +2098,375 @@ private struct GaiCompanionEditorialBackground: View {
                 startRadius: 20,
                 endRadius: 470)
         }
+    }
+}
+
+struct GaiCompanionLibraryView: View {
+    @ObservedObject var manager: GaiCompanionManager
+    let onOpenSettings: () -> Void
+    let onClose: () -> Void
+    @State private var isCreatingCompanion = false
+    @State private var sizingMode: GaiCompanionSizingMode = .together
+    @State private var selectedCompanionID: UUID?
+    @State private var scaleDraft = GaiCompanionScalePercent.standard.value
+    @State private var hasMixedSizes = false
+
+    var body: some View {
+        ZStack {
+            libraryBackground
+
+            VStack(alignment: .leading, spacing: 20) {
+                header
+
+                VStack(alignment: .leading, spacing: 10) {
+                    companionsHeader
+
+                    agentsSurface
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+
+                if !manager.runtimes.isEmpty {
+                    sizeToolbar
+                }
+            }
+            .padding(24)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        .ignoresSafeArea()
+        .frame(minWidth: 560, minHeight: 450)
+        .sheet(isPresented: $isCreatingCompanion) {
+            GaiCompanionCreationView(manager: manager)
+        }
+        .onAppear {
+            ensureValidSelection()
+            syncScaleDraft()
+        }
+        .onChange(of: manager.runtimes.map(\.id)) { _ in
+            ensureValidSelection()
+            syncScaleDraft()
+        }
+    }
+
+    private var libraryBackground: some View {
+        GaiCompanionEditorialBackground(accent: libraryAccent)
+        .ignoresSafeArea()
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("DouDou Company")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                Text("Every agent has their own terminal, ready to work.")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 10)
+
+            HStack(spacing: 7) {
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help("Open settings")
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("w", modifiers: .command)
+                .help("Close DouDou Company")
+            }
+        }
+    }
+
+    private var sizeToolbar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                Text("Agent size")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+
+                Spacer(minLength: 10)
+
+                if manager.runtimes.count > 1 {
+                    sizingModePicker
+                }
+            }
+
+            Label(scopeSummary, systemImage: sizingMode.symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            GaiCompanionSocialScaleControl(
+                value: scaleDraft,
+                isMixed: hasMixedSizes,
+                accent: sizingAccent,
+                onPreview: previewScale,
+                onCommit: commitScale)
+        }
+    }
+
+    private var sizingModePicker: some View {
+        HStack(spacing: 8) {
+            ForEach(GaiCompanionSizingMode.allCases, id: \.self) { mode in
+                Button {
+                    setSizingMode(mode)
+                } label: {
+                    Label(mode.title, systemImage: mode.symbol)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(mode == sizingMode
+                                    ? libraryAccent.opacity(0.22)
+                                    : Color.primary.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var companionsHeader: some View {
+        HStack(spacing: 7) {
+            Text("Agents")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+            Text("\(manager.runtimes.count)")
+                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if sizingMode == .individual, !manager.runtimes.isEmpty {
+                Text("Select an agent to resize")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var agentsSurface: some View {
+        if manager.runtimes.isEmpty {
+            GaiCompanionEmptyCrewView {
+                isCreatingCompanion = true
+            }
+        } else {
+            VStack(spacing: 0) {
+                if manager.runtimes.count <= 2 {
+                    VStack(spacing: 0) {
+                        agentRows
+                    }
+                    .frame(height: agentListViewportHeight)
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                agentRows
+                            }
+                        }
+                        .frame(height: agentListViewportHeight)
+                        .onAppear {
+                            DispatchQueue.main.async {
+                                guard let newestID = manager.runtimes.last?.id else { return }
+                                proxy.scrollTo(newestID, anchor: .bottom)
+                            }
+                        }
+                        .onChange(of: manager.runtimes.map(\.id)) { ids in
+                            guard let newestID = ids.last else { return }
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                proxy.scrollTo(newestID, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+                    .opacity(0.45)
+                    .padding(.leading, 66)
+
+                hireAgentRow
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.primary.opacity(0.04)))
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+    }
+
+    @ViewBuilder
+    private var agentRows: some View {
+        ForEach(
+            Array(manager.runtimes.enumerated()),
+            id: \.element.id
+        ) { index, runtime in
+            GaiCompanionCompactRow(
+                runtime: runtime,
+                manager: manager,
+                isSelected: sizingMode == .individual
+                    && selectedCompanionID == runtime.id,
+                onSelect: { selectCompanion(runtime) })
+                .id(runtime.id)
+
+            if index < manager.runtimes.count - 1 {
+                Divider()
+                    .opacity(0.45)
+                    .padding(.leading, 66)
+            }
+        }
+    }
+
+    private var hireAgentRow: some View {
+        Button {
+            isCreatingCompanion = true
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(libraryAccent.opacity(0.18))
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(libraryAccent)
+                }
+                .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Hire agent")
+                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                    Text("Add another agent to DouDou Company")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 10)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("n", modifiers: .command)
+    }
+
+    private var agentListViewportHeight: CGFloat {
+        let visibleRows = min(manager.runtimes.count, 2)
+        let rowHeights = CGFloat(visibleRows) * 58
+        let dividerHeights = CGFloat(max(visibleRows - 1, 0))
+        return rowHeights + dividerHeights
+    }
+
+    private var scopeSummary: String {
+        switch sizingMode {
+        case .together:
+            manager.runtimes.count == 1
+                ? "Sizing applies to this agent"
+                : "All \(manager.runtimes.count) agents resize together"
+        case .individual:
+            selectedRuntime.map {
+                "Resizing \($0.record.displayName)"
+            } ?? "Choose an agent"
+        }
+    }
+
+    private var libraryAccent: Color {
+        Color(gaiRGB: GaiCompanionColorway.purple.palette.baseRGB)
+    }
+
+    private var sizingAccent: Color { libraryAccent }
+
+    private var selectedRuntime: GaiCompanionRuntime? {
+        if let selectedCompanionID,
+           let runtime = manager.runtimes.first(where: { $0.id == selectedCompanionID }) {
+            return runtime
+        }
+        return manager.runtimes.first
+    }
+
+    private var controlledRuntimes: [GaiCompanionRuntime] {
+        switch sizingMode {
+        case .together:
+            manager.runtimes
+        case .individual:
+            selectedRuntime.map { [$0] } ?? []
+        }
+    }
+
+    private var controlledIDs: Set<UUID> {
+        Set(controlledRuntimes.map(\.id))
+    }
+
+    private func ensureValidSelection() {
+        guard let selectedCompanionID,
+              manager.runtimes.contains(where: { $0.id == selectedCompanionID }) else {
+            self.selectedCompanionID = manager.runtimes.first?.id
+            return
+        }
+    }
+
+    private func syncScaleDraft() {
+        let values = controlledRuntimes.map { $0.record.scalePercent.value }
+        guard !values.isEmpty else {
+            scaleDraft = GaiCompanionScalePercent.standard.value
+            hasMixedSizes = false
+            return
+        }
+        let average = Double(values.reduce(0, +)) / Double(values.count)
+        let steppedAverage = Int((average / 5).rounded()) * 5
+        scaleDraft = GaiCompanionScalePercent(steppedAverage).value
+        hasMixedSizes = Set(values).count > 1
+    }
+
+    private func setSizingMode(_ mode: GaiCompanionSizingMode) {
+        sizingMode = mode
+        ensureValidSelection()
+        if mode == .individual,
+           let runtime = selectedRuntime {
+            scaleDraft = runtime.record.scalePercent.value
+            hasMixedSizes = false
+        } else {
+            syncScaleDraft()
+        }
+    }
+
+    private func selectCompanion(_ runtime: GaiCompanionRuntime) {
+        sizingMode = .individual
+        selectedCompanionID = runtime.id
+        scaleDraft = runtime.record.scalePercent.value
+        hasMixedSizes = false
+    }
+
+    private func previewScale(_ value: Int) {
+        guard !controlledIDs.isEmpty else { return }
+        scaleDraft = GaiCompanionScalePercent(value).value
+        hasMixedSizes = false
+        manager.previewScales(
+            ids: controlledIDs,
+            scalePercent: GaiCompanionScalePercent(scaleDraft))
+    }
+
+    private func commitScale(_ value: Int) {
+        guard !controlledIDs.isEmpty else { return }
+        scaleDraft = GaiCompanionScalePercent(value).value
+        hasMixedSizes = false
+        manager.commitScales(
+            ids: controlledIDs,
+            scalePercent: GaiCompanionScalePercent(scaleDraft))
     }
 }
 
@@ -2147,6 +2816,257 @@ private struct GaiAgentNameEditor: View {
     }
 }
 
+private struct GaiCompanionCompactRow: View {
+    @ObservedObject var runtime: GaiCompanionRuntime
+    let manager: GaiCompanionManager
+    let isSelected: Bool
+    let onSelect: () -> Void
+    @State private var isChoosingColor = false
+    @State private var isHovering = false
+    @StateObject private var dropFeedback = GaiCompanionDropFeedback()
+
+    private var selectionAccent: Color {
+        Color(gaiRGB: GaiCompanionColorway.purple.palette.baseRGB)
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            avatarControl
+                .overlay {
+                    if dropFeedback.isTargeted {
+                        Circle()
+                            .fill(selectionAccent.opacity(0.16))
+                            .overlay {
+                                Circle()
+                                    .stroke(
+                                        selectionAccent,
+                                        style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+                            }
+                            .allowsHitTesting(false)
+                    } else if dropFeedback.acceptedFileCount != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.green)
+                            .padding(3)
+                            .background(Circle().fill(Color.black.opacity(0.72)))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
+                .animation(.easeOut(duration: 0.16), value: dropFeedback.isTargeted)
+                .dropDestination(for: URL.self) { urls, _ in
+                    acceptDroppedFileURLs(urls)
+                } isTargeted: { targeted in
+                    dropFeedback.setTargeted(targeted)
+                }
+
+            VStack(alignment: .leading, spacing: 2) {
+                GaiAgentNameEditor(
+                    name: runtime.record.displayName,
+                    font: .system(size: 13, weight: .bold, design: .rounded),
+                    maximumDisplayWidth: 160,
+                    fieldWidth: 158,
+                    pencilButtonSize: 18,
+                    accent: selectionAccent,
+                    onActivate: onSelect,
+                    onRename: { manager.updateName(id: runtime.id, name: $0) })
+
+                Button(action: onSelect) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(phaseColor)
+                            .frame(width: 6, height: 6)
+                        Text(runtime.phaseLabel)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Text("·")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        Text(gaiCompanionFolderName(for: runtime.record))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+
+            Button(action: onSelect) {
+                Text("\(runtime.record.scalePercent.value)%")
+                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(Color.primary.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(selectionAccent)
+            }
+
+            Button {
+                manager.updateCompletionSound(
+                    id: runtime.id,
+                    enabled: !runtime.record.completionSoundEnabled)
+            } label: {
+                Image(systemName: runtime.record.completionSoundEnabled
+                    ? "speaker.wave.2.fill"
+                    : "speaker.slash.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(runtime.record.completionSoundEnabled
+                                ? selectionAccent.opacity(0.16)
+                                : Color.primary.opacity(0.055)))
+            }
+            .buttonStyle(.plain)
+            .help(runtime.record.completionSoundEnabled ? "Mute task chime" : "Turn task chime on")
+
+            Button {
+                manager.showCompanion(id: runtime.id)
+            } label: {
+                Label("Open desk", systemImage: "terminal")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule()
+                            .fill(Color.primary.opacity(0.075)))
+            }
+            .buttonStyle(.plain)
+            .help("Open agent terminal")
+
+            Menu {
+                Button {
+                    manager.previewCompletionSound()
+                } label: {
+                    Label("Preview task chime", systemImage: "play.fill")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    manager.requestCloseCompanion(id: runtime.id)
+                } label: {
+                    Label("Remove agent", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(Color.primary.opacity(0.055)))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isSelected
+                    ? selectionAccent.opacity(0.10)
+                    : isHovering ? Color.primary.opacity(0.035) : .clear))
+        .onHover { isHovering = $0 }
+    }
+
+    private var avatarControl: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Button(action: onSelect) {
+                avatar
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                isChoosingColor.toggle()
+            } label: {
+                Circle()
+                    .fill(Color(gaiRGB: runtime.record.colorway.palette.baseRGB))
+                    .frame(width: 14, height: 14)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.62), lineWidth: 1))
+                    .padding(3)
+                    .background(
+                        Circle()
+                            .fill(Color(nsColor: .windowBackgroundColor).opacity(0.94)))
+            }
+            .buttonStyle(.plain)
+            .help("Change agent color")
+            .accessibilityLabel("Change agent color")
+            .popover(isPresented: $isChoosingColor, arrowEdge: .trailing) {
+                colorPickerPopover
+            }
+        }
+        .frame(width: 42, height: 42)
+    }
+
+    private func acceptDroppedFileURLs(_ urls: [URL]) -> Bool {
+        let fileURLs = urls.filter(\.isFileURL)
+        guard !fileURLs.isEmpty else { return false }
+        manager.insertDroppedFileURLs(fileURLs, into: runtime.id)
+        dropFeedback.showAccepted(fileCount: fileURLs.count)
+        return true
+    }
+
+    private var avatar: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(0.16))
+            GaiCompanionSpriteView(
+                colorway: runtime.renderedColorway,
+                animation: runtime.animation,
+                size: 35)
+        }
+        .frame(width: 42, height: 42)
+    }
+
+    private var colorPickerPopover: some View {
+        ZStack {
+            GaiCompanionEditorialBackground(
+                accent: Color(gaiRGB: runtime.record.colorway.palette.baseRGB))
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Agent color")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+
+                GaiCompanionColorDots(
+                    selection: runtime.record.colorway,
+                    diameter: 22,
+                    onSelect: { colorway in
+                        manager.updateColorway(id: runtime.id, colorway: colorway)
+                        isChoosingColor = false
+                    })
+            }
+            .padding(16)
+        }
+    }
+
+    private var phaseColor: Color {
+        switch runtime.activity.phase {
+        case .working: selectionAccent
+        case .awaitingInput, .awaitingApproval: .orange
+        case .completedUnseen: .green
+        case .failed, .exited: .red
+        case .idle: Color.primary.opacity(0.42)
+        }
+    }
+}
+
 private struct GaiCompanionColorDots: View {
     let selection: GaiCompanionColorway
     var diameter: CGFloat
@@ -2377,6 +3297,51 @@ private struct GaiCompanionSocialScaleControl: View {
             + Double(nextProgress)
                 * Double(GaiCompanionScalePercent.maximum - GaiCompanionScalePercent.minimum)
         return GaiCompanionScalePercent(Int((raw / 5).rounded()) * 5).value
+    }
+}
+
+private struct GaiCompanionEmptyCrewView: View {
+    let onCreate: () -> Void
+
+    var body: some View {
+        VStack(spacing: 13) {
+            ZStack {
+                Circle()
+                    .fill(Color.primary.opacity(0.055))
+                    .frame(width: 56, height: 56)
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            Text("DouDou Company starts here")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+            Text("Hire your first digital agent. Their terminal is always one click away.")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button {
+                onCreate()
+            } label: {
+                Label("Hire your first agent", systemImage: "plus")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color(gaiRGB: GaiCompanionColorway.purple.palette.baseRGB))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 30)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(0.035)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.08)))
     }
 }
 
