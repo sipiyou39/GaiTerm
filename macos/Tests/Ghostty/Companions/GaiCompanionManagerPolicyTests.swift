@@ -21,6 +21,19 @@ struct GaiCompanionManagerPolicyTests {
             Set(agentCoordinates).union([.origin])))
     }
 
+    @Test func compactStackFillsTheHubNeighboursBeforeGrowingAnOuterArm() {
+        let coordinates = GaiCompanionStackLayout.defaultCoordinates(count: 8)
+        #expect(coordinates.contains(.init(column: 1, row: 0)))
+        #expect(coordinates.contains(.init(column: 0, row: 1)))
+        #expect(coordinates.contains(.init(column: 1, row: 1)))
+    }
+
+    @Test func newStackCellExtendsTheCompactFootprintInsteadOfBranching() {
+        let occupied = Set(GaiCompanionStackLayout.defaultCoordinates(count: 8))
+        #expect(GaiCompanionStackLayout.firstAvailableConnectedCoordinate(
+            occupied: occupied) == .init(column: 2, row: 2))
+    }
+
     @Test func stackDragCannotSplitTheConstellation() {
         let occupied: Set<GaiCompanionStackCoordinate> = [
             .init(column: 0, row: 0),
@@ -58,6 +71,187 @@ struct GaiCompanionManagerPolicyTests {
         #expect(layout.orientation == .rotate180)
         #expect(try #require(layout.frames[ids[0]]) == anchorFrame)
         #expect(layout.frames.values.allSatisfy { workArea.contains($0) })
+    }
+
+    @Test func magneticStackKeepsItsShapeUntilAnEdgePushesIt() {
+        let ids = (0..<4).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 100, height: 100)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+        let workArea = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+
+        let unpressured = GaiCompanionStackLayout.resolveMagnetically(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: NSRect(x: 400, y: 300, width: 100, height: 100),
+            workArea: workArea,
+            currentOrientation: .rotate180)
+        #expect(unpressured.orientation == .rotate180)
+
+        let edgePressed = GaiCompanionStackLayout.resolveMagnetically(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: NSRect(x: 850, y: 650, width: 100, height: 100),
+            workArea: workArea,
+            currentOrientation: .identity)
+        #expect(edgePressed.orientation == .rotate180)
+
+        let transposedEdgePressed = GaiCompanionStackLayout.resolveMagnetically(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: NSRect(x: 850, y: 650, width: 100, height: 100),
+            workArea: workArea,
+            currentOrientation: .transpose)
+        #expect(transposedEdgePressed.orientation.rawValue
+            >= GaiCompanionStackOrientation.transpose.rawValue)
+    }
+
+    @Test func aPreferredOrientationCannotKeepAnAgentBeyondTheScreenEdge() {
+        let ids = (0..<8).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 100, height: 100)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+        let workArea = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+        let anchorFrame = NSRect(x: 850, y: 650, width: 100, height: 100)
+
+        let layout = GaiCompanionStackLayout.resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: anchorFrame,
+            workArea: workArea,
+            preferredOrientation: .identity)
+
+        #expect(layout.orientation == .rotate180)
+        #expect(layout.frames
+            .filter { $0.key != ids[0] }
+            .allSatisfy { workArea.contains($0.value) })
+    }
+
+    @Test func magneticEdgeResponseDoesNotWaitWhileAnAgentIsClipped() throws {
+        let ids = (0..<2).map { _ in UUID() }
+        let coordinates = Dictionary(uniqueKeysWithValues: zip(
+            ids,
+            GaiCompanionStackLayout.defaultCoordinates(count: ids.count)))
+        let size = NSSize(width: 100, height: 100)
+        let sizes = Dictionary(uniqueKeysWithValues: ids.map { ($0, size) })
+        let workArea = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+
+        // Identity exceeds the right edge by only two points. The old squared
+        // hysteresis kept it clipped because 2² was smaller than 8².
+        let layout = GaiCompanionStackLayout.resolveMagnetically(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: ids[0],
+            anchorFrame: NSRect(x: 816, y: 350, width: 100, height: 100),
+            workArea: workArea,
+            currentOrientation: .identity)
+
+        #expect(layout.orientation == .mirrorX)
+        #expect(workArea.contains(try #require(layout.frames[ids[1]])))
+    }
+
+    @Test func magneticSwapFieldBuildsGraduallyAndSettlesExactly() {
+        let cellSize = CGSize(width: 120, height: 160)
+        let target = CGPoint(x: 500, y: 400)
+        let centreDistance = GaiCompanionMagneticSwap.normalizedDistance(
+            from: target,
+            to: target,
+            cellSize: cellSize)
+        let midwayDistance = GaiCompanionMagneticSwap.normalizedDistance(
+            from: CGPoint(x: 440, y: 400),
+            to: target,
+            cellSize: cellSize)
+        let outsideDistance = GaiCompanionMagneticSwap.normalizedDistance(
+            from: CGPoint(x: 300, y: 400),
+            to: target,
+            cellSize: cellSize)
+
+        #expect(GaiCompanionMagneticSwap.influence(
+            normalizedDistance: centreDistance) == 1)
+        #expect(GaiCompanionMagneticSwap.influence(
+            normalizedDistance: midwayDistance) > 0.5)
+        #expect(GaiCompanionMagneticSwap.influence(
+            normalizedDistance: outsideDistance) == 0)
+        #expect(GaiCompanionMagneticSwap.settlePosition(at: 0) == 0)
+        #expect(GaiCompanionMagneticSwap.settlePosition(at: 1) == 1)
+    }
+
+    @Test func stackCollapseIsTheExactReverseOfOpening() {
+        for sample in 0...100 {
+            let progress = CGFloat(sample) / 100
+            let reversedProgress = 1 - progress
+            let expectedPosition = 1
+                - GaiCompanionStackMotion.position(at: reversedProgress)
+            let expectedOpacity = 1
+                - GaiCompanionStackMotion.opacity(at: reversedProgress)
+
+            #expect(abs(
+                GaiCompanionStackMotion.collapsePosition(at: progress)
+                    - expectedPosition) < 0.000_001)
+            #expect(abs(
+                GaiCompanionStackMotion.collapseOpacity(at: progress)
+                    - expectedOpacity) < 0.000_001)
+        }
+        #expect(
+            GaiCompanionStackMotion.collapseDuration
+                == GaiCompanionStackMotion.expansionDuration)
+
+        let duration = GaiCompanionStackMotion.expansionDuration
+        for stagger in stride(from: 0.0, through: 0.032, by: 0.008) {
+            for elapsed in stride(from: 0.0, through: duration, by: 0.01) {
+                let openingAtReversedTime = GaiCompanionStackMotion.localProgress(
+                    elapsed: duration - elapsed,
+                    duration: duration,
+                    stagger: stagger,
+                    reversing: false)
+                let closing = GaiCompanionStackMotion.localProgress(
+                    elapsed: elapsed,
+                    duration: duration,
+                    stagger: stagger,
+                    reversing: true)
+                #expect(abs(openingAtReversedTime - (1 - closing)) < 0.000_001)
+            }
+        }
+    }
+
+    @Test func stackOpeningMovesDirectlyToEveryFinalSlot() {
+        let samples = (0...100).map {
+            GaiCompanionStackMotion.position(at: CGFloat($0) / 100)
+        }
+        #expect(samples.first == 0)
+        #expect(samples.last == 1)
+        #expect(zip(samples, samples.dropFirst()).allSatisfy { pair in
+            pair.0 <= pair.1
+        })
+        #expect(samples.allSatisfy { (0...1).contains($0) })
+        #expect(GaiCompanionStackMotion.position(at: 0.5) > 0.9)
+        #expect(GaiCompanionStackMotion.expansionDuration <= 0.30)
+        #expect(GaiCompanionStackMotion.maximumStagger <= 0.032)
+    }
+
+    @Test func collapsedStackPreservesEveryRealWindowSize() {
+        let anchor = CGRect(x: 720, y: 430, width: 142, height: 174)
+        let contentSize = CGSize(width: 184, height: 226)
+        let frame = GaiCompanionStackMotion.collapsedFrame(
+            contentSize: contentSize,
+            around: anchor)
+
+        #expect(frame.size == contentSize)
+        #expect(frame.midX == anchor.midX)
+        #expect(frame.midY == anchor.midY)
     }
 
     @Test func stackLayoutNeverPullsAnEdgeAlignedAnchorBackOntoTheDesktop() throws {
@@ -179,6 +373,23 @@ struct GaiCompanionManagerPolicyTests {
         #expect(
             GaiCompanionVisibilityAction.presentAgentTerminal
                 .resultingAgentVisibility(current: false) == true)
+    }
+
+    @Test func windowSpacePoliciesSeparatePersistentOverlaysFromOnDemandUI() {
+        let overlay = GaiCompanionSpacePolicy.floatingOverlay
+        #expect(overlay.contains(.canJoinAllSpaces))
+        #expect(overlay.contains(.canJoinAllApplications))
+        #expect(overlay.contains(.stationary))
+        #expect(overlay.contains(.ignoresCycle))
+        #expect(overlay.contains(.fullScreenAuxiliary))
+        #expect(!overlay.contains(.moveToActiveSpace))
+
+        let applicationWindow = GaiCompanionSpacePolicy.onDemandApplicationWindow
+        #expect(applicationWindow.contains(.moveToActiveSpace))
+        #expect(applicationWindow.contains(.auxiliary))
+        #expect(applicationWindow.contains(.managed))
+        #expect(applicationWindow.contains(.fullScreenAuxiliary))
+        #expect(!applicationWindow.contains(.canJoinAllSpaces))
     }
 
     @Test func cancellingBulkRemovalProducesNoDestructiveTargets() {

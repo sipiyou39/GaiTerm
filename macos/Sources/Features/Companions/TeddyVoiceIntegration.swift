@@ -378,7 +378,7 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.animationBehavior = .documentWindow
-        window.collectionBehavior = [.managed, .fullScreenPrimary]
+        window.collectionBehavior = GaiCompanionSpacePolicy.onDemandApplicationWindow
         window.hasShadow = true
         for buttonType in [
             NSWindow.ButtonType.closeButton,
@@ -427,10 +427,18 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
     }
 
     func show(activate: Bool) {
+        prepareWindowForActiveSpace()
         if window.isMiniaturized { window.deminiaturize(nil) }
         if activate {
             NSApp.unhide(nil)
-            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            // Put a concrete key-window candidate on the current Space before
+            // activating Teddy. Otherwise AppKit may activate the same window
+            // on its previous Space and Mission Control follows it there.
+            window.orderFrontRegardless()
+            window.makeKey()
+            if !NSApp.isActive {
+                NSApp.activate(ignoringOtherApps: true)
+            }
             window.makeKeyAndOrderFront(nil)
         } else {
             window.orderFront(nil)
@@ -443,6 +451,7 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
     }
 
     private func showCreatorAnchoredToHub() {
+        prepareWindowForActiveSpace()
         let wasAlreadyLibrary = rootNavigation.destination == .library
         rootNavigation.showLibrary()
         if wasAlreadyLibrary {
@@ -453,6 +462,16 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
             window.setFrame(frame, display: true, animate: window.isVisible)
         }
         show(activate: true)
+    }
+
+    private func prepareWindowForActiveSpace() {
+        window.collectionBehavior = GaiCompanionSpacePolicy.onDemandApplicationWindow
+        if window.isVisible, !window.isOnActiveSpace {
+            // Ordering an already-visible window directly is what asks macOS
+            // to visit its old Space. Taking it briefly offscreen lets
+            // `.moveToActiveSpace` bind the next order-front to this Space.
+            window.orderOut(nil)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

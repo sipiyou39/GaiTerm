@@ -21,14 +21,17 @@ struct GaiCompanionHubPlacement: Codable, Equatable, Sendable {
 
     var normalizedPosition: GaiCompanionNormalizedPosition
     var displayID: String?
+    var scalePercent: GaiCompanionScalePercent?
 
     init(
         normalizedPosition: GaiCompanionNormalizedPosition,
-        displayID: String?
+        displayID: String?,
+        scalePercent: GaiCompanionScalePercent? = nil
     ) {
         self.normalizedPosition = normalizedPosition
         let cleaned = displayID?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.displayID = cleaned?.isEmpty == false ? cleaned : nil
+        self.scalePercent = scalePercent
     }
 
     init?(userDefaults: UserDefaults) {
@@ -37,7 +40,8 @@ struct GaiCompanionHubPlacement: Codable, Equatable, Sendable {
         else { return nil }
         self.init(
             normalizedPosition: decoded.normalizedPosition,
-            displayID: decoded.displayID)
+            displayID: decoded.displayID,
+            scalePercent: decoded.scalePercent)
     }
 
     @discardableResult
@@ -135,6 +139,37 @@ struct GaiCompanionStackResolvedLayout: Equatable {
     }
 }
 
+/// Continuous field used while one mascot is carried through the organic
+/// grid. Distances are expressed in cells, rather than points, so horizontal
+/// and vertical attraction feel identical despite their different pitches.
+enum GaiCompanionMagneticSwap {
+    static let attractionRadius = CGFloat(1.28)
+    static let targetHysteresis = CGFloat(0.18)
+    static let lockThreshold = CGFloat(0.58)
+
+    static func normalizedDistance(
+        from point: CGPoint,
+        to target: CGPoint,
+        cellSize: CGSize
+    ) -> CGFloat {
+        hypot(
+            (point.x - target.x) / max(cellSize.width, 1),
+            (point.y - target.y) / max(cellSize.height, 1))
+    }
+
+    static func influence(normalizedDistance: CGFloat) -> CGFloat {
+        let linear = min(
+            max(1 - normalizedDistance / attractionRadius, 0),
+            1)
+        return linear * linear * (3 - 2 * linear)
+    }
+
+    static func settlePosition(at progress: CGFloat) -> CGFloat {
+        let value = min(max(progress, 0), 1)
+        return value * value * value * (value * (value * 6 - 15) + 10)
+    }
+}
+
 enum GaiCompanionStackLayout {
     // Panel bounds include generous transparent drag space. Organic cells use
     // the mascot's visual footprint instead: five points of air around a
@@ -161,18 +196,14 @@ enum GaiCompanionStackLayout {
         occupied: Set<GaiCompanionStackCoordinate>
     ) -> GaiCompanionStackCoordinate {
         guard !occupied.isEmpty else { return .origin }
-        let frontier = Array(occupied).sorted(by: coordinateOrder)
-        var visited = occupied
-        var index = 0
-        while index < frontier.count {
-            let coordinate = frontier[index]
-            index += 1
-            for neighbour in coordinate.neighbours.sorted(by: coordinateOrder) {
-                if occupied.contains(neighbour) { continue }
-                if visited.insert(neighbour).inserted { return neighbour }
-            }
-        }
-        return .origin
+
+        // Grow the same compact footprint used by reconciliation. Searching
+        // the neighbours of every occupied cell used to create an arbitrary
+        // arm on the opposite side of the hub. No rigid orientation can then
+        // keep both that arm and the main block inside an edge-aligned screen.
+        return defaultCoordinates(count: occupied.count + 1)
+            .first(where: { !occupied.contains($0) })
+            ?? .origin
     }
 
     static func isConnected(_ coordinates: Set<GaiCompanionStackCoordinate>) -> Bool {
@@ -220,10 +251,8 @@ enum GaiCompanionStackLayout {
             width: max(1, maximumWidth * horizontalPitchRatio),
             height: max(1, maximumHeight * verticalPitchRatio))
         let anchorCoordinate = coordinates[anchorID] ?? .origin
-        let orientations = preferredOrientation.map { [$0] }
-            ?? GaiCompanionStackOrientation.allCases
-
-        let candidates = orientations.map { orientation -> (GaiCompanionStackOrientation, [UUID: NSRect], CGFloat) in
+        let candidates = GaiCompanionStackOrientation.allCases.map { orientation
+            -> (GaiCompanionStackOrientation, [UUID: NSRect], CGFloat) in
             let rawFrames = frames(
                 ids: ids,
                 coordinates: coordinates,
@@ -232,17 +261,23 @@ enum GaiCompanionStackLayout {
                 anchorCenter: CGPoint(x: anchorFrame.midX, y: anchorFrame.midY),
                 cellSize: cellSize,
                 orientation: orientation)
-            let overflow = rawFrames.values.reduce(CGFloat.zero) { result, frame in
-                result
-                    + squared(max(0, workArea.minX - frame.minX))
-                    + squared(max(0, frame.maxX - workArea.maxX))
-                    + squared(max(0, workArea.minY - frame.minY))
-                    + squared(max(0, frame.maxY - workArea.maxY))
-            }
+            let overflow = overflowScore(
+                frames: rawFrames,
+                workArea: workArea,
+                excluding: anchorID)
             return (orientation, rawFrames, overflow)
         }
         let selected = candidates.min { lhs, rhs in
             if lhs.2 != rhs.2 { return lhs.2 < rhs.2 }
+            let lhsContinuity = orientationChangeCost(
+                from: preferredOrientation,
+                to: lhs.0)
+            let rhsContinuity = orientationChangeCost(
+                from: preferredOrientation,
+                to: rhs.0)
+            if lhsContinuity != rhsContinuity {
+                return lhsContinuity < rhsContinuity
+            }
             return lhs.0.rawValue < rhs.0.rawValue
         } ?? (.identity, [:], 0)
 
@@ -258,6 +293,57 @@ enum GaiCompanionStackLayout {
             cellSize: cellSize,
             frames: resolvedFrames)
     }
+
+    // swiftlint:disable function_parameter_count
+    /// Keeps the current constellation orientation while it fits, then chooses
+    /// the symmetry with the most room. A fully fitting alternative always
+    /// wins immediately: hysteresis may stabilise an impossible fit, but can
+    /// never be the reason one mascot remains clipped beyond a screen edge.
+    static func resolveMagnetically(
+        ids: [UUID],
+        coordinates: [UUID: GaiCompanionStackCoordinate],
+        sizes: [UUID: CGSize],
+        anchorID: UUID,
+        anchorFrame: NSRect,
+        workArea: NSRect,
+        currentOrientation: GaiCompanionStackOrientation
+    ) -> GaiCompanionStackResolvedLayout {
+        let current = resolveExactly(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: anchorID,
+            anchorFrame: anchorFrame,
+            orientation: currentOrientation)
+        let best = resolve(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorID: anchorID,
+            anchorFrame: anchorFrame,
+            workArea: workArea,
+            preferredOrientation: currentOrientation)
+        let currentOverflow = overflowScore(
+            frames: current.frames,
+            workArea: workArea,
+            excluding: anchorID)
+        let bestOverflow = overflowScore(
+            frames: best.frames,
+            workArea: workArea,
+            excluding: anchorID)
+
+        // The screen boundary is a hard constraint whenever a complete fit is
+        // possible. This also permits a transpose as a last resort on narrow
+        // displays instead of sacrificing a mascot outside the visible area.
+        if bestOverflow <= 0.001, currentOverflow > 0.001 {
+            return best
+        }
+        let edgePressureHysteresis = CGFloat(8 * 8)
+        return bestOverflow + edgePressureHysteresis < currentOverflow
+            ? best
+            : current
+    }
+    // swiftlint:enable function_parameter_count
 
     private static func frames(
         ids: [UUID],
@@ -286,17 +372,65 @@ enum GaiCompanionStackLayout {
         })
     }
 
+    private static func resolveExactly(
+        ids: [UUID],
+        coordinates: [UUID: GaiCompanionStackCoordinate],
+        sizes: [UUID: CGSize],
+        anchorID: UUID,
+        anchorFrame: NSRect,
+        orientation: GaiCompanionStackOrientation
+    ) -> GaiCompanionStackResolvedLayout {
+        let maximumWidth = ids.compactMap { sizes[$0]?.width }.max() ?? anchorFrame.width
+        let maximumHeight = ids.compactMap { sizes[$0]?.height }.max() ?? anchorFrame.height
+        let cellSize = CGSize(
+            width: max(1, maximumWidth * horizontalPitchRatio),
+            height: max(1, maximumHeight * verticalPitchRatio))
+        let anchorCoordinate = coordinates[anchorID] ?? .origin
+        let resolvedFrames = frames(
+            ids: ids,
+            coordinates: coordinates,
+            sizes: sizes,
+            anchorCoordinate: anchorCoordinate,
+            anchorCenter: CGPoint(x: anchorFrame.midX, y: anchorFrame.midY),
+            cellSize: cellSize,
+            orientation: orientation)
+        let resolvedAnchor = resolvedFrames[anchorID] ?? anchorFrame
+        return GaiCompanionStackResolvedLayout(
+            orientation: orientation,
+            anchorCenter: CGPoint(x: resolvedAnchor.midX, y: resolvedAnchor.midY),
+            cellSize: cellSize,
+            frames: resolvedFrames)
+    }
+
     private static func squared(_ value: CGFloat) -> CGFloat { value * value }
 
-    private static func coordinateOrder(
-        _ lhs: GaiCompanionStackCoordinate,
-        _ rhs: GaiCompanionStackCoordinate
-    ) -> Bool {
-        let lhsDistance = abs(lhs.column) + abs(lhs.row)
-        let rhsDistance = abs(rhs.column) + abs(rhs.row)
-        if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
-        if lhs.row != rhs.row { return lhs.row < rhs.row }
-        return lhs.column < rhs.column
+    private static func overflowScore(
+        frames: [UUID: NSRect],
+        workArea: NSRect,
+        excluding excludedID: UUID? = nil
+    ) -> CGFloat {
+        frames.reduce(CGFloat.zero) { result, element in
+            let (id, frame) = element
+            guard id != excludedID else { return result }
+            return result
+                + squared(max(0, workArea.minX - frame.minX))
+                + squared(max(0, frame.maxX - workArea.maxX))
+                + squared(max(0, workArea.minY - frame.minY))
+                + squared(max(0, frame.maxY - workArea.maxY))
+        }
+    }
+
+    private static func orientationChangeCost(
+        from preferred: GaiCompanionStackOrientation?,
+        to candidate: GaiCompanionStackOrientation
+    ) -> Int {
+        guard let preferred else { return 0 }
+        if preferred == candidate { return 0 }
+        let preferredIsTransposed = preferred.rawValue
+            >= GaiCompanionStackOrientation.transpose.rawValue
+        let candidateIsTransposed = candidate.rawValue
+            >= GaiCompanionStackOrientation.transpose.rawValue
+        return preferredIsTransposed == candidateIsTransposed ? 1 : 2
     }
 }
 #endif

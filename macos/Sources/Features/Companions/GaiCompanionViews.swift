@@ -5,6 +5,27 @@ import GhosttyKit
 import QuartzCore
 import SwiftUI
 
+/// Space semantics are part of the product, not incidental window defaults.
+/// Mascots are system-style overlays that follow every app and every Space;
+/// the ordinary creator/settings window belongs only to the Space where the
+/// user explicitly asks for it.
+enum GaiCompanionSpacePolicy {
+    static let floatingOverlay: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces,
+        .canJoinAllApplications,
+        .stationary,
+        .ignoresCycle,
+        .fullScreenAuxiliary,
+    ]
+
+    static let onDemandApplicationWindow: NSWindow.CollectionBehavior = [
+        .moveToActiveSpace,
+        .auxiliary,
+        .managed,
+        .fullScreenAuxiliary,
+    ]
+}
+
 private final class GaiCompanionPanel: NSPanel, NSDraggingDestination {
     var acceptsKeyWindow = false
     var onFileDropTargetChanged: ((Bool) -> Void)?
@@ -346,10 +367,9 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             accessibilityLabel: "Créer des doudous",
             help: "Ouvrir la création de doudous",
             activation: onOpenCreator)
-        button.isHidden = false
-        button.alphaValue = 1
+        button.isHidden = true
+        button.alphaValue = 0
         quickActionButtons[.home] = button
-        quickActionsAreVisible = true
         addSubview(button)
         needsLayout = true
     }
@@ -365,6 +385,7 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             }
             needsLayout = true
             layoutSubtreeIfNeeded()
+            updateTrackingAreas()
         }
 
         NSAnimationContext.runAnimationGroup { context in
@@ -378,6 +399,7 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             for button in buttons {
                 button.isHidden = true
             }
+            self.updateTrackingAreas()
         }
     }
 
@@ -415,11 +437,15 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let height = min(
             bounds.height,
             CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth + 34) * scale)
-        return NSRect(
+        let mascotRect = NSRect(
             x: bounds.midX - width / 2,
             y: bounds.minY,
             width: width,
             height: height)
+        guard quickActionsAreVisible else { return mascotRect }
+        return quickActionButtons.values.reduce(mascotRect) { rect, button in
+            button.isHidden ? rect : rect.union(button.frame)
+        }
     }
 
     override func viewDidMoveToWindow() {
@@ -487,49 +513,45 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
 
         let startPointer = NSEvent.mouseLocation
         let startOrigin = window.frame.origin
-        var exceededDragThreshold = false
-        var windowActuallyMoved = false
-        let notificationCenter = NotificationCenter.default
-        let movementObserver = notificationCenter.addObserver(
-            forName: NSWindow.didMoveNotification,
-            object: window,
-            queue: .main
-        ) { [weak self, weak window] _ in
-            guard let origin = window?.frame.origin else { return }
-            let distance = hypot(origin.x - startOrigin.x, origin.y - startOrigin.y)
-            if distance >= 0.5 {
-                windowActuallyMoved = true
+        var dragOwnsGesture = false
+        var mouseUpLocation = startPointer
+
+        while let nextEvent = NSApp.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            let pointer = NSEvent.mouseLocation
+            mouseUpLocation = pointer
+            if nextEvent.type == .leftMouseUp {
+                break
             }
-            guard !exceededDragThreshold, distance >= 3 else { return }
 
-            exceededDragThreshold = true
-            self?.onDragBegan?()
-        }
-        defer {
-            notificationCenter.removeObserver(movementObserver)
-        }
-
-        window.performDrag(with: event)
-
-        let endPointer = NSEvent.mouseLocation
-        let pointerDistance = hypot(
-            endPointer.x - startPointer.x,
-            endPointer.y - startPointer.y)
-        let windowDistance = hypot(
-            window.frame.minX - startOrigin.x,
-            window.frame.minY - startOrigin.y)
-        let completedDrag = exceededDragThreshold
-            || windowActuallyMoved
-            || pointerDistance >= 3
-            || windowDistance >= 0.5
-        if completedDrag {
-            if !exceededDragThreshold {
+            let deltaX = pointer.x - startPointer.x
+            let deltaY = pointer.y - startPointer.y
+            if !dragOwnsGesture, hypot(deltaX, deltaY) >= 2 {
+                // Ownership is irreversible for this mouse sequence. Even if
+                // the pointer comes back to its exact starting point, mouse-up
+                // can no longer toggle or expand the stack.
+                dragOwnsGesture = true
                 onDragBegan?()
             }
+            guard dragOwnsGesture else { continue }
+            let origin = NSPoint(
+                x: startOrigin.x + deltaX,
+                y: startOrigin.y + deltaY)
+            if window.frame.origin != origin {
+                window.setFrameOrigin(origin)
+            }
+        }
+
+        if dragOwnsGesture {
             onDragEnded?()
             return
         }
-        let endInWindow = window.convertPoint(fromScreen: endPointer)
+
+        let endInWindow = window.convertPoint(fromScreen: mouseUpLocation)
         let endInView = convert(endInWindow, from: nil)
         guard bounds.contains(endInView) else { return }
         // A single click only selects now; it no longer opens the compact
@@ -568,13 +590,54 @@ private struct GaiCompanionWindowDragArea: NSViewRepresentable {
     func updateNSView(_ view: DragView, context: Context) {}
 }
 
-/// Display-synchronised main-thread ticks with coalescing. `CVDisplayLink`
-/// calls back off-main; the data source merges frames if AppKit is briefly busy
-/// instead of building a queue of stale animation work.
+@available(macOS 14.0, *)
+private final class GaiCompanionViewDisplayLinkDriver: NSObject {
+    private let onFrame: (CFTimeInterval) -> Void
+    private var displayLink: CADisplayLink?
+
+    init(view: NSView, onFrame: @escaping (CFTimeInterval) -> Void) {
+        self.onFrame = onFrame
+        super.init()
+
+        let displayLink = view.displayLink(
+            target: self,
+            selector: #selector(displayLinkDidFire(_:)))
+        // Apple classifies a large, fast spatial transition as a high-impact
+        // animation. Ask ProMotion for its native range; the system clamps this
+        // automatically on 60 Hz displays and under power or thermal pressure.
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+            minimum: 80,
+            maximum: 120,
+            preferred: 120)
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
+    }
+
+    deinit {
+        invalidate()
+    }
+
+    func invalidate() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        // Advance against the frame that is about to be presented, not the one
+        // AppKit has just finished. This removes one refresh of input latency.
+        onFrame(displayLink.targetTimestamp)
+    }
+}
+
+/// Display-synchronised main-thread ticks. On modern macOS the clock is created
+/// by the visible AppKit view itself, so it follows the actual screen (including
+/// 120 Hz ProMotion and moves between displays). macOS 13 keeps the coalesced
+/// CoreVideo fallback.
 final class GaiCompanionDisplayLink {
     private let onFrame: (CFTimeInterval) -> Void
     private let frameSource: DispatchSourceUserDataAdd
     private var displayLink: CVDisplayLink?
+    private var viewDisplayLinkDriver: AnyObject?
     private var fallbackTimer: DispatchSourceTimer?
     private var running = false
 
@@ -609,9 +672,15 @@ final class GaiCompanionDisplayLink {
         frameSource.cancel()
     }
 
-    func start() {
+    func start(synchronizedTo view: NSView? = nil) {
         guard !running else { return }
         running = true
+        if #available(macOS 14.0, *), let view, view.window != nil {
+            viewDisplayLinkDriver = GaiCompanionViewDisplayLinkDriver(
+                view: view,
+                onFrame: onFrame)
+            return
+        }
         if let displayLink {
             CVDisplayLinkStart(displayLink)
             return
@@ -632,6 +701,11 @@ final class GaiCompanionDisplayLink {
     func stop() {
         guard running else { return }
         running = false
+        if #available(macOS 14.0, *),
+           let driver = viewDisplayLinkDriver as? GaiCompanionViewDisplayLinkDriver {
+            driver.invalidate()
+        }
+        viewDisplayLinkDriver = nil
         if let displayLink, CVDisplayLinkIsRunning(displayLink) {
             CVDisplayLinkStop(displayLink)
         }
@@ -691,13 +765,17 @@ private enum GaiCompanionPlacementTiming {
 final class GaiCompanionHubState: ObservableObject {
     @Published var companionCount = 0
     @Published var isExpanded = false
+    @Published var isHovered = false
+    @Published var scalePercent = GaiCompanionScalePercent.standard
 }
 
 final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
     let companionPanel: NSPanel
 
     private let hubID: UUID
+    private let state: GaiCompanionHubState
     private weak var manager: GaiCompanionManager?
+    private weak var hostView: GaiCompanionDragClickContainerView<GaiCompanionHubView>?
     private var applyingFrame = false
     private var previousFrame: NSRect?
 
@@ -707,6 +785,7 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         manager: GaiCompanionManager
     ) {
         self.hubID = hubID
+        self.state = state
         self.manager = manager
 
         let panel = GaiCompanionPanel(
@@ -715,14 +794,12 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
                 y: 0,
                 width: GaiCompanionVisualMetrics.basePanelWidth,
                 height: GaiCompanionVisualMetrics.basePanelHeight),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
         panel.level = NSWindow.Level(
             rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
-        panel.collectionBehavior = [
-            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
-        ]
+        panel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -746,6 +823,17 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         host.configureHubAction { [weak manager] in
             manager?.requestOpenCompanionCreator()
         }
+        host.onPointerEntered = { [weak host, weak state] in
+            state?.isHovered = true
+            host?.setQuickActionsVisible(true)
+        }
+        host.onPointerExited = { [weak host, weak state] in
+            state?.isHovered = false
+            host?.setQuickActionsVisible(false)
+        }
+        host.onDragBegan = { [weak manager] in
+            manager?.companionHubDragDidBegin()
+        }
         host.onDragEnded = { [weak self, weak manager] in
             guard let self else { return }
             manager?.companionHubDidMove(
@@ -753,6 +841,7 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
                 screen: self.companionPanel.screen)
         }
         host.autoresizingMask = [.width, .height]
+        hostView = host
         panel.contentView = host
     }
 
@@ -768,6 +857,7 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         if visible {
             companionPanel.orderFrontRegardless()
         } else {
+            resetHoverPresentation()
             companionPanel.orderOut(nil)
         }
     }
@@ -776,6 +866,26 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         if visible {
             companionPanel.orderFrontRegardless()
         } else {
+            resetHoverPresentation()
+            companionPanel.orderOut(nil)
+        }
+    }
+
+    func resize(frame: NSRect) {
+        applyingFrame = true
+        if companionPanel.frame != frame {
+            companionPanel.setFrame(frame, display: true, animate: false)
+        }
+        previousFrame = frame
+        applyingFrame = false
+    }
+
+    func restoreVisibilityOnActiveSpace(_ visible: Bool) {
+        companionPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        if visible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            resetHoverPresentation()
             companionPanel.orderOut(nil)
         }
     }
@@ -794,7 +904,11 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
     ) {
         applyingFrame = true
         if companionPanel.frame != frame {
-            companionPanel.setFrame(frame, display: false, animate: false)
+            if companionPanel.frame.size == frame.size {
+                companionPanel.setFrameOrigin(frame.origin)
+            } else {
+                companionPanel.setFrame(frame, display: false, animate: false)
+            }
         }
         previousFrame = frame
         applyingFrame = false
@@ -807,11 +921,14 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    func prepareStackTransition() {
+    func prepareStackTransition(maximumScale: CGFloat = 1) {
         companionPanel.contentView?.wantsLayer = true
-        companionPanel.contentView?.layer?.shouldRasterize = true
-        companionPanel.contentView?.layer?.rasterizationScale =
-            companionPanel.screen?.backingScaleFactor ?? 2
+        guard let layer = companionPanel.contentView?.layer else { return }
+        layer.rasterizationScale = (companionPanel.screen?.backingScaleFactor ?? 2)
+            * max(1, maximumScale)
+        layer.minificationFilter = .trilinear
+        layer.magnificationFilter = .linear
+        layer.shouldRasterize = true
     }
 
     func finishStackTransition() {
@@ -823,9 +940,15 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        resetHoverPresentation()
         companionPanel.delegate = nil
         companionPanel.orderOut(nil)
         companionPanel.close()
+    }
+
+    private func resetHoverPresentation() {
+        state.isHovered = false
+        hostView?.setQuickActionsVisible(false, animated: false)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -884,6 +1007,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private static let hoverHitSlop: CGFloat = 12
     private static let restingCompanionLevel = NSWindow.Level(
         rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+    private static let foregroundTerminalLevel = NSWindow.Level(
+        rawValue: GaiFloatingPanels.overlayLevel.rawValue + 2)
     // AppKit's drag image lives at CGWindowLevelKey.draggingWindow. A panel
     // above that level remains visible, but is skipped as a native destination
     // and the drop reaches the application underneath. During a file drag,
@@ -904,13 +1029,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 y: 0,
                 width: GaiCompanionVisualMetrics.basePanelWidth,
                 height: GaiCompanionVisualMetrics.basePanelHeight),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
         companionPanel.level = Self.restingCompanionLevel
-        companionPanel.collectionBehavior = [
-            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
-        ]
+        companionPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
         companionPanel.isOpaque = false
         companionPanel.backgroundColor = .clear
         companionPanel.hasShadow = false
@@ -927,10 +1050,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             styleMask: [.borderless],
             backing: .buffered,
             defer: false)
-        terminalPanel.level = GaiFloatingPanels.overlayLevel
-        terminalPanel.collectionBehavior = [
-            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
-        ]
+        terminalPanel.level = Self.foregroundTerminalLevel
+        terminalPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
         terminalPanel.isOpaque = false
         terminalPanel.backgroundColor = .clear
         terminalPanel.hasShadow = false
@@ -1075,7 +1196,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     ) {
         applyingCompanionFrame = true
         if !NSEqualRects(companionPanel.frame, frame) {
-            companionPanel.setFrame(frame, display: false, animate: false)
+            if companionPanel.frame.size == frame.size {
+                companionPanel.setFrameOrigin(frame.origin)
+            } else {
+                companionPanel.setFrame(frame, display: false, animate: false)
+            }
         }
         previousCompanionFrame = frame
         applyingCompanionFrame = false
@@ -1088,17 +1213,48 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Hub dragging changes only the Window Server position. The mascot is
+    /// already rasterized for the gesture, so alpha and layer transforms stay
+    /// untouched and no SwiftUI work is scheduled for these live frames.
+    func applyHubDragFrame(_ frame: NSRect) {
+        applyingCompanionFrame = true
+        if !NSEqualRects(companionPanel.frame, frame) {
+            companionPanel.setFrame(frame, display: false, animate: false)
+        }
+        previousCompanionFrame = frame
+        applyingCompanionFrame = false
+    }
+
+    func applyMagneticDragScale(_ scale: CGFloat) {
+        companionPanel.contentView?.wantsLayer = true
+        companionPanel.contentView?.layer?.setAffineTransform(
+            CGAffineTransform(scaleX: scale, y: scale))
+    }
+
     /// The whole mascot hierarchy becomes one compositor texture for stack
     /// motion. Materials, badges and atlas sublayers no longer need to be
     /// recomposited independently for every Window Server frame.
-    func prepareStackTransition() {
+    func prepareStackTransition(maximumScale: CGFloat = 1) {
         cancelHoverPeekLifecycle()
         companionPanel.ignoresMouseEvents = true
         mascotHostView?.setQuickActionsVisible(false, animated: false)
         companionPanel.contentView?.wantsLayer = true
-        companionPanel.contentView?.layer?.shouldRasterize = true
-        companionPanel.contentView?.layer?.rasterizationScale =
-            companionPanel.screen?.backingScaleFactor ?? 2
+        // Commit the material-free transition hierarchy once. From this point
+        // until settle, the layer tree is immutable and WindowServer only moves
+        // a bitmap; SwiftUI performs no layout or backdrop work per frame.
+        companionPanel.contentView?.layoutSubtreeIfNeeded()
+        companionPanel.contentView?.displayIfNeeded()
+        guard let layer = companionPanel.contentView?.layer else { return }
+        layer.rasterizationScale = (companionPanel.screen?.backingScaleFactor ?? 2)
+            * max(1, maximumScale)
+        layer.minificationFilter = .trilinear
+        layer.magnificationFilter = .linear
+        layer.shouldRasterize = true
+    }
+
+    func prepareStackBadgeReveal() {
+        companionPanel.contentView?.layoutSubtreeIfNeeded()
+        companionPanel.contentView?.displayIfNeeded()
     }
 
     func finishStackTransition(
@@ -1129,6 +1285,13 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         } else {
             companionPanel.orderOut(nil)
         }
+    }
+
+    /// Once a collapsing mascot is fully transparent, remove its window from
+    /// Window Server composition. Its final hidden frame is restored when the
+    /// stack settles, so stopping early has no layout side effect.
+    func suspendStackTransitionRendering() {
+        companionPanel.orderOut(nil)
     }
 
     var isHoverPeekPresented: Bool {
@@ -1217,7 +1380,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         presentation: GaiCompanionPresentation,
         animated: Bool,
         focus: Bool,
-        agentWindowsAreVisible: Bool
+        agentWindowsAreVisible: Bool,
+        companionIsVisible: Bool
     ) {
         if presentation != .compact {
             cancelHoverPeekLifecycle()
@@ -1265,7 +1429,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             return
         }
 
-        companionPanel.orderFrontRegardless()
+        if companionIsVisible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
 
         guard let terminalFrame else {
             hideTerminal(animated: animated, generation: generation)
@@ -1286,12 +1454,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
 
         if focus {
-            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
-            terminalPanel.makeKeyAndOrderFront(nil)
+            focusTerminalOnActiveSpace()
         } else {
             terminalPanel.orderFrontRegardless()
         }
-        companionPanel.orderFrontRegardless()
 
         if !wasVisible && animated {
             NSAnimationContext.runAnimationGroup { context in
@@ -1303,13 +1469,55 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func orderFront() {
+        companionPanel.orderFrontRegardless()
         if presentation != .collapsed {
             terminalPanel.orderFrontRegardless()
         }
-        companionPanel.orderFrontRegardless()
     }
 
-    func setAgentWindowsVisible(_ visible: Bool) {
+    /// Establish the all-Spaces terminal as the activation target before the
+    /// application becomes active. Activating first lets AppKit choose the old
+    /// creator window and can make Mission Control jump to its previous Space.
+    func focusTerminalOnActiveSpace(makeMain: Bool = false) {
+        terminalPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        terminalPanel.orderFrontRegardless()
+        terminalPanel.makeKey()
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        terminalPanel.makeKeyAndOrderFront(nil)
+        if makeMain {
+            terminalPanel.makeMain()
+        }
+    }
+
+    func restoreVisibilityOnActiveSpace(
+        agentWindowsVisible: Bool,
+        companionIsVisible: Bool
+    ) {
+        companionPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        terminalPanel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        guard agentWindowsVisible else {
+            terminalPanel.orderOut(nil)
+            companionPanel.orderOut(nil)
+            return
+        }
+        if companionIsVisible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
+        if presentation != .collapsed {
+            terminalPanel.orderFrontRegardless()
+        } else {
+            terminalPanel.orderOut(nil)
+        }
+    }
+
+    func setAgentWindowsVisible(
+        _ visible: Bool,
+        companionIsVisible: Bool
+    ) {
         visibilityGeneration += 1
         resetLivePlacementAnimation()
         guard visible else {
@@ -1319,7 +1527,14 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             return
         }
         terminalPanel.alphaValue = 1
-        orderFront()
+        if companionIsVisible {
+            companionPanel.orderFrontRegardless()
+        } else {
+            companionPanel.orderOut(nil)
+        }
+        if presentation != .collapsed {
+            terminalPanel.orderFrontRegardless()
+        }
     }
 
     /// Applies live size settings without entering the general show/hide path.
@@ -1425,6 +1640,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         let deltaX = frame.minX - previousFrame.minX
         let deltaY = frame.minY - previousFrame.minY
         guard deltaX != 0 || deltaY != 0 else { return }
+
+        // A mascot attached to the white hub is being moved by Window Server,
+        // not by the user. Feeding that parent-driven move back into the agent
+        // drag policy used to launch swap previews for every child on every
+        // frame, which caused the visible flicker and irregular frame pacing.
+        guard companionPanel.parent == nil else { return }
 
         // The Window Server has already moved every visible child atomically.
         // Only the desired relative placement is updated here; persistence and
@@ -1628,7 +1849,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             terminalFrom: relativeOrigin(of: terminalPanel, anchor: anchor),
             terminalTo: relativeOrigin(of: terminalFrame, anchor: anchor),
             startedAt: CACurrentMediaTime())
-        placementDisplayLink.start()
+        placementDisplayLink.start(synchronizedTo: companionPanel.contentView)
     }
 
     /// Cancels any in-flight FLIP and establishes the exact geometry when
@@ -1740,12 +1961,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             if !terminalPanel.isVisible {
                 detachTerminalWindow()
             }
-            terminalPanel.level = GaiFloatingPanels.overlayLevel
+            terminalPanel.level = Self.foregroundTerminalLevel
             return
 
         case .maximized:
             detachTerminalWindow()
-            terminalPanel.level = GaiFloatingPanels.overlayLevel
+            terminalPanel.level = Self.foregroundTerminalLevel
             return
 
         case .compact:
@@ -1753,12 +1974,13 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
 
         if terminalPanel.parent !== companionPanel {
-            companionPanel.addChildWindow(terminalPanel, ordered: .below)
+            companionPanel.addChildWindow(terminalPanel, ordered: .above)
         }
         // `addChildWindow` initially adopts the parent's level. Restore the
-        // terminal's lower global level while retaining the native movement
-        // relationship, so terminals can never cover another mascot.
-        terminalPanel.level = GaiFloatingPanels.overlayLevel
+        // terminal's dedicated foreground level while retaining the native
+        // movement relationship. A visible terminal must cover every mascot,
+        // including mascots owned by another controller.
+        terminalPanel.level = Self.foregroundTerminalLevel
     }
 
     private func configureTerminalResizing(
@@ -1842,31 +2064,42 @@ private struct GaiCompanionHubView: View {
     @ObservedObject var state: GaiCompanionHubState
 
     private let colorway = GaiCompanionColorway.hubColorway
-    private let spriteWidth = CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth)
+    private var scaleFactor: CGFloat {
+        CGFloat(GaiCompanionVisualMetrics.scaleFactor(for: state.scalePercent))
+    }
+    private var spriteWidth: CGFloat {
+        CGFloat(GaiCompanionVisualMetrics.scaledSpriteWidth(
+            for: state.scalePercent))
+    }
 
     var body: some View {
         ZStack {
             Color.clear.contentShape(Rectangle())
 
-            VStack(spacing: -4) {
+            VStack(spacing: -4 * scaleFactor) {
                 GaiCompanionSpriteView(
                     colorway: colorway,
                     animation: .idle,
                     size: spriteWidth)
-                    .shadow(color: Color.white.opacity(0.18), radius: 11)
-                Color.clear.frame(height: 24)
+                    .shadow(
+                        color: Color.white.opacity(0.18),
+                        radius: 11 * scaleFactor)
+                Color.clear.frame(height: 24 * scaleFactor)
             }
-            .padding(.bottom, 2)
+            .padding(.bottom, 2 * scaleFactor)
 
-            if state.companionCount > 0 {
+            if state.companionCount > 0, state.isHovered {
                 VStack {
                     HStack {
                         Spacer()
                         Text("\(state.companionCount)")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .font(.system(
+                                size: 10 * scaleFactor,
+                                weight: .bold,
+                                design: .rounded))
                             .foregroundStyle(.white.opacity(0.96))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 6 * scaleFactor)
+                            .padding(.vertical, 3 * scaleFactor)
                             .background {
                                 Capsule(style: .continuous)
                                     .fill(.ultraThinMaterial)
@@ -1876,19 +2109,26 @@ private struct GaiCompanionHubView: View {
                                     }
                                     .overlay {
                                         Capsule(style: .continuous)
-                                            .stroke(.white.opacity(0.32), lineWidth: 0.8)
+                                            .stroke(
+                                                .white.opacity(0.32),
+                                                lineWidth: 0.8 * scaleFactor)
                                     }
                             }
-                            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                            .shadow(
+                                color: .black.opacity(0.35),
+                                radius: 6 * scaleFactor,
+                                y: 2 * scaleFactor)
                     }
                     Spacer()
                 }
-                .padding(.top, 35)
-                .padding(.trailing, 9)
+                .padding(.top, 35 * scaleFactor)
+                .padding(.trailing, 9 * scaleFactor)
                 .allowsHitTesting(false)
+                .transition(.opacity.combined(with: .scale(scale: 0.88)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .animation(.easeOut(duration: 0.14), value: state.isHovered)
         .accessibilityLabel("Pile de \(state.companionCount) doudous")
         .accessibilityValue(state.isExpanded ? "Ouverte" : "Fermée")
     }
@@ -1901,10 +2141,15 @@ private struct GaiCompanionMascotView: View {
 
     private var accent: Color { Color(gaiRGB: runtime.record.colorway.palette.baseRGB) }
     private var scaleFactor: CGFloat {
-        CGFloat(GaiCompanionVisualMetrics.scaleFactor(for: runtime.record.scalePercent))
+        if runtime.collapsedStackDepth > 0 { return 1 }
+        return CGFloat(GaiCompanionVisualMetrics.scaleFactor(for: runtime.record.scalePercent))
     }
     private var spriteWidth: CGFloat {
-        CGFloat(GaiCompanionVisualMetrics.scaledSpriteWidth(for: runtime.record.scalePercent))
+        if runtime.collapsedStackDepth > 0 {
+            return CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth)
+        }
+        return CGFloat(
+            GaiCompanionVisualMetrics.scaledSpriteWidth(for: runtime.record.scalePercent))
     }
 
     var body: some View {
@@ -1941,10 +2186,15 @@ private struct GaiCompanionMascotView: View {
                     .shadow(color: phaseGlow.opacity(0.85), radius: 11 * scaleFactor)
                     .scaleEffect(dropFeedback.isTargeted ? 1.08 : 1)
 
-                if runtime.collapsedStackDepth > 0 {
+                if runtime.collapsedStackDepth > 0
+                    || runtime.stackBadgePhase == .hidden {
                     Color.clear.frame(height: 24 * scaleFactor)
                 } else {
                     nameBadge
+                        .opacity(runtime.stackBadgePhase == .visible ? 1 : 0.001)
+                        .animation(
+                            .linear(duration: 0.075),
+                            value: runtime.stackBadgePhase)
                 }
             }
             .padding(.bottom, max(1, 2 * scaleFactor))
