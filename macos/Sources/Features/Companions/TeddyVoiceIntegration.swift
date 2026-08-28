@@ -513,43 +513,22 @@ final class TeddyApplicationWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-/// Owns the single voice engine and moves its compact SwiftUI view into the
-/// selected doudou's existing 480×330 floating panel.
+/// Owns the single voice engine used by the lightweight replay controls in the
+/// mascot and terminal chrome. Voice playback never replaces terminal content.
 @MainActor
-final class TeddyVoiceWindowController: NSObject {
+final class TeddyVoicePlaybackController: NSObject {
     private let companionRouter: GaiTeddyCompanionRouter
     private let voiceController: VoiceAgentController
     private weak var manager: GaiCompanionManager?
-    private let onOpenApplicationSettings: () -> Void
-    private var hostingView: NSHostingView<VoiceChatView>!
-    private var presentedCompanionID: UUID?
     private var companionListCancellable: AnyCancellable?
 
-    init(
-        manager: GaiCompanionManager,
-        onOpenApplicationSettings: @escaping () -> Void
-    ) {
+    init(manager: GaiCompanionManager) {
         let companionRouter = GaiTeddyCompanionRouter(manager: manager)
         let voiceController = VoiceAgentController(companionRouter: companionRouter)
         self.companionRouter = companionRouter
         self.voiceController = voiceController
         self.manager = manager
-        self.onOpenApplicationSettings = onOpenApplicationSettings
         super.init()
-        hostingView = NSHostingView(
-            rootView: VoiceChatView(
-                controller: voiceController,
-                presentation: .compactCompanion,
-                onOpenApplicationSettings: { [weak self] in
-                    self?.openApplicationSettings()
-                },
-                onClose: { [weak self] in
-                    self?.hideCompactVoice()
-                }))
-        hostingView.sizingOptions = []
-        hostingView.autoresizingMask = [.width, .height]
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(companionLastResponseDidChange(_:)),
@@ -567,18 +546,8 @@ final class TeddyVoiceWindowController: NSObject {
             object: manager)
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(inlineTerminalRequestedVoice(_:)),
-            name: .gaiCompanionInlineTerminalRequestedVoice,
-            object: manager)
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(desktopSelectionDidChange(_:)),
             name: .gaiCompanionDesktopSelectionDidChange,
-            object: manager)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(openTeddyRequested(_:)),
-            name: .gaiCompanionOpenTeddyRequested,
             object: manager)
         NotificationCenter.default.addObserver(
             self,
@@ -644,49 +613,9 @@ final class TeddyVoiceWindowController: NSObject {
         voiceController.collapseInlineTerminal()
     }
 
-    @objc private func inlineTerminalRequestedVoice(_ notification: Notification) {
-        guard notification.object as? GaiCompanionManager === manager,
-              let companionID = notification.userInfo?[
-                  GaiCompanionControl.companionIDUserInfoKey
-              ] as? UUID,
-              companionID == voiceController.activeConversationID
-        else { return }
-        voiceController.collapseInlineTerminal()
-        voiceController.refreshActiveCompanionReadiness()
-    }
-
     @objc private func desktopSelectionDidChange(_ notification: Notification) {
         guard let companionID = companionID(from: notification) else { return }
         selectConversation(companionID)
-    }
-
-    @objc private func openTeddyRequested(_ notification: Notification) {
-        guard notification.object as? GaiCompanionManager === manager else { return }
-        guard let companionID = companionID(from: notification) else { return }
-        let rawPresentation = notification.userInfo?[
-            GaiCompanionControl.teddyPresentationUserInfoKey
-        ] as? String
-        let presentation = rawPresentation.flatMap(GaiCompanionTeddyPresentation.init(rawValue:))
-            ?? .vocal
-
-        selectConversation(companionID) { [weak self] in
-            guard let self, let manager = self.manager else { return }
-            switch presentation {
-            case .vocal:
-                self.voiceController.collapseInlineTerminal()
-                if let previousID = self.presentedCompanionID,
-                   previousID != companionID {
-                    manager.dismissCompactVoice(id: previousID)
-                }
-                manager.presentCompactVoice(
-                    id: companionID,
-                    contentView: self.hostingView)
-                self.presentedCompanionID = companionID
-            case .terminal:
-                self.voiceController.collapseInlineTerminal()
-                manager.toggleTerminal(id: companionID)
-            }
-        }
     }
 
     @objc private func replayVoiceRequested(_ notification: Notification) {
@@ -702,17 +631,6 @@ final class TeddyVoiceWindowController: NSObject {
     ) {
         voiceController.refreshCompanionConversations(preferredSelection: companionID)
         voiceController.selectConversation(companionID, onReady: onReady)
-    }
-
-    private func hideCompactVoice() {
-        guard let companionID = presentedCompanionID else { return }
-        manager?.dismissCompactVoice(id: companionID)
-        presentedCompanionID = nil
-    }
-
-    private func openApplicationSettings() {
-        hideCompactVoice()
-        onOpenApplicationSettings()
     }
 
     private func companionID(from notification: Notification) -> UUID? {

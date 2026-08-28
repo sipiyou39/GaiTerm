@@ -104,12 +104,8 @@ class AppDelegate: NSObject,
     private lazy var teddyApplicationWindowController = MainActor.assumeIsolated {
         TeddyApplicationWindowController(manager: gaiWorkspaceManager)
     }
-    private lazy var teddyVoiceWindowController = MainActor.assumeIsolated {
-        TeddyVoiceWindowController(
-            manager: gaiWorkspaceManager,
-            onOpenApplicationSettings: { [weak self] in
-                self?.teddyApplicationWindowController.showSettings()
-            })
+    private lazy var teddyVoicePlaybackController = MainActor.assumeIsolated {
+        TeddyVoicePlaybackController(manager: gaiWorkspaceManager)
     }
     private var gaiAgentEventSocketServer: GaiCompanionEventSocketServer?
     private lazy var gaiAgentVisibilityShortcutMonitor =
@@ -241,7 +237,7 @@ class AppDelegate: NSObject,
         // CLI never rewrites a user's Codex, Claude or Grok configuration.
         // Foreground-process detection remains the baseline source of truth.
         gaiWorkspaceManager.start()
-        teddyVoiceWindowController.start()
+        teddyVoicePlaybackController.start()
         teddyApplicationWindowController.show(activate: true)
 
         // Start our update checker.

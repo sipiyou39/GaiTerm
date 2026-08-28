@@ -331,9 +331,242 @@ enum GaiCompanionTerminalPlacement: CaseIterable, Equatable {
     case left
 }
 
-private struct GaiCompanionPreviewGeometry {
+struct GaiCompanionPreviewGeometry: Equatable {
     let placement: GaiCompanionTerminalPlacement
     let terminalFrame: NSRect
+}
+
+/// Resolves one shared compact-terminal bay around an entire constellation.
+/// The hovered agent is deliberately absent from the inputs: every doudou on
+/// the same grid therefore reveals its CLI at the exact same place.
+enum GaiCompanionTerminalBayLayout {
+    static func resolve(
+        companionFrames: [NSRect],
+        anchorCenter: CGPoint,
+        cellSize: CGSize,
+        terminalSize: CGSize,
+        workArea: NSRect,
+        gap: CGFloat
+    ) -> GaiCompanionPreviewGeometry {
+        let frames = companionFrames.isEmpty
+            ? [NSRect(origin: anchorCenter, size: .zero)]
+            : companionFrames
+        let constellationBounds = frames.dropFirst().reduce(frames[0]) {
+            $0.union($1)
+        }
+        let size = CGSize(
+            width: min(max(terminalSize.width, 1), workArea.width),
+            height: min(max(terminalSize.height, 1), workArea.height))
+        let alignedX = alignedCenter(
+            nearest: constellationBounds.midX,
+            anchor: anchorCenter.x,
+            pitch: cellSize.width)
+        let alignedY = alignedCenter(
+            nearest: constellationBounds.midY,
+            anchor: anchorCenter.y,
+            pitch: cellSize.height)
+
+        var candidates: [(geometry: GaiCompanionPreviewGeometry, tier: Int)] = [
+            (GaiCompanionPreviewGeometry(
+                placement: .top,
+                terminalFrame: NSRect(
+                    x: alignedX - size.width / 2,
+                    y: constellationBounds.maxY + gap,
+                    width: size.width,
+                    height: size.height)), 0),
+            (GaiCompanionPreviewGeometry(
+                placement: .bottom,
+                terminalFrame: NSRect(
+                    x: alignedX - size.width / 2,
+                    y: constellationBounds.minY - gap - size.height,
+                    width: size.width,
+                    height: size.height)), 0),
+            (GaiCompanionPreviewGeometry(
+                placement: .right,
+                terminalFrame: NSRect(
+                    x: constellationBounds.maxX + gap,
+                    y: alignedY - size.height / 2,
+                    width: size.width,
+                    height: size.height)), 0),
+            (GaiCompanionPreviewGeometry(
+                placement: .left,
+                terminalFrame: NSRect(
+                    x: constellationBounds.minX - gap - size.width,
+                    y: alignedY - size.height / 2,
+                    width: size.width,
+                    height: size.height)), 0),
+        ]
+
+        // A freeform constellation can span most of a display, leaving no
+        // usable outside edge. Sample screen-fitting grid intersections as a
+        // deterministic fallback and still prioritise a zero-doudou-overlap
+        // cell over an adjacent candidate forced back through the stack.
+        let xCenters = fittingCenters(
+            minimum: workArea.minX + size.width / 2,
+            maximum: workArea.maxX - size.width / 2,
+            anchor: anchorCenter.x,
+            pitch: cellSize.width)
+        let yCenters = fittingCenters(
+            minimum: workArea.minY + size.height / 2,
+            maximum: workArea.maxY - size.height / 2,
+            anchor: anchorCenter.y,
+            pitch: cellSize.height)
+        for y in yCenters {
+            for x in xCenters {
+                let frame = NSRect(
+                    x: x - size.width / 2,
+                    y: y - size.height / 2,
+                    width: size.width,
+                    height: size.height)
+                candidates.append((GaiCompanionPreviewGeometry(
+                    placement: placement(of: frame, relativeTo: constellationBounds),
+                    terminalFrame: frame), 1))
+            }
+        }
+
+        let selected = candidates.enumerated().min { lhs, rhs in
+            score(
+                candidate: lhs.element,
+                index: lhs.offset,
+                companionFrames: frames,
+                constellationBounds: constellationBounds,
+                workArea: workArea)
+                .isPreferred(to: score(
+                    candidate: rhs.element,
+                    index: rhs.offset,
+                    companionFrames: frames,
+                    constellationBounds: constellationBounds,
+                    workArea: workArea))
+        }?.element.geometry ?? candidates[0].geometry
+        return GaiCompanionPreviewGeometry(
+            placement: selected.placement,
+            terminalFrame: clamped(selected.terminalFrame, to: workArea))
+    }
+
+    private struct CandidateScore {
+        let companionOverlap: CGFloat
+        let overflow: CGFloat
+        let constellationOverlap: CGFloat
+        let tier: Int
+        let distance: CGFloat
+        let index: Int
+
+        func isPreferred(to other: Self) -> Bool {
+            // Staying attached to the constellation is the primary spatial
+            // contract. A candidate may slide along the screen edge, but an
+            // arbitrary empty screen cell must never beat an adjacent bay just
+            // because the adjacent raw frame needed horizontal clamping.
+            let lhs = [companionOverlap, constellationOverlap]
+            let rhs = [other.companionOverlap, other.constellationOverlap]
+            for (left, right) in zip(lhs, rhs) where abs(left - right) > 0.001 {
+                return left < right
+            }
+            if tier != other.tier { return tier < other.tier }
+            if abs(distance - other.distance) > 0.001 {
+                return distance < other.distance
+            }
+            if abs(overflow - other.overflow) > 0.001 {
+                return overflow < other.overflow
+            }
+            return index < other.index
+        }
+    }
+
+    private static func score(
+        candidate: (geometry: GaiCompanionPreviewGeometry, tier: Int),
+        index: Int,
+        companionFrames: [NSRect],
+        constellationBounds: NSRect,
+        workArea: NSRect
+    ) -> CandidateScore {
+        let raw = candidate.geometry.terminalFrame
+        let bounded = clamped(raw, to: workArea)
+        return CandidateScore(
+            companionOverlap: companionFrames.reduce(0) {
+                $0 + intersectionArea(bounded, $1)
+            },
+            overflow: overflowDistance(raw, from: workArea),
+            constellationOverlap: intersectionArea(bounded, constellationBounds),
+            tier: candidate.tier,
+            distance: rectangleDistance(bounded, constellationBounds),
+            index: index)
+    }
+
+    private static func alignedCenter(
+        nearest value: CGFloat,
+        anchor: CGFloat,
+        pitch: CGFloat
+    ) -> CGFloat {
+        let safePitch = max(abs(pitch), 1)
+        return anchor + ((value - anchor) / safePitch).rounded() * safePitch
+    }
+
+    private static func fittingCenters(
+        minimum: CGFloat,
+        maximum: CGFloat,
+        anchor: CGFloat,
+        pitch: CGFloat
+    ) -> [CGFloat] {
+        guard maximum >= minimum else { return [(minimum + maximum) / 2] }
+        let safePitch = max(abs(pitch), 1)
+        let first = Int(ceil((minimum - anchor) / safePitch))
+        let last = Int(floor((maximum - anchor) / safePitch))
+        var values = first <= last
+            ? (first...last).map { anchor + CGFloat($0) * safePitch }
+            : []
+        values.append(contentsOf: [minimum, maximum])
+        return values.sorted().reduce(into: []) { result, value in
+            if result.last.map({ abs($0 - value) > 0.5 }) ?? true {
+                result.append(value)
+            }
+        }
+    }
+
+    private static func placement(
+        of frame: NSRect,
+        relativeTo bounds: NSRect
+    ) -> GaiCompanionTerminalPlacement {
+        let dx = frame.midX - bounds.midX
+        let dy = frame.midY - bounds.midY
+        if abs(dx) > abs(dy) {
+            return dx >= 0 ? .right : .left
+        }
+        return dy >= 0 ? .top : .bottom
+    }
+
+    private static func clamped(_ frame: NSRect, to workArea: NSRect) -> NSRect {
+        let width = min(frame.width, workArea.width)
+        let height = min(frame.height, workArea.height)
+        return NSRect(
+            x: min(max(frame.minX, workArea.minX), workArea.maxX - width),
+            y: min(max(frame.minY, workArea.minY), workArea.maxY - height),
+            width: width,
+            height: height)
+    }
+
+    private static func overflowDistance(_ frame: NSRect, from workArea: NSRect) -> CGFloat {
+        max(0, workArea.minX - frame.minX)
+            + max(0, frame.maxX - workArea.maxX)
+            + max(0, workArea.minY - frame.minY)
+            + max(0, frame.maxY - workArea.maxY)
+    }
+
+    private static func intersectionArea(_ lhs: NSRect, _ rhs: NSRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        return intersection.isNull ? 0 : intersection.width * intersection.height
+    }
+
+    private static func rectangleDistance(_ lhs: NSRect, _ rhs: NSRect) -> CGFloat {
+        let dx = max(rhs.minX - lhs.maxX, lhs.minX - rhs.maxX, 0)
+        let dy = max(rhs.minY - lhs.maxY, lhs.minY - rhs.maxY, 0)
+        return hypot(dx, dy)
+    }
+}
+
+private struct GaiCompanionHoverTerminalBayCache {
+    let layout: GaiCompanionStackResolvedLayout
+    let workArea: NSRect
+    let geometry: GaiCompanionPreviewGeometry
 }
 
 /// Native port of GaiWork's queued completion sound player. One bundled sound
@@ -876,6 +1109,11 @@ enum GaiCompanionStackMotion {
 final class GaiCompanionManager: NSObject, ObservableObject {
     @Published private(set) var runtimes: [GaiCompanionRuntime] = []
     @Published private(set) var agentWindowsAreVisible = true
+    /// Sticky desktop selection created only by an explicit mascot click.
+    /// It owns the visible waveform action; hover routing must never mutate it.
+    @Published private(set) var explicitlySelectedCompanionID: UUID?
+    /// Current conversational input target. Hover may change this temporarily
+    /// so Right Option talks to the doudou beneath the pointer.
     @Published private(set) var selectedCompanionID: UUID?
     @Published private(set) var companionStackIsExpanded = false
 
@@ -890,6 +1128,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var companionHubScalePercent = GaiCompanionScalePercent.standard
     private var companionHubCreatorPlacement: GaiCompanionTerminalPlacement = .top
     private var activeCompanionStackLayout: GaiCompanionStackResolvedLayout?
+    private var companionHoverTerminalBays: [String: GaiCompanionHoverTerminalBayCache] = [:]
     private var companionStackTransition: GaiCompanionStackTransition?
     private var hiddenCompanionStackTransitionIDs: Set<UUID> = []
     private var companionStackMode: GaiCompanionStackMode
@@ -902,6 +1141,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var eventSequence: UInt64 = 0
     private var focusGeneration: UInt64 = 0
     private var activeSpaceRefreshGeneration: UInt64 = 0
+    private var transientHoverInputTargetID: UUID?
+    private var hoverFocusReturnApplication: NSRunningApplication?
     /// At most Teddy's selected CLI normally lives here. Keeping the set
     /// explicit lets the renderer distinguish a collapsed desktop panel from
     /// the very same surface being visibly hosted inside Teddy.
@@ -1051,9 +1292,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     func reveal() {
         start()
         applyVisibilityPolicy(.revealLibrary)
-        NotificationCenter.default.post(
-            name: .gaiCompanionOpenTeddyRequested,
-            object: self)
     }
 
     /// Shows or hides only the desktop agent layer. Runtime presentation and
@@ -1607,19 +1845,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         updateSurfacePerformanceState()
     }
 
-    /// The inline terminal owns the only visible app header while it is
-    /// mounted in Teddy. Its Vocal action comes back through this semantic
-    /// event so the voice controller performs the ordinary unmount/restore
-    /// path instead of the terminal view mutating two window hierarchies.
-    @MainActor
-    func requestTeddyVoiceMode(id: UUID) {
-        guard let runtime = runtime(id: id), runtime.isInlineTerminalPresented else { return }
-        NotificationCenter.default.post(
-            name: .gaiCompanionInlineTerminalRequestedVoice,
-            object: self,
-            userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
-    }
-
     private func detachInlineTerminalIfNeeded(id: UUID) {
         guard inlineTerminalVisibleIDs.remove(id) != nil else { return }
         runtime(id: id)?.isInlineTerminalPresented = false
@@ -1648,29 +1873,119 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         guard let runtime = runtime(id: id) else { return }
         runtime.acknowledgeCompletion()
         updateDockBadge()
-        guard selectedCompanionID != id else {
-            panelControllers[id]?.setDesktopSelected(true)
-            return
-        }
-
-        if let previousID = selectedCompanionID {
-            self.runtime(id: previousID)?.isDesktopSelected = false
-            panelControllers[previousID]?.setDesktopSelected(false)
-        }
+        guard selectedCompanionID != id else { return }
         selectedCompanionID = id
-        runtime.isDesktopSelected = true
-        panelControllers[id]?.setDesktopSelected(true)
         NotificationCenter.default.post(
             name: .gaiCompanionDesktopSelectionDidChange,
             object: self,
             userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
     }
 
+    private func explicitlySelectCompanion(id: UUID) {
+        guard let runtime = runtime(id: id) else { return }
+        guard explicitlySelectedCompanionID != id else {
+            panelControllers[id]?.setDesktopSelected(true)
+            return
+        }
+        if let previousID = explicitlySelectedCompanionID {
+            self.runtime(id: previousID)?.isDesktopSelected = false
+            panelControllers[previousID]?.setDesktopSelected(false)
+        }
+        explicitlySelectedCompanionID = id
+        runtime.isDesktopSelected = true
+        panelControllers[id]?.setDesktopSelected(true)
+    }
+
+    /// Hover is an ephemeral input route: Right Option and the keyboard follow
+    /// the doudou under the pointer, while the visible waveform remains on the
+    /// last explicitly clicked doudou.
+    private func beginTransientHoverInputTarget(id: UUID) {
+        if transientHoverInputTargetID == nil,
+           let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            hoverFocusReturnApplication = frontmost
+        }
+        transientHoverInputTargetID = id
+        selectCompanion(id: id)
+    }
+
+    private func endTransientHoverInputTarget(
+        id: UUID,
+        restorePreviousApplication: Bool,
+        restoreExplicitInputTarget: Bool = true
+    ) {
+        guard transientHoverInputTargetID == id else { return }
+        transientHoverInputTargetID = nil
+        if restoreExplicitInputTarget,
+           let explicitID = explicitlySelectedCompanionID,
+           explicitID != selectedCompanionID {
+            selectCompanion(id: explicitID)
+        }
+        let application = hoverFocusReturnApplication
+        hoverFocusReturnApplication = nil
+        guard restorePreviousApplication,
+              NSApp.isActive,
+              let application,
+              !application.isTerminated else { return }
+        DispatchQueue.main.async {
+            application.activate(options: [.activateIgnoringOtherApps])
+        }
+    }
+
+    func terminalPeekDidBecomeInteractive(id: UUID) {
+        endTransientHoverInputTarget(
+            id: id,
+            restorePreviousApplication: false,
+            restoreExplicitInputTarget: false)
+    }
+
     /// Real agents are purely conversational. Stack expansion belongs to the
     /// dedicated hub, which deliberately has no PTY and no selected-agent role.
     func companionWasClicked(id: UUID) {
         guard runtime(id: id) != nil else { return }
+        explicitlySelectCompanion(id: id)
         selectCompanion(id: id)
+        pinCompactTerminalForCompanionClick(id: id)
+    }
+
+    private func pinCompactTerminalForCompanionClick(id: UUID) {
+        guard let runtime = runtime(id: id),
+              terminalTransientCounts[id, default: 0] == 0 else { return }
+        if runtime.activity.phase == .exited {
+            restartExitedTerminal(runtime, presentation: .compact)
+        } else if runtime.presentation != .compact
+                    || panelControllers[id]?.terminalPanel.isVisible != true {
+            setPresentation(
+                .compact,
+                for: runtime,
+                animated: true,
+                focus: true,
+                usesSharedHoverBay: true)
+        }
+        guard runtime.presentation == .compact,
+              let controller = panelControllers[id],
+              controller.terminalPanel.isVisible else { return }
+        controller.pinCompactTerminalUntilOutsideClick()
+        if let surface = runtime.surfaceView {
+            requestTerminalFocus(for: runtime, surface: surface)
+        }
+    }
+
+    func dismissPinnedTerminalFromOutsideClick(
+        id: UUID,
+        activating application: NSRunningApplication?
+    ) {
+        guard let runtime = runtime(id: id),
+              runtime.presentation == .compact else { return }
+        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
+        if let explicitID = explicitlySelectedCompanionID,
+           explicitID != selectedCompanionID {
+            selectCompanion(id: explicitID)
+        }
+        guard let application, !application.isTerminated else { return }
+        DispatchQueue.main.async {
+            application.activate(options: [.activateIgnoringOtherApps])
+        }
     }
 
     func companionHubWasClicked() {
@@ -1687,21 +2002,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         onOpenCompanionCreator?()
     }
 
-    func requestOpenTeddy(
-        id: UUID,
-        presentation: GaiCompanionTeddyPresentation
-    ) {
-        guard runtime(id: id) != nil else { return }
-        selectCompanion(id: id)
-        NotificationCenter.default.post(
-            name: .gaiCompanionOpenTeddyRequested,
-            object: self,
-            userInfo: [
-                GaiCompanionControl.companionIDUserInfoKey: id,
-                GaiCompanionControl.teddyPresentationUserInfoKey: presentation.rawValue,
-            ])
-    }
-
     func requestReplayLatestVoice(id: UUID) {
         guard runtime(id: id) != nil else { return }
         selectCompanion(id: id)
@@ -1711,9 +2011,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             userInfo: [GaiCompanionControl.companionIDUserInfoKey: id])
     }
 
-    /// Opens the real compact terminal as a passive preview. It deliberately
-    /// avoids application activation and first-responder changes, so the app
-    /// underneath the pointer remains the user's working context.
+    /// Opens the real compact terminal and immediately routes both keyboard
+    /// and global push-to-talk input to the hovered doudou. If the pointer
+    /// leaves without an explicit interaction, the previously active app is
+    /// restored automatically.
     @discardableResult
     func presentTerminalPeek(id: UUID) -> Bool {
         guard agentWindowsAreVisible,
@@ -1733,16 +2034,22 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         ensurePanel(for: runtime)
         guard let controller = panelControllers[id] else { return false }
 
-        controller.restoreTerminalContentAfterVoicePresentation()
-        selectCompanion(id: id)
+        beginTransientHoverInputTarget(id: id)
         setPresentation(
             .compact,
             for: runtime,
             animated: true,
-            focus: false)
-        return runtime.presentation == .compact
+            focus: true,
+            usesSharedHoverBay: true)
+        let presented = runtime.presentation == .compact
             && controller.isHoverPeekPresented
             && controller.terminalPanel.isVisible
+        if !presented {
+            endTransientHoverInputTarget(
+                id: id,
+                restorePreviousApplication: true)
+        }
+        return presented
     }
 
     /// Called only by the bounded pointer-presence session owned by a panel
@@ -1752,48 +2059,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         guard let runtime = runtime(id: id),
               runtime.presentation == .compact,
               let controller = panelControllers[id],
-              !controller.terminalPanel.isKeyWindow,
-              !controller.isVoiceContentPresented else { return }
+              controller.isHoverPeekPresented else { return }
         setPresentation(.collapsed, for: runtime, animated: true, focus: false)
-    }
-
-    func toggleTerminal(id: UUID) {
-        if let runtime = runtime(id: id),
-           let controller = panelControllers[id],
-           controller.isHoverPeekPresented {
-            setPresentation(.compact, for: runtime, animated: true, focus: true)
-            return
-        }
-        if let runtime = runtime(id: id),
-           let controller = panelControllers[id],
-           controller.isVoiceContentPresented {
-            controller.restoreTerminalContentAfterVoicePresentation()
-            setPresentation(.compact, for: runtime, animated: false, focus: true)
-            return
-        }
-        activateCompanion(id: id, activation: .singleClick)
-    }
-
-    /// Presents Teddy's vocal conversation in the exact compact panel normally
-    /// used by this doudou's CLI. Placement, Spaces behavior and attachment to
-    /// the mascot therefore stay identical.
-    @MainActor
-    func presentCompactVoice(id: UUID, contentView: NSView) {
-        guard let runtime = runtime(id: id), runtime.activity.phase != .exited else { return }
-        ensurePanel(for: runtime)
-        detachInlineTerminalIfNeeded(id: id)
-        guard let controller = panelControllers[id] else { return }
-        controller.presentVoiceContent(contentView)
-        setPresentation(.compact, for: runtime, animated: true, focus: true)
-    }
-
-    @MainActor
-    func dismissCompactVoice(id: UUID) {
-        guard let runtime = runtime(id: id),
-              let controller = panelControllers[id],
-              controller.isVoiceContentPresented else { return }
-        controller.restoreTerminalContentAfterVoicePresentation()
-        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
+        endTransientHoverInputTarget(
+            id: id,
+            restorePreviousApplication: true)
     }
 
     func openMaximizedTerminal(id: UUID) {
@@ -2098,6 +2368,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func closeCompanion(id: UUID) {
         guard let index = runtimes.firstIndex(where: { $0.id == id }) else { return }
         let wasSelected = selectedCompanionID == id
+        let wasExplicitlySelected = explicitlySelectedCompanionID == id
         focusGeneration &+= 1
         detachInlineTerminalIfNeeded(id: id)
         terminalTransientCounts.removeValue(forKey: id)
@@ -2110,6 +2381,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         lastResponseStore.removeAgent(id)
         cancelForegroundProviderProbe(for: id)
         let runtime = runtimes.remove(at: index)
+        if wasExplicitlySelected {
+            explicitlySelectedCompanionID = nil
+            runtime.isDesktopSelected = false
+        }
         runtime.surfaceView?.gaiReleaseTerminalSurface()
         runtime.surfaceView = nil
         panelControllers.removeValue(forKey: id)?.close()
@@ -2952,7 +3227,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for runtime in runtimes {
             panelControllers[runtime.id]?.finishStackTransition(
                 interactive: companionStackIsExpanded,
-                selected: selectedCompanionID == runtime.id,
+                selected: explicitlySelectedCompanionID == runtime.id,
                 restingScale: 1)
         }
         if companionStackIsExpanded {
@@ -3150,16 +3425,22 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             runtime: runtime,
             manager: self)
         panelControllers[runtime.id] = controller
-        controller.setDesktopSelected(selectedCompanionID == runtime.id)
+        controller.setDesktopSelected(explicitlySelectedCompanionID == runtime.id)
     }
 
     private func setPresentation(
         _ presentation: GaiCompanionPresentation,
         for runtime: GaiCompanionRuntime,
         animated: Bool,
-        focus: Bool
+        focus: Bool,
+        usesSharedHoverBay: Bool = false
     ) {
         ensurePanel(for: runtime)
+        if presentation == .collapsed {
+            endTransientHoverInputTarget(
+                id: runtime.id,
+                restorePreviousApplication: true)
+        }
         if presentation != .collapsed,
            focus,
            !runtimes.isEmpty,
@@ -3212,11 +3493,18 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let screen = presentation == .maximized
             ? expandedTerminalScreen(fallback: companionScreen)
             : companionScreen
+        let compactGeometry = usesSharedHoverBay
+            ? sharedHoverTerminalGeometry(
+                for: runtime,
+                screen: screen,
+                companionFrame: companionFrame)
+            : nil
         let geometry = panelGeometry(
             for: runtime,
             presentation: presentation,
             screen: screen,
-            companionFrame: companionFrame)
+            companionFrame: companionFrame,
+            compactGeometry: compactGeometry)
         runtime.terminalPlacement = geometry.placement
         let shouldFocus = requestsFocus && agentWindowsAreVisible
         controller.show(
@@ -3229,7 +3517,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             focus: shouldFocus,
             agentWindowsAreVisible: agentWindowsAreVisible,
             companionIsVisible: agentWindowsAreVisible && companionStackIsExpanded)
-        let shouldFocusTerminal = shouldFocus && !controller.isVoiceContentPresented
+        let shouldFocusTerminal = shouldFocus
         updateSurfacePerformanceState(
             focused: shouldFocusTerminal ? runtime.surfaceView : nil)
         if shouldFocusTerminal, let surface = runtime.surfaceView {
@@ -3242,8 +3530,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         guard let runtime = runtime(id: id),
               runtime.presentation != .collapsed,
               let controller = panelControllers[id],
-              controller.terminalPanel.isKeyWindow,
-              !controller.isVoiceContentPresented else { return }
+              controller.terminalPanel.isKeyWindow else { return }
         guard let surface = ensureSurface(for: runtime) else { return }
         updateSurfacePerformanceState(focused: surface)
         requestTerminalFocus(for: runtime, surface: surface)
@@ -3684,7 +3971,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for runtime in runtimes {
             panelControllers[runtime.id]?.finishStackTransition(
                 interactive: companionStackIsExpanded,
-                selected: selectedCompanionID == runtime.id,
+                selected: explicitlySelectedCompanionID == runtime.id,
                 restingScale: 1)
         }
     }
@@ -5209,12 +5496,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for runtime: GaiCompanionRuntime,
         presentation: GaiCompanionPresentation,
         screen: NSScreen,
-        companionFrame: NSRect
+        companionFrame: NSRect,
+        compactGeometry: GaiCompanionPreviewGeometry? = nil
     ) -> (
         placement: GaiCompanionTerminalPlacement,
         terminalFrame: NSRect?
     ) {
-        let preview = compactPreviewGeometry(
+        let preview = compactGeometry ?? compactPreviewGeometry(
             for: runtime,
             screen: screen,
             companionFrame: companionFrame)
@@ -5284,6 +5572,64 @@ final class GaiCompanionManager: NSObject, ObservableObject {
                 Ghostty.logger.error("could not persist expanded terminal position")
             }
         }
+    }
+
+    /// One cached grid bay is shared by every hover preview on this display.
+    private func sharedHoverTerminalGeometry(
+        for runtime: GaiCompanionRuntime,
+        screen: NSScreen,
+        companionFrame: NSRect
+    ) -> GaiCompanionPreviewGeometry {
+        guard companionStackIsExpanded,
+              let layout = activeCompanionStackLayout else {
+            return compactPreviewGeometry(
+                for: runtime,
+                screen: screen,
+                companionFrame: companionFrame)
+        }
+
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.screenMargin,
+            dy: Self.screenMargin)
+        let screenKey = displayID(for: screen) ?? NSStringFromRect(screen.frame)
+        if let cached = companionHoverTerminalBays[screenKey],
+           cached.layout == layout,
+           cached.workArea == workArea {
+            return cached.geometry
+        }
+
+        var visibleFrames = layout.frames.values.filter {
+            !$0.intersection(screen.frame).isNull
+        }
+        if visibleFrames.isEmpty {
+            visibleFrames = [companionFrame]
+        }
+        let frameBounds = visibleFrames.dropFirst().reduce(visibleFrames[0]) {
+            $0.union($1)
+        }
+        let anchorCenter = screen.frame.contains(layout.anchorCenter)
+            ? layout.anchorCenter
+            : CGPoint(x: frameBounds.midX, y: frameBounds.midY)
+        let terminalSize = NSSize(
+            width: min(
+                max(CGFloat(runtime.record.compactSize.width), 220),
+                workArea.width),
+            height: min(
+                CGFloat(runtime.record.compactSize.height)
+                    + GaiStageMetrics.paneHeaderHeight,
+                workArea.height))
+        let geometry = GaiCompanionTerminalBayLayout.resolve(
+            companionFrames: visibleFrames,
+            anchorCenter: anchorCenter,
+            cellSize: layout.cellSize,
+            terminalSize: terminalSize,
+            workArea: workArea,
+            gap: Self.terminalGap)
+        companionHoverTerminalBays[screenKey] = GaiCompanionHoverTerminalBayCache(
+            layout: layout,
+            workArea: workArea,
+            geometry: geometry)
+        return geometry
     }
 
     /// Native/AppKit port of GaiWork's `chooseCompanionPreviewGeometry`.

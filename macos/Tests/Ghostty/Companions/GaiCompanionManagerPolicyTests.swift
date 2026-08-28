@@ -294,6 +294,114 @@ struct GaiCompanionManagerPolicyTests {
         #expect(abs(layout.cellSize.height - 160) < 0.001)
     }
 
+    @Test func sharedTerminalBayIsStableAndNeverUsesTheHoveredDoudouAsItsAnchor() {
+        let frames = [
+            NSRect(x: 520, y: 360, width: 142, height: 174),
+            NSRect(x: 642, y: 360, width: 142, height: 174),
+            NSRect(x: 520, y: 520, width: 142, height: 174),
+            NSRect(x: 642, y: 520, width: 142, height: 174),
+        ]
+        let arguments = (
+            anchorCenter: CGPoint(x: 591, y: 447),
+            cellSize: CGSize(width: 122, height: 160),
+            terminalSize: CGSize(width: 480, height: 300),
+            workArea: NSRect(x: 0, y: 0, width: 1_600, height: 1_000))
+
+        let forward = GaiCompanionTerminalBayLayout.resolve(
+            companionFrames: frames,
+            anchorCenter: arguments.anchorCenter,
+            cellSize: arguments.cellSize,
+            terminalSize: arguments.terminalSize,
+            workArea: arguments.workArea,
+            gap: 8)
+        let reversed = GaiCompanionTerminalBayLayout.resolve(
+            companionFrames: Array(frames.reversed()),
+            anchorCenter: arguments.anchorCenter,
+            cellSize: arguments.cellSize,
+            terminalSize: arguments.terminalSize,
+            workArea: arguments.workArea,
+            gap: 8)
+
+        #expect(forward == reversed)
+        #expect(arguments.workArea.contains(forward.terminalFrame))
+        #expect(frames.allSatisfy {
+            $0.intersection(forward.terminalFrame).isNull
+        })
+    }
+
+    @Test func sharedTerminalBayFlipsAwayFromAPressedScreenEdge() {
+        let frames = [
+            NSRect(x: 510, y: 780, width: 142, height: 174),
+            NSRect(x: 632, y: 780, width: 142, height: 174),
+        ]
+        let terminal = GaiCompanionTerminalBayLayout.resolve(
+            companionFrames: frames,
+            anchorCenter: CGPoint(x: 581, y: 867),
+            cellSize: CGSize(width: 122, height: 160),
+            terminalSize: CGSize(width: 600, height: 300),
+            workArea: NSRect(x: 0, y: 0, width: 1_400, height: 1_000),
+            gap: 8)
+
+        #expect(terminal.placement == .bottom)
+        #expect(terminal.terminalFrame.maxY <= 772.001)
+        #expect(frames.allSatisfy {
+            $0.intersection(terminal.terminalFrame).isNull
+        })
+    }
+
+    @Test func sharedTerminalBaySlidesAlongAnEdgeWithoutLeavingTheConstellation() {
+        let frames = [
+            NSRect(x: 1_210, y: 120, width: 142, height: 174),
+            NSRect(x: 1_332, y: 120, width: 142, height: 174),
+            NSRect(x: 1_210, y: 280, width: 142, height: 174),
+            NSRect(x: 1_332, y: 280, width: 142, height: 174),
+        ]
+        let terminal = GaiCompanionTerminalBayLayout.resolve(
+            companionFrames: frames,
+            anchorCenter: CGPoint(x: 1_281, y: 207),
+            cellSize: CGSize(width: 122, height: 160),
+            terminalSize: CGSize(width: 720, height: 440),
+            workArea: NSRect(x: 12, y: 12, width: 1_512, height: 1_120),
+            gap: 8)
+
+        let constellationLeft = frames.map(\.minX).min() ?? 0
+        #expect(terminal.placement == .left)
+        #expect(abs(terminal.terminalFrame.maxX - (constellationLeft - 8)) < 0.001)
+        #expect(terminal.terminalFrame.maxX <= 1_524.001)
+        #expect(frames.allSatisfy {
+            $0.intersection(terminal.terminalFrame).isNull
+        })
+    }
+
+    @Test func spriteAlphaMaskRejectsTransparentPanelPixels() throws {
+        let pixels: [UInt8] = [
+            0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ]
+        let provider = try #require(CGDataProvider(data: Data(pixels) as CFData))
+        let image = try #require(CGImage(
+            width: 3,
+            height: 2,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: 12,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent))
+        let mask = try #require(GaiCompanionAlphaMask(image: image))
+
+        #expect(mask.contains(normalizedX: 0.5, normalizedY: 0.25))
+        #expect(!mask.contains(normalizedX: 0.1, normalizedY: 0.25))
+        #expect(!mask.contains(normalizedX: 0.85, normalizedY: 0.75))
+        #expect(mask.contains(
+            normalizedX: 0.85,
+            normalizedY: 0.75,
+            threshold: 5))
+    }
+
     @Test func everyStackOrientationRoundTripsGridCoordinates() {
         let coordinate = GaiCompanionStackCoordinate(column: 3, row: -2)
         for orientation in GaiCompanionStackOrientation.allCases {
@@ -390,6 +498,28 @@ struct GaiCompanionManagerPolicyTests {
         #expect(applicationWindow.contains(.managed))
         #expect(applicationWindow.contains(.fullScreenAuxiliary))
         #expect(!applicationWindow.contains(.canJoinAllSpaces))
+    }
+
+    @Test func hoverBridgeKeepsOnlyTheDirectPathToTheTerminalAlive() {
+        let mascot = NSRect(x: 100, y: 100, width: 80, height: 80)
+        let terminal = NSRect(x: 220, y: 70, width: 480, height: 330)
+
+        #expect(GaiCompanionHoverBridge.contains(
+            NSPoint(x: 200, y: 140),
+            mascotFrame: mascot,
+            terminalFrame: terminal))
+        #expect(!GaiCompanionHoverBridge.contains(
+            NSPoint(x: 200, y: 175),
+            mascotFrame: mascot,
+            terminalFrame: terminal))
+        #expect(GaiCompanionHoverBridge.isProgressing(
+            from: NSPoint(x: 160, y: 140),
+            to: NSPoint(x: 190, y: 140),
+            terminalFrame: terminal))
+        #expect(!GaiCompanionHoverBridge.isProgressing(
+            from: NSPoint(x: 190, y: 140),
+            to: NSPoint(x: 160, y: 140),
+            terminalFrame: terminal))
     }
 
     @Test func cancellingBulkRemovalProducesNoDestructiveTargets() {

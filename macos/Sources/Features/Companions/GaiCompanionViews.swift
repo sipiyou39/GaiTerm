@@ -71,14 +71,69 @@ private final class GaiCompanionPanel: NSPanel, NSDraggingDestination {
     }
 }
 
+/// Transparent panels consume the first click outside a pinned terminal. The
+/// click closes Teddy's transient UI and only activates the application below;
+/// it is never replayed to a Finder icon, button or editor beneath the pointer.
+private final class GaiCompanionDismissShieldView: NSView {
+    var onDismiss: ((NSPoint) -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
+
+    override func mouseDown(with event: NSEvent) { dismiss(with: event) }
+    override func rightMouseDown(with event: NSEvent) { dismiss(with: event) }
+    override func otherMouseDown(with event: NSEvent) { dismiss(with: event) }
+
+    private func dismiss(with event: NSEvent) {
+        guard let window else { return }
+        onDismiss?(window.convertPoint(toScreen: event.locationInWindow))
+    }
+}
+
+private enum GaiUnderlyingApplicationResolver {
+    static func application(at appKitPoint: NSPoint) -> NSRunningApplication? {
+        let quartzPoint = quartzPoint(from: appKitPoint)
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let options: CGWindowListOption = [.optionOnScreenOnly]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+            as? [[String: Any]] else { return finder }
+
+        for window in windows {
+            guard let ownerNumber = window[kCGWindowOwnerPID as String] as? NSNumber,
+                  ownerNumber.int32Value != ownPID,
+                  let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+                  bounds.contains(quartzPoint),
+                  ((window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0.01,
+                  let application = NSRunningApplication(
+                      processIdentifier: ownerNumber.int32Value),
+                  application.activationPolicy == .regular
+            else { continue }
+            return application
+        }
+        return finder
+    }
+
+    private static var finder: NSRunningApplication? {
+        NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.finder").first
+    }
+
+    private static func quartzPoint(from appKitPoint: NSPoint) -> CGPoint {
+        guard let mainScreen = NSScreen.screens.first else { return appKitPoint }
+        let displayBounds = CGDisplayBounds(CGMainDisplayID())
+        return CGPoint(
+            x: displayBounds.minX + appKitPoint.x - mainScreen.frame.minX,
+            y: displayBounds.minY + mainScreen.frame.maxY - appKitPoint.y)
+    }
+}
+
 private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 private enum GaiCompanionQuickAction: Hashable {
     case home
-    case replay
-    case terminal
     case voice
 }
 
@@ -89,6 +144,64 @@ private enum GaiCompanionHoverPeekPreference {
             return true
         }
         return defaults.bool(forKey: GaiPreferenceKey.teddyPeekEnabled)
+    }
+}
+
+/// A narrow, invisible passage keeps a hover terminal alive while the pointer
+/// travels from the mascot to the panel. It never participates in initial hover
+/// detection, so transparent pixels around the doudou remain genuinely inert.
+enum GaiCompanionHoverBridge {
+    static func contains(
+        _ point: NSPoint,
+        mascotFrame: NSRect,
+        terminalFrame: NSRect,
+        halfWidth: CGFloat = 11
+    ) -> Bool {
+        guard !mascotFrame.isEmpty, !terminalFrame.isEmpty else { return false }
+        let mascotCenter = NSPoint(x: mascotFrame.midX, y: mascotFrame.midY)
+        let terminalPoint = closestPoint(in: terminalFrame, to: mascotCenter)
+        let mascotPoint = closestPoint(in: mascotFrame, to: terminalPoint)
+        return distanceFromSegment(point, start: mascotPoint, end: terminalPoint)
+            <= max(halfWidth, 1)
+    }
+
+    static func isProgressing(
+        from previous: NSPoint,
+        to current: NSPoint,
+        terminalFrame: NSRect,
+        tolerance: CGFloat = 0.75
+    ) -> Bool {
+        distance(from: current, to: terminalFrame)
+            <= distance(from: previous, to: terminalFrame) + max(tolerance, 0)
+    }
+
+    private static func closestPoint(in rect: NSRect, to point: NSPoint) -> NSPoint {
+        NSPoint(
+            x: min(max(point.x, rect.minX), rect.maxX),
+            y: min(max(point.y, rect.minY), rect.maxY))
+    }
+
+    private static func distanceFromSegment(
+        _ point: NSPoint,
+        start: NSPoint,
+        end: NSPoint
+    ) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0.001 else { return hypot(point.x - start.x, point.y - start.y) }
+        let projection = min(max(
+            ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
+            0), 1)
+        let nearest = NSPoint(
+            x: start.x + projection * dx,
+            y: start.y + projection * dy)
+        return hypot(point.x - nearest.x, point.y - nearest.y)
+    }
+
+    private static func distance(from point: NSPoint, to rect: NSRect) -> CGFloat {
+        let nearest = closestPoint(in: rect, to: point)
+        return hypot(point.x - nearest.x, point.y - nearest.y)
     }
 }
 
@@ -271,6 +384,8 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     private var quickActionButtons: [GaiCompanionQuickAction: GaiCompanionQuickActionButton] = [:]
     private var quickActionsAreVisible = false
     private var mascotTrackingArea: NSTrackingArea?
+    private weak var cachedSpriteView: GaiCompanionSpriteNSView?
+    private var pointerIsInsideMascotSilhouette = false
 
     init(rootView: Content) {
         hostingView = NSHostingView(rootView: rootView)
@@ -293,8 +408,8 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
             removeTrackingArea(mascotTrackingArea)
         }
         let area = NSTrackingArea(
-            rect: mascotPointerRect,
-            options: [.activeAlways, .mouseEnteredAndExited],
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved],
             owner: self,
             userInfo: nil)
         addTrackingArea(area)
@@ -303,11 +418,15 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        onPointerEntered?()
+        updateMascotPointerState(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateMascotPointerState(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
-        onPointerExited?()
+        setMascotPointerInside(false)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -329,34 +448,17 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         layoutQuickActions()
     }
 
-    func configureQuickActions(
-        onReplay: @escaping () -> Void,
-        onTerminal: @escaping () -> Void,
-        onOpenTeddy: @escaping () -> Void
-    ) {
+    func configureVoiceAction(onReplayLatestResponse: @escaping () -> Void) {
         guard quickActionButtons.isEmpty else { return }
-        let definitions: [(
-            GaiCompanionQuickAction,
-            String,
-            String,
-            String,
-            () -> Void
-        )] = [
-            (.terminal, "terminal", "Terminal", "Ouvrir le terminal compact", onTerminal),
-            (.voice, "waveform", "Vocal", "Ouvrir le chat vocal avec ce doudou", onOpenTeddy),
-            (.replay, "arrow.counterclockwise", "Réécouter", "Réécouter la dernière réponse", onReplay),
-        ]
-        for (action, symbol, label, help, callback) in definitions {
-            let button = GaiCompanionQuickActionButton(
-                symbol: symbol,
-                accessibilityLabel: label,
-                help: help,
-                activation: callback)
-            button.isHidden = true
-            button.alphaValue = 0
-            quickActionButtons[action] = button
-            addSubview(button)
-        }
+        let button = GaiCompanionQuickActionButton(
+            symbol: "waveform",
+            accessibilityLabel: "Lire la dernière réponse",
+            help: "Lire vocalement la dernière réponse de la CLI",
+            activation: onReplayLatestResponse)
+        button.isHidden = true
+        button.alphaValue = 0
+        quickActionButtons[.voice] = button
+        addSubview(button)
         needsLayout = true
     }
 
@@ -411,7 +513,7 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let diameter = (28 * scale).rounded()
         let gap = (5 * scale).rounded()
         let orderedActions: [GaiCompanionQuickAction] = quickActionButtons[.home] == nil
-            ? [.terminal, .voice, .replay]
+            ? [.voice]
             : [.home]
         let totalWidth = diameter * CGFloat(orderedActions.count)
             + gap * CGFloat(orderedActions.count - 1)
@@ -428,24 +530,78 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         }
     }
 
-    private var mascotPointerRect: NSRect {
-        let scale = max(
-            0.72,
-            bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth))
-        let spriteWidth = CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth) * scale
-        let width = min(bounds.width, spriteWidth + 16 * scale)
-        let height = min(
-            bounds.height,
-            CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth + 34) * scale)
-        let mascotRect = NSRect(
-            x: bounds.midX - width / 2,
-            y: bounds.minY,
-            width: width,
-            height: height)
-        guard quickActionsAreVisible else { return mascotRect }
-        return quickActionButtons.values.reduce(mascotRect) { rect, button in
-            button.isHidden ? rect : rect.union(button.frame)
+    func mascotSilhouetteContains(screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        return mascotSilhouetteContains(convert(windowPoint, from: nil))
+    }
+
+    func mascotSpriteScreenFrame() -> NSRect? {
+        guard let window,
+              let spriteView = resolvedSpriteView() else { return nil }
+        let windowRect = spriteView.convert(spriteView.bounds, to: nil)
+        return window.convertToScreen(windowRect)
+    }
+
+    private func updateMascotPointerState(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        setMascotPointerInside(mascotSilhouetteContains(point))
+    }
+
+    private func setMascotPointerInside(_ inside: Bool) {
+        guard inside != pointerIsInsideMascotSilhouette else { return }
+        pointerIsInsideMascotSilhouette = inside
+        if inside {
+            onPointerEntered?()
+        } else {
+            onPointerExited?()
         }
+    }
+
+    private func mascotSilhouetteContains(_ point: NSPoint) -> Bool {
+        if let spriteView = resolvedSpriteView() {
+            let spritePoint = spriteView.convert(point, from: self)
+            return spriteView.containsVisiblePixel(at: spritePoint)
+        }
+
+        // The bundled atlases normally make this path unreachable. Retain a
+        // close silhouette fallback so a missing development asset cannot
+        // restore the old full-panel hover rectangle.
+        let scale = bounds.width / CGFloat(GaiCompanionVisualMetrics.basePanelWidth)
+        let spriteWidth = CGFloat(GaiCompanionVisualMetrics.baseSpriteWidth) * scale
+        let spriteHeight = spriteWidth / CGFloat(GaiCompanionAtlas.cellAspectRatio)
+        let spriteRect = NSRect(
+            x: bounds.midX - spriteWidth / 2,
+            y: 22 * scale,
+            width: spriteWidth,
+            height: spriteHeight)
+        guard spriteRect.contains(point) else { return false }
+        let normalizedX = (point.x - spriteRect.midX) / max(spriteRect.width / 2, 1)
+        let normalizedY = (point.y - spriteRect.midY) / max(spriteRect.height / 2, 1)
+        return normalizedX * normalizedX + normalizedY * normalizedY <= 1
+    }
+
+    private func resolvedSpriteView() -> GaiCompanionSpriteNSView? {
+        if let cachedSpriteView,
+           cachedSpriteView.window === window,
+           cachedSpriteView.isDescendant(of: hostingView) {
+            return cachedSpriteView
+        }
+        let result = firstSpriteView(in: hostingView)
+        cachedSpriteView = result
+        return result
+    }
+
+    private func firstSpriteView(in view: NSView) -> GaiCompanionSpriteNSView? {
+        if let spriteView = view as? GaiCompanionSpriteNSView {
+            return spriteView
+        }
+        for subview in view.subviews {
+            if let result = firstSpriteView(in: subview) {
+                return result
+            }
+        }
+        return nil
     }
 
     override func viewDidMoveToWindow() {
@@ -554,10 +710,8 @@ private final class GaiCompanionDragClickContainerView<Content: View>: NSView {
         let endInWindow = window.convertPoint(fromScreen: mouseUpLocation)
         let endInView = convert(endInWindow, from: nil)
         guard bounds.contains(endInView) else { return }
-        // A single click only selects now; it no longer opens the compact
-        // terminal. Apply that lightweight state immediately so the mascot and
-        // Option-right route feel native. A subsequent double-click can safely
-        // keep the selection and open Teddy without any visual flash.
+        // A click selects the doudou and pins its compact terminal. A later
+        // double-click can still promote the same native surface to maximized.
         onClick?()
     }
 
@@ -987,12 +1141,15 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
     private var terminalHostView: NSView?
-    private weak var voiceContentView: NSView?
     private var mascotHostView: GaiCompanionDragClickContainerView<GaiCompanionMascotView>?
     private var hoverIntentWorkItem: DispatchWorkItem?
     private var hoverPresenceTimer: DispatchSourceTimer?
     private var pointerIsOverMascot = false
     private var hoverPeekOwnsPresentation = false
+    private var hoverBridgeLastPointer: NSPoint?
+    private var hoverBridgeLastMotionAt: CFTimeInterval?
+    private var terminalIsPinnedUntilOutsideClick = false
+    private var dismissalShieldPanels: [NSPanel] = []
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
         self?.advanceLivePlacementAnimation(at: timestamp)
     }
@@ -1003,8 +1160,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
     private static let hoverIntentDelay: TimeInterval = 0.18
-    private static let hoverPresenceInterval: DispatchTimeInterval = .milliseconds(16)
-    private static let hoverHitSlop: CGFloat = 12
+    private static let hoverPresenceInterval: DispatchTimeInterval = .milliseconds(8)
+    /// The bridge is a movement corridor, never a third resting hover target.
+    /// A paused pointer outside both real surfaces therefore closes almost
+    /// immediately, while continuous travel to the terminal remains possible.
+    private static let hoverBridgeIdleTimeout: CFTimeInterval = 0.09
+    private static let hoverBridgeMinimumMotion: CGFloat = 0.35
     private static let restingCompanionLevel = NSWindow.Level(
         rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
     private static let foregroundTerminalLevel = NSWindow.Level(
@@ -1089,7 +1250,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             manager?.companionWasClicked(id: runtime.id)
         }
         mascotHost.onDoubleClick = { [weak manager] in
-            manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
+            manager?.openMaximizedTerminal(id: runtime.id)
         }
         mascotHost.onPointerEntered = { [weak self] in
             self?.mascotPointerEntered()
@@ -1097,15 +1258,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         mascotHost.onPointerExited = { [weak self] in
             self?.mascotPointerExited()
         }
-        mascotHost.configureQuickActions(
-            onReplay: { [weak manager] in
+        mascotHost.configureVoiceAction(
+            onReplayLatestResponse: { [weak manager] in
                 manager?.requestReplayLatestVoice(id: runtime.id)
-            },
-            onTerminal: { [weak manager] in
-                manager?.toggleTerminal(id: runtime.id)
-            },
-            onOpenTeddy: { [weak manager] in
-                manager?.requestOpenTeddy(id: runtime.id, presentation: .vocal)
             })
         mascotHost.onDragBegan = { [weak manager] in
             manager?.companionDragDidBegin(id: runtime.id)
@@ -1146,10 +1301,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
             },
             onToggleLock: { [weak manager] in manager?.toggleTerminalLock(id: runtime.id) },
-            onReturnToVoice: { [weak manager] in
-                Task { @MainActor in
-                    manager?.requestTeddyVoiceMode(id: runtime.id)
-                }
+            onReplayLatestResponse: { [weak manager] in
+                manager?.requestReplayLatestVoice(id: runtime.id)
             },
             onRename: { [weak manager] name in manager?.updateName(id: runtime.id, name: name) },
             onClose: { [weak manager] in manager?.requestCloseCompanion(id: runtime.id) },
@@ -1300,13 +1453,81 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             && terminalPanel.isVisible
     }
 
-    /// A hover preview becomes an ordinary compact terminal as soon as the
-    /// user interacts with it. From that point onward only the established
-    /// close/focus rules are allowed to dismiss it.
-    func pinHoverPeekForInteraction() {
-        guard hoverPeekOwnsPresentation else { return }
-        hoverPeekOwnsPresentation = false
-        stopHoverPresenceTimer()
+    /// Only an explicit mascot click promotes the hover preview into a pinned
+    /// compact terminal. Focusing, typing or clicking inside a hover terminal
+    /// deliberately preserves hover ownership, so leaving its bounded region
+    /// always closes it. Transparent shields consume the next outside click
+    /// only after that explicit mascot click.
+    func pinCompactTerminalUntilOutsideClick() {
+        guard presentation == .compact,
+              terminalPanel.isVisible else { return }
+        if hoverPeekOwnsPresentation {
+            hoverPeekOwnsPresentation = false
+            stopHoverPresenceTimer()
+        }
+        manager?.terminalPeekDidBecomeInteractive(id: runtimeID)
+        guard !terminalIsPinnedUntilOutsideClick else { return }
+        terminalIsPinnedUntilOutsideClick = true
+        showDismissalShields()
+    }
+
+    private func showDismissalShields() {
+        hideDismissalShields()
+        dismissalShieldPanels = NSScreen.screens.map { screen in
+            let panel = GaiCompanionPanel(
+                contentRect: screen.visibleFrame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false,
+                screen: screen)
+            panel.level = GaiFloatingPanels.overlayLevel
+            panel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+            panel.isOpaque = false
+            // A nearly transparent backing keeps the window hit-testable in
+            // WindowServer without creating any visible dimming.
+            panel.backgroundColor = NSColor.black.withAlphaComponent(0.001)
+            panel.hasShadow = false
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            panel.animationBehavior = .none
+            panel.acceptsKeyWindow = false
+            panel.identifier = NSUserInterfaceItemIdentifier(
+                "gai.companion.dismiss-shield.\(runtimeID.uuidString)")
+
+            let view = GaiCompanionDismissShieldView(
+                frame: NSRect(origin: .zero, size: screen.visibleFrame.size))
+            view.autoresizingMask = [.width, .height]
+            view.onDismiss = { [weak self] point in
+                self?.dismissPinnedTerminal(at: point)
+            }
+            panel.contentView = view
+            panel.orderFrontRegardless()
+            return panel
+        }
+    }
+
+    private func dismissPinnedTerminal(at point: NSPoint) {
+        guard terminalIsPinnedUntilOutsideClick else { return }
+        let application = GaiUnderlyingApplicationResolver.application(at: point)
+        endPinnedTerminalSession()
+        manager?.dismissPinnedTerminalFromOutsideClick(
+            id: runtimeID,
+            activating: application)
+    }
+
+    private func endPinnedTerminalSession() {
+        terminalIsPinnedUntilOutsideClick = false
+        hideDismissalShields()
+    }
+
+    private func hideDismissalShields() {
+        let panels = dismissalShieldPanels
+        dismissalShieldPanels.removeAll(keepingCapacity: true)
+        for panel in panels {
+            (panel.contentView as? GaiCompanionDismissShieldView)?.onDismiss = nil
+            panel.orderOut(nil)
+            panel.close()
+        }
     }
 
     /// Moves the existing native terminal hierarchy into Teddy without
@@ -1314,7 +1535,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// SwiftUI representables competing for the same Metal-backed SurfaceView.
     func detachTerminalContentForInlinePresentation() -> NSView? {
         guard let terminalHostView else { return nil }
-        restoreTerminalContentAfterVoicePresentation()
         terminalPanel.orderOut(nil)
 
         if terminalPanel.contentView === terminalHostView {
@@ -1332,41 +1552,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// its inline terminal. The PTY, scrollback and renderer all stay alive.
     func restoreTerminalContentAfterInlinePresentation() {
         guard let terminalHostView,
-              voiceContentView == nil,
               terminalPanel.contentView !== terminalHostView else { return }
-        terminalHostView.removeFromSuperview()
-        terminalHostView.autoresizingMask = [.width, .height]
-        terminalPanel.contentView = terminalHostView
-    }
-
-    var isVoiceContentPresented: Bool {
-        guard let voiceContentView else { return false }
-        return terminalPanel.contentView === voiceContentView
-    }
-
-    /// Reuses the doudou's compact floating panel for its vocal conversation.
-    /// The live Ghostty hierarchy stays retained and is restored verbatim when
-    /// the user switches back to the CLI.
-    func presentVoiceContent(_ contentView: NSView) {
-        guard terminalPanel.contentView !== contentView else { return }
-        voiceContentView?.removeFromSuperview()
-        contentView.removeFromSuperview()
-        contentView.frame = terminalPanel.contentView?.bounds ?? terminalPanel.contentLayoutRect
-        contentView.autoresizingMask = [.width, .height]
-        contentView.wantsLayer = true
-        contentView.layer?.cornerRadius = 8
-        contentView.layer?.masksToBounds = true
-        voiceContentView = contentView
-        terminalPanel.contentView = contentView
-    }
-
-    func restoreTerminalContentAfterVoicePresentation() {
-        guard let voiceContentView else { return }
-        if terminalPanel.contentView === voiceContentView {
-            voiceContentView.removeFromSuperview()
-        }
-        self.voiceContentView = nil
-        guard let terminalHostView else { return }
         terminalHostView.removeFromSuperview()
         terminalHostView.autoresizingMask = [.width, .height]
         terminalPanel.contentView = terminalHostView
@@ -1385,8 +1571,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     ) {
         if presentation != .compact {
             cancelHoverPeekLifecycle()
-        } else if focus {
-            pinHoverPeekForInteraction()
+            endPinnedTerminalSession()
         }
         visibilityGeneration += 1
         let generation = visibilityGeneration
@@ -1522,6 +1707,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         resetLivePlacementAnimation()
         guard visible else {
             cancelHoverPeekLifecycle()
+            endPinnedTerminalSession()
             terminalPanel.orderOut(nil)
             companionPanel.orderOut(nil)
             return
@@ -1573,6 +1759,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     func hideTerminalForCompanionDrag() {
         guard presentation != .collapsed else { return }
         cancelHoverPeekLifecycle()
+        endPinnedTerminalSession()
         visibilityGeneration += 1
         let generation = visibilityGeneration
         presentation = .collapsed
@@ -1586,6 +1773,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     func close() {
         cancelHoverPeekLifecycle()
+        endPinnedTerminalSession()
         resetLivePlacementAnimation()
         terminalMoveSettleGeneration += 1
         terminalMoveSettleWorkItem?.cancel()
@@ -1601,7 +1789,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             companionPanel.onFileDrop = nil
         }
         companionPanel.unregisterDraggedTypes()
-        restoreTerminalContentAfterVoicePresentation()
         companionPanel.orderOut(nil)
         terminalPanel.orderOut(nil)
         companionPanel.close()
@@ -1610,7 +1797,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard notification.object as? NSWindow === terminalPanel else { return }
-        pinHoverPeekForInteraction()
         manager?.panelDidBecomeKey(for: runtimeID)
     }
 
@@ -1703,7 +1889,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
         dropFeedback.setTargeted(targeted)
         mascotHostView?.setQuickActionsVisible(
-            !targeted && manager?.selectedCompanionID == runtimeID)
+            !targeted && manager?.explicitlySelectedCompanionID == runtimeID)
     }
 
     private func mascotPointerEntered() {
@@ -1737,15 +1923,20 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private func mascotPointerExited() {
         pointerIsOverMascot = false
         cancelHoverIntent()
+        if hoverPeekOwnsPresentation {
+            updateHoverPresence()
+        }
     }
 
     private func startHoverPresenceTimer() {
         stopHoverPresenceTimer()
+        hoverBridgeLastPointer = NSEvent.mouseLocation
+        hoverBridgeLastMotionAt = CACurrentMediaTime()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
             deadline: .now(),
             repeating: Self.hoverPresenceInterval,
-            leeway: .milliseconds(10))
+            leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             self?.updateHoverPresence()
         }
@@ -1765,29 +1956,60 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             return
         }
 
-        guard hoverInteractionRegionContains(NSEvent.mouseLocation) else {
+        guard hoverInteractionRegionContains(
+            NSEvent.mouseLocation,
+            timestamp: CACurrentMediaTime()) else {
             dismissHoverPeek()
             return
         }
     }
 
-    private func hoverInteractionRegionContains(_ point: NSPoint) -> Bool {
-        let mascotRegion = companionPanel.frame.insetBy(
-            dx: -Self.hoverHitSlop,
-            dy: -Self.hoverHitSlop)
-        if mascotRegion.contains(point) { return true }
+    private func hoverInteractionRegionContains(
+        _ point: NSPoint,
+        timestamp: CFTimeInterval
+    ) -> Bool {
+        if mascotHostView?.mascotSilhouetteContains(screenPoint: point) == true {
+            hoverBridgeLastPointer = point
+            hoverBridgeLastMotionAt = timestamp
+            return true
+        }
+        if terminalPanel.frame.contains(point) {
+            hoverBridgeLastPointer = point
+            hoverBridgeLastMotionAt = timestamp
+            return true
+        }
+        guard let mascotFrame = mascotHostView?.mascotSpriteScreenFrame() else {
+            return false
+        }
+        guard GaiCompanionHoverBridge.contains(
+                point,
+                mascotFrame: mascotFrame,
+                terminalFrame: terminalPanel.frame),
+              let previous = hoverBridgeLastPointer,
+              GaiCompanionHoverBridge.isProgressing(
+                from: previous,
+                to: point,
+                terminalFrame: terminalPanel.frame)
+        else { return false }
 
-        let terminalRegion = terminalPanel.frame.insetBy(
-            dx: -Self.hoverHitSlop,
-            dy: -Self.hoverHitSlop)
-        return terminalRegion.contains(point)
+        let movement = hypot(point.x - previous.x, point.y - previous.y)
+        if movement >= Self.hoverBridgeMinimumMotion {
+            hoverBridgeLastMotionAt = timestamp
+        }
+        hoverBridgeLastPointer = point
+        guard let lastMotion = hoverBridgeLastMotionAt else { return false }
+        return timestamp - lastMotion <= Self.hoverBridgeIdleTimeout
     }
 
     private func dismissHoverPeek() {
         guard hoverPeekOwnsPresentation else { return }
-        hoverPeekOwnsPresentation = false
+        // Keep ownership true until the manager has validated and collapsed
+        // this exact hover preview. Clearing it first makes the manager reject
+        // the dismissal as stale, leaving one compact terminal permanently
+        // visible and blocking every other doudou's hover preview.
         stopHoverPresenceTimer()
         manager?.dismissTerminalPeek(id: runtimeID)
+        hoverPeekOwnsPresentation = false
     }
 
     private func cancelHoverPeekLifecycle() {
@@ -1804,6 +2026,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private func stopHoverPresenceTimer() {
         hoverPresenceTimer?.cancel()
         hoverPresenceTimer = nil
+        hoverBridgeLastPointer = nil
+        hoverBridgeLastMotionAt = nil
     }
 
     /// Starts one bounded FLIP only when the selected side changes. During all
@@ -2366,7 +2590,7 @@ private struct GaiCompanionTerminalView: View {
     let onToggleMaximized: () -> Void
     let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
-    let onReturnToVoice: () -> Void
+    let onReplayLatestResponse: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
     let onChooseDirectory: (String) -> Void
@@ -2381,7 +2605,7 @@ private struct GaiCompanionTerminalView: View {
                     onToggleMaximized: onToggleMaximized,
                     onApplyLayoutPreset: onApplyLayoutPreset,
                     onToggleLock: onToggleLock,
-                    onReturnToVoice: onReturnToVoice,
+                    onReplayLatestResponse: onReplayLatestResponse,
                     onRename: onRename,
                     onClose: onClose,
                     onChooseDirectory: onChooseDirectory,
@@ -2410,7 +2634,7 @@ private struct GaiCompanionLiveTerminalView: View {
     let onToggleMaximized: () -> Void
     let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
     let onToggleLock: () -> Void
-    let onReturnToVoice: () -> Void
+    let onReplayLatestResponse: () -> Void
     let onRename: (String) -> Void
     let onClose: () -> Void
     let onChooseDirectory: (String) -> Void
@@ -2483,6 +2707,12 @@ private struct GaiCompanionLiveTerminalView: View {
                     }
                     .help("Move terminal window")
 
+                GaiCompanionHeaderIconButton(
+                    symbol: "waveform",
+                    help: "Lire vocalement la dernière réponse de la CLI",
+                    size: 18,
+                    accessibilityLabel: "Lire la dernière réponse",
+                    action: onReplayLatestResponse)
                 GaiCompanionHeaderIconButton(
                     symbol: runtime.isTerminalLocked ? "lock.fill" : "lock.open",
                     help: runtime.isTerminalLocked

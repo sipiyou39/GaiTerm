@@ -86,7 +86,7 @@ private struct GaiCompanionSpriteRepresentable: NSViewRepresentable {
 }
 
 @MainActor
-private final class GaiCompanionSpriteNSView: NSView {
+final class GaiCompanionSpriteNSView: NSView {
     // Start from a selectable identity color so green can never flash while
     // SwiftUI performs the first coordinator update.
     private var colorway = GaiCompanionColorway.defaultColorway
@@ -96,6 +96,8 @@ private final class GaiCompanionSpriteNSView: NSView {
     private var animationStartedAt = ProcessInfo.processInfo.systemUptime
     private var displayedRow: Int?
     private var displayedFrame: Int?
+    private var displayedImage: CGImage?
+    private var displayedAlphaMask: GaiCompanionAlphaMask?
     private var clockObservation: UUID?
 
     override init(frame frameRect: NSRect) {
@@ -138,6 +140,8 @@ private final class GaiCompanionSpriteNSView: NSView {
         if restartsAnimation || contentChanged {
             displayedRow = nil
             displayedFrame = nil
+            displayedImage = nil
+            displayedAlphaMask = nil
         }
 
         let now = ProcessInfo.processInfo.systemUptime
@@ -156,6 +160,52 @@ private final class GaiCompanionSpriteNSView: NSView {
         guard let clockObservation else { return }
         GaiCompanionAnimationClock.shared.removeObserver(clockObservation)
         self.clockObservation = nil
+    }
+
+    /// Returns whether a native view point lands on a visible sprite pixel.
+    /// The frame is aspect-fitted exactly like `contentsGravity = .resizeAspect`.
+    func containsVisiblePixel(at point: NSPoint) -> Bool {
+        if displayedAlphaMask == nil,
+           let displayedImage,
+           let displayedRow,
+           let displayedFrame {
+            displayedAlphaMask = GaiCompanionAtlasCache.shared.alphaMask(
+                for: colorway,
+                frame: displayedImage,
+                row: displayedRow,
+                column: displayedFrame)
+        }
+        guard bounds.contains(point),
+              let mask = displayedAlphaMask,
+              bounds.width > 0,
+              bounds.height > 0 else { return false }
+
+        let sourceAspect = CGFloat(mask.width) / CGFloat(mask.height)
+        let destinationAspect = bounds.width / bounds.height
+        let destinationRect: NSRect
+        if destinationAspect > sourceAspect {
+            let width = bounds.height * sourceAspect
+            destinationRect = NSRect(
+                x: bounds.midX - width / 2,
+                y: bounds.minY,
+                width: width,
+                height: bounds.height)
+        } else {
+            let height = bounds.width / sourceAspect
+            destinationRect = NSRect(
+                x: bounds.minX,
+                y: bounds.midY - height / 2,
+                width: bounds.width,
+                height: height)
+        }
+        guard destinationRect.contains(point) else { return false }
+
+        let normalizedX = (point.x - destinationRect.minX) / destinationRect.width
+        let nativeY = (point.y - destinationRect.minY) / destinationRect.height
+        let normalizedY = isFlipped ? nativeY : 1 - nativeY
+        return mask.contains(
+            normalizedX: normalizedX,
+            normalizedY: normalizedY)
     }
 
     private func updateClockSubscription(
@@ -185,11 +235,15 @@ private final class GaiCompanionSpriteNSView: NSView {
         if displayedRow != definition.row || displayedFrame != frame {
             displayedRow = definition.row
             displayedFrame = frame
-            layer?.contents = GaiCompanionAtlasCache.shared.frame(
+            let cache = GaiCompanionAtlasCache.shared
+            let image = cache.frame(
                 for: colorway,
                 atlas: atlas,
                 row: definition.row,
                 column: frame)
+            displayedImage = image
+            displayedAlphaMask = nil
+            layer?.contents = image
         }
 
         return animation.timeUntilNextFrame(
