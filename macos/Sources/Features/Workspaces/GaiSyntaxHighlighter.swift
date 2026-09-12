@@ -68,6 +68,7 @@ enum GaiSyntax {
     // MARK: Regexes
 
     private static func re(_ pattern: String) -> NSRegularExpression {
+        // swiftlint:disable:next force_try
         try! NSRegularExpression(pattern: pattern, options: [])
     }
 
