@@ -1482,7 +1482,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// and perform one exact final layout once the pointer has settled.
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
-    private static let hoverIntentDelay: TimeInterval = 0.3
+    private static let hoverIntentDelay: TimeInterval = 0.08
     private static let hoverPresenceInterval: DispatchTimeInterval = .milliseconds(8)
     /// The bridge is a movement corridor, never a third resting hover target.
     /// Allow a short pause or a curved path in either direction between the
@@ -2355,12 +2355,14 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private func mascotPointerEntered() {
         pointerIsOverMascot = true
+        // One renderer wake on entry refreshes already-open terminals too;
+        // collapsed ones get the full prewarm ahead of the peek intent.
+        beginTerminalHoverPrewarm()
         guard GaiCompanionHoverPeekPreference.isEnabled,
               !dropIsTargeted,
               !interceptingExternalFileDrag,
               presentation == .collapsed else { return }
 
-        beginTerminalHoverPrewarm()
         cancelHoverIntent()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
@@ -2511,7 +2513,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private func beginTerminalHoverPrewarm() {
         guard !terminalHoverPrewarmIsActive,
-              presentation == .collapsed,
               let surfaceView = runtime?.surfaceView else { return }
         terminalHoverPrewarmIsActive = true
         surfaceView.gaiPrewarmTerminalPresentation()
