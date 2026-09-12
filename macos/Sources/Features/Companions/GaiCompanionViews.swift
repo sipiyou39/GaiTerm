@@ -414,6 +414,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var terminalMoveSettleWorkItem: DispatchWorkItem?
     private var terminalMoveSettleGeneration = 0
     private var livePlacement: GaiCompanionTerminalPlacement = .top
+    private var spaceIsOccupied = true
+    private var agentLayerVisible = false
+    private var rebindingToActiveSpace = 0
+    private var spaceRebindGeneration = 0
     private var placementScreenNumber: NSNumber?
     private var placementTransition: GaiCompanionPlacementTransition?
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
@@ -425,8 +429,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// and perform one exact final layout once the pointer has settled.
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
-    private static let restingCompanionLevel = NSWindow.Level(
-        rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+    /// Ordinary-window tier: any level above `.normal` is composited in a
+    /// later pass when a space activates, which made the mascot trail the
+    /// rest of the desktop on every space return. Normal-level panels come
+    /// back with the space, exactly like the library window.
+    private static let terminalLevel = NSWindow.Level.normal
+    private static let restingCompanionLevel = NSWindow.Level.normal
     // AppKit's drag image lives at CGWindowLevelKey.draggingWindow. A panel
     // above that level remains visible, but is skipped as a native destination
     // and the drop reaches the application underneath. During a file drag,
@@ -451,9 +459,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false)
         companionPanel.level = Self.restingCompanionLevel
-        companionPanel.collectionBehavior = [
-            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
-        ]
+        // Agents are bound to one space — the library's — like ordinary
+        // windows: they slide with transitions, never appear elsewhere, and
+        // macOS restores them with the space itself. All space logic is in
+        // `setSpaceOccupied`; nothing orders these panels during a switch.
+        companionPanel.collectionBehavior = [.ignoresCycle]
         companionPanel.isOpaque = false
         companionPanel.backgroundColor = .clear
         companionPanel.hasShadow = false
@@ -470,10 +480,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             styleMask: [.borderless],
             backing: .buffered,
             defer: false)
-        terminalPanel.level = GaiFloatingPanels.overlayLevel
-        terminalPanel.collectionBehavior = [
-            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary,
-        ]
+        terminalPanel.level = Self.terminalLevel
+        terminalPanel.collectionBehavior = [.ignoresCycle]
         terminalPanel.isOpaque = false
         terminalPanel.backgroundColor = .clear
         terminalPanel.hasShadow = false
@@ -581,6 +589,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         focus: Bool,
         agentWindowsAreVisible: Bool
     ) {
+        agentLayerVisible = agentWindowsAreVisible
         visibilityGeneration += 1
         let generation = visibilityGeneration
         self.presentation = presentation
@@ -622,6 +631,20 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             return
         }
 
+        // On a foreign space, frames still settle but ordering is untouched:
+        // the panels stay bound to their home space, which keeps them hidden
+        // here and instant to restore there.
+        guard spaceIsOccupied else {
+            if let terminalFrame {
+                terminalPanel.alphaValue = 1
+                setTerminalFrame(terminalFrame, display: false, animate: false)
+                if presentation == .compact {
+                    updateTerminalWindowRelationship(for: presentation)
+                }
+            }
+            return
+        }
+
         companionPanel.orderFrontRegardless()
 
         guard let terminalFrame else {
@@ -649,6 +672,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             terminalPanel.orderFrontRegardless()
         }
         companionPanel.orderFrontRegardless()
+        applySpaceOccupancy()
 
         if !wasVisible && animated {
             NSAnimationContext.runAnimationGroup { context in
@@ -660,13 +684,75 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func orderFront() {
+        guard spaceIsOccupied, agentLayerVisible else { return }
         if presentation != .collapsed {
             terminalPanel.orderFrontRegardless()
         }
         companionPanel.orderFrontRegardless()
     }
 
+    /// Occupancy is the library's space, tracked by the manager's probe.
+    /// Panels stay ordered in on their bound space the whole time — macOS
+    /// hides them natively elsewhere and shows them instantly on return, so
+    /// a space switch costs zero ordering work. The flag only gates new
+    /// order-ins so nothing can bind to a foreign space, and schedules a
+    /// re-anchoring pass for the rare case where the library actually moved.
+    func setSpaceOccupied(_ occupied: Bool) {
+        guard spaceIsOccupied != occupied else { return }
+        spaceIsOccupied = occupied
+        applySpaceOccupancy()
+    }
+
+    /// Bound windows coming back from an inactive space may have their
+    /// backing purged; a synchronous display pass re-rasterizes the content
+    /// before the Window Server's next composite instead of re-presenting
+    /// the window — restoring instantly without a flash. Panels already in
+    /// place are otherwise untouched: no ordering work on space switches.
+    private func applySpaceOccupancy() {
+        guard spaceIsOccupied, agentLayerVisible else { return }
+        companionPanel.contentView?.needsDisplay = true
+        companionPanel.displayIfNeeded()
+        if presentation != .collapsed {
+            terminalPanel.contentView?.needsDisplay = true
+            terminalPanel.displayIfNeeded()
+        }
+        if !companionPanel.isVisible
+            || (presentation != .collapsed && !terminalPanel.isVisible) {
+            orderFront()
+        }
+        scheduleSpaceRebind()
+    }
+
+    /// Space-membership reads are unreliable during a transition, so the
+    /// re-anchoring check runs once everything has settled. On an ordinary
+    /// return the panels are already on this space and nothing happens.
+    private func scheduleSpaceRebind() {
+        spaceRebindGeneration += 1
+        let generation = spaceRebindGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self,
+                  self.spaceRebindGeneration == generation,
+                  self.spaceIsOccupied,
+                  self.agentLayerVisible,
+                  self.companionPanel.isVisible,
+                  !self.companionPanel.isOnActiveSpace else { return }
+            self.rebindPanelToActiveSpace(self.companionPanel)
+            if self.terminalPanel.parent == nil {
+                self.rebindPanelToActiveSpace(self.terminalPanel)
+            }
+        }
+    }
+
+    private func rebindPanelToActiveSpace(_ panel: NSPanel) {
+        guard panel.isVisible, !panel.isOnActiveSpace else { return }
+        rebindingToActiveSpace += 1
+        panel.orderOut(nil)
+        panel.orderFrontRegardless()
+        rebindingToActiveSpace -= 1
+    }
+
     func setAgentWindowsVisible(_ visible: Bool) {
+        agentLayerVisible = visible
         visibilityGeneration += 1
         resetLivePlacementAnimation()
         guard visible else {
@@ -676,6 +762,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
         terminalPanel.alphaValue = 1
         orderFront()
+        applySpaceOccupancy()
     }
 
     /// Applies live size settings without entering the general show/hide path.
@@ -751,7 +838,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard notification.object as? NSWindow === terminalPanel else { return }
+        guard notification.object as? NSWindow === terminalPanel,
+              rebindingToActiveSpace == 0 else { return }
         manager?.panelDidResignKey(for: runtimeID)
     }
 
@@ -986,12 +1074,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             if !terminalPanel.isVisible {
                 detachTerminalWindow()
             }
-            terminalPanel.level = GaiFloatingPanels.overlayLevel
+            terminalPanel.level = Self.terminalLevel
             return
 
         case .maximized:
             detachTerminalWindow()
-            terminalPanel.level = GaiFloatingPanels.overlayLevel
+            terminalPanel.level = Self.terminalLevel
             return
 
         case .compact:
@@ -1004,7 +1092,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         // `addChildWindow` initially adopts the parent's level. Restore the
         // terminal's lower global level while retaining the native movement
         // relationship, so terminals can never cover another mascot.
-        terminalPanel.level = GaiFloatingPanels.overlayLevel
+        terminalPanel.level = Self.terminalLevel
     }
 
     private func configureTerminalResizing(
@@ -1092,6 +1180,15 @@ private final class GaiCompanionLibraryWindow: NSWindow {
 final class GaiCompanionLibraryWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
 
+    /// The window agents use as their space anchor: they are bound to the
+    /// space this window lives on, and rebind when it moves to a new space.
+    var anchorWindow: NSWindow { window }
+
+    /// Fired whenever the window moves or gains key/main status — the moments
+    /// at which its space membership can change, including edge drags where
+    /// the space-change notification arrives before the window has landed.
+    var onSpaceActivity: (() -> Void)?
+
     init(manager: GaiCompanionManager) {
         let window = GaiCompanionLibraryWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
@@ -1151,6 +1248,18 @@ final class GaiCompanionLibraryWindowController: NSObject, NSWindowDelegate {
         } else if NSApp.isActive {
             window.orderFront(nil)
         }
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        onSpaceActivity?()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        onSpaceActivity?()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        onSpaceActivity?()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

@@ -485,6 +485,28 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private let userDefaults: UserDefaults
     private var panelControllers: [UUID: GaiCompanionPanelController] = [:]
     private var managerWindowController: GaiCompanionLibraryWindowController?
+
+    /// An invisible one-pixel window ordered in on the library's space. A
+    /// closed library no longer reports a meaningful `isOnActiveSpace`, so the
+    /// probe acts as the agents' home anchor: it is bound to one space and is
+    /// never ordered out, which keeps its space membership queryable.
+    private lazy var spaceAnchorWindow: NSWindow = {
+        let probe = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false)
+        probe.isOpaque = false
+        probe.backgroundColor = .clear
+        probe.alphaValue = 0
+        probe.ignoresMouseEvents = true
+        probe.hasShadow = false
+        probe.isReleasedWhenClosed = false
+        probe.animationBehavior = .none
+        probe.collectionBehavior = [.ignoresCycle]
+        probe.orderFront(nil)
+        return probe
+    }()
     private var expandedTerminalSize: GaiCompanionExpandedTerminalSize?
     private var expandedTerminalPosition: GaiCompanionExpandedTerminalPosition?
     private var started = false
@@ -1425,9 +1447,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func ensurePanel(for runtime: GaiCompanionRuntime) {
         guard panelControllers[runtime.id] == nil else { return }
-        panelControllers[runtime.id] = GaiCompanionPanelController(
+        let controller = GaiCompanionPanelController(
             runtime: runtime,
             manager: self)
+        panelControllers[runtime.id] = controller
+        controller.setSpaceOccupied(spaceAnchorWindow.isOnActiveSpace)
     }
 
     private func setPresentation(
@@ -1506,8 +1530,61 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private func showLibrary(activate: Bool) {
         if managerWindowController == nil {
             managerWindowController = GaiCompanionLibraryWindowController(manager: self)
+            managerWindowController?.onSpaceActivity = { [weak self] in
+                self?.syncCompanionSpaceState()
+            }
         }
         managerWindowController?.show(activate: activate)
+        syncCompanionSpaceState()
+    }
+
+    private var spaceSyncGeneration = 0
+
+    /// Agents occupy exactly the space hosting the library window. The probe
+    /// follows the library whenever it is visible on a newly active space
+    /// (space moves only happen while a window is shown), and the panels then
+    /// fade out everywhere else through `setSpaceOccupied`.
+    @objc private func activeSpaceDidChange(_ notification: Notification) {
+        syncCompanionSpaceState()
+    }
+
+    /// Space-membership reads can lag behind a transition, so the same
+    /// evaluation runs once immediately and once more after everything has
+    /// settled — both passes are idempotent, the later one just corrects a
+    /// stale first read.
+    private func syncCompanionSpaceState() {
+        spaceSyncGeneration += 1
+        let generation = spaceSyncGeneration
+        syncSpaceAnchorWithLibrary()
+        updateCompanionSpaceOccupancy()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, self.spaceSyncGeneration == generation else { return }
+            self.syncSpaceAnchorWithLibrary()
+            self.updateCompanionSpaceOccupancy()
+        }
+    }
+
+    private func syncSpaceAnchorWithLibrary() {
+        guard let anchor = managerWindowController?.anchorWindow,
+              anchor.isVisible,
+              anchor.isOnActiveSpace,
+              !spaceAnchorWindow.isOnActiveSpace else { return }
+        // Re-ordering re-anchors the probe to the active space.
+        spaceAnchorWindow.orderOut(nil)
+        spaceAnchorWindow.orderFront(nil)
+    }
+
+    private func updateCompanionSpaceOccupancy() {
+        // Panels are never ordered on space changes: bound windows leave and
+        // reappear with the space natively. `occupied` only gates *new*
+        // order-ins so nothing can show on a foreign space — a library
+        // visible elsewhere simply means no ordering may happen here.
+        let anchor = managerWindowController?.anchorWindow
+        let libraryElsewhere = anchor.map { $0.isVisible && !$0.isOnActiveSpace } ?? false
+        let occupied = spaceAnchorWindow.isOnActiveSpace && !libraryElsewhere
+        for controller in panelControllers.values {
+            controller.setSpaceOccupied(occupied)
+        }
     }
 
     func panelDidBecomeKey(for id: UUID) {
@@ -1734,6 +1811,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         center.addObserver(
             self, selector: #selector(screensDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(activeSpaceDidChange(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
 
     @objc private func didRequestNewSplit(_ notification: Notification) {
