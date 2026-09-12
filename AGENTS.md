@@ -33,10 +33,21 @@ Mais c'est de la doc *moteur* — pas la doc du logiciel.
 - Produit du build dev : **`macos/build/Debug/GaiTerm.app`**.
 - Produit perf/release local : `zig build -Doptimize=ReleaseFast` puis
   **`macos/build/ReleaseLocal/GaiTerm.app`**.
+- Workflow manager : utiliser `/Applications/Gaiko Manager.app`, onglet
+  `GaiTerm`, pour ouvrir la release, compiler/lancer la version test, et
+  publier les updates Sparkle via `scripts/gaiterm-release.sh`.
+- Release GaiTerm installée : `/Applications/GaiTerm.app`,
+  bundle id `com.sipiyou.gaiterm`, icône `AppIcon` normale.
+- Debug GaiTerm : `macos/build/Debug/GaiTerm.app`, bundle id
+  `com.sipiyou.gaiterm.debug`, icône `AppIcon-Debug` grisée.
+- Ne jamais écraser `/Applications/GaiTerm.app` avec une build Debug.
+- Ne jamais fermer ou tuer la release GaiTerm pendant les tests : l'utilisateur
+  peut être en train de parler depuis cette app. Pour relancer la debug, cibler
+  uniquement `macos/build/Debug/GaiTerm.app/Contents/MacOS/ghostty`.
 - Ne jamais diagnostiquer la consommation CPU/GPU sur Debug : le debug allocator
   Zig et les vérifications d'intégrité polluent les samples.
-- Relancer dev : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/Debug/GaiTerm.app`.
-- Relancer perf : `pkill -f "GaiTerm.app/Contents/MacOS/ghostty"; open macos/build/ReleaseLocal/GaiTerm.app`.
+- Relancer dev : `pkill -f "$PWD/macos/build/Debug/GaiTerm.app/Contents/MacOS/ghostty"; open -n macos/build/Debug/GaiTerm.app`.
+- Relancer perf : `pkill -f "$PWD/macos/build/ReleaseLocal/GaiTerm.app/Contents/MacOS/ghostty"; open -n macos/build/ReleaseLocal/GaiTerm.app`.
 
 ---
 

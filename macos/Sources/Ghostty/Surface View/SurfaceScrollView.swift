@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import GhosttyKit
 
 /// Wraps a Ghostty surface view in an NSScrollView to provide native macOS scrollbar support.
 ///
@@ -226,14 +227,17 @@ class SurfaceScrollView: NSView {
             // Convert row units to pixels using cell height, ignore zero height.
             let cellHeight = surfaceView.cellSize.height
             if cellHeight > 0, let scrollbar = surfaceView.scrollbar {
+                let terminalOffset = surfaceView.gaiPreservesUserViewport
+                    ? scrollbar.offset
+                    : scrollbar.total - scrollbar.len
                 // Invert coordinate system: terminal offset is from top, AppKit position from bottom
                 let offsetY =
-                    CGFloat(scrollbar.total - scrollbar.offset - scrollbar.len) * cellHeight
+                    CGFloat(scrollbar.total - terminalOffset - scrollbar.len) * cellHeight
                 scrollView.contentView.scroll(to: CGPoint(x: 0, y: offsetY))
 
                 // Track the current row position to avoid redundant movements when we
                 // move the scrollbar.
-                lastSentRow = Int(scrollbar.offset)
+                lastSentRow = Int(terminalOffset)
             }
         }
 
@@ -276,6 +280,11 @@ class SurfaceScrollView: NSView {
         let documentHeight = documentView.frame.height
         let scrollOffset = documentHeight - visibleRect.origin.y - visibleRect.height
         let row = Int(scrollOffset / cellHeight)
+        let bottomRow = surfaceView.scrollbar.map {
+            max(Int($0.total) - Int($0.len), 0)
+        } ?? 0
+        surfaceView.gaiPreservesUserViewport = row < bottomRow
+        surfaceView.gaiNoteUserViewportScrollInput()
 
         // Only send action if the row changed to avoid action spam
         guard row != lastSentRow else { return }
@@ -301,7 +310,25 @@ class SurfaceScrollView: NSView {
             return
         }
         surfaceView.scrollbar = scrollbar
+        let isAtBottom = Int(scrollbar.offset) + Int(scrollbar.len) >= Int(scrollbar.total)
+        if isLiveScrolling || surfaceView.gaiUserViewportScrollInputIsRecent {
+            surfaceView.gaiPreservesUserViewport = !isAtBottom
+        } else if isAtBottom {
+            surfaceView.gaiPreservesUserViewport = false
+        }
         synchronizeScrollView()
+    }
+
+    /// Leaves a non-user-owned viewport in Ghostty's live active area before
+    /// the renderer is suspended. New hidden output then advances the active
+    /// viewport naturally instead of creating scroll debt for the next hover.
+    func anchorViewportForDismissal() {
+        guard !surfaceView.gaiPreservesUserViewport else { return }
+        _ = surfaceView.surfaceModel?.perform(
+            action: "scroll_to_row:\(UInt.max)")
+        scrollView.contentView.scroll(to: .zero)
+        synchronizeSurfaceView()
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     /// Handles a change in the frame of NSScrollPocket styling overlays
@@ -390,5 +417,33 @@ class SurfaceScrollView: NSView {
             ],
             owner: self,
             userInfo: nil))
+    }
+}
+
+extension Ghostty.SurfaceView {
+    /// Uses the existing hover-intent interval to update an occluded terminal
+    /// before its panel appears. This is one asynchronous renderer wake, never
+    /// a synchronous draw on the main thread.
+    func gaiPrewarmTerminalPresentation() {
+        guard let surface else { return }
+        ghostty_surface_set_occlusion(surface, true)
+    }
+
+    func gaiCancelTerminalPresentationPrewarm() {
+        guard let surface else { return }
+        ghostty_surface_set_occlusion(surface, false)
+    }
+
+    func gaiAnchorViewportForTerminalDismissal() {
+        var ancestor = superview
+        while let view = ancestor {
+            if let scrollView = view as? SurfaceScrollView {
+                scrollView.anchorViewportForDismissal()
+                return
+            }
+            ancestor = view.superview
+        }
+        guard !gaiPreservesUserViewport else { return }
+        _ = surfaceModel?.perform(action: "scroll_to_row:\(UInt.max)")
     }
 }

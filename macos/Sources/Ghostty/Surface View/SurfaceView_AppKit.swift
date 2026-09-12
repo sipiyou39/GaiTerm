@@ -161,6 +161,19 @@ extension Ghostty {
         /// Current scrollbar state, cached here for persistence across rebuilds
         /// of the SwiftUI view hierarchy, for example when changing splits
         var scrollbar: Ghostty.Action.Scrollbar?
+        /// Presentation changes stay bottom-anchored until a real user scroll
+        /// deliberately chooses a position in scrollback. This state lives on
+        /// the surface so compact/full-screen wrapper rebuilds cannot lose it.
+        var gaiPreservesUserViewport = false
+        private(set) var gaiLastUserViewportScrollInputAt = -TimeInterval.infinity
+
+        func gaiNoteUserViewportScrollInput() {
+            gaiLastUserViewportScrollInputAt = ProcessInfo.processInfo.systemUptime
+        }
+
+        var gaiUserViewportScrollInputIsRecent: Bool {
+            ProcessInfo.processInfo.systemUptime - gaiLastUserViewportScrollInputAt < 0.5
+        }
 
         // Notification identifiers associated with this surface
         var notificationIdentifiers: Set<String> = []
@@ -1033,6 +1046,10 @@ extension Ghostty {
         override func scrollWheel(with event: NSEvent) {
             guard let surfaceModel else { return }
 
+            if event.scrollingDeltaY != 0 {
+                gaiNoteUserViewportScrollInput()
+            }
+
             var x = event.scrollingDeltaX
             var y = event.scrollingDeltaY
             let precision = event.hasPreciseScrollingDeltas
@@ -1077,6 +1094,13 @@ extension Ghostty {
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
+            }
+
+            // Page Up/Down are the standard explicit scrollback keys. Mark the
+            // next scrollbar update as user-owned without guessing arbitrary
+            // custom keybindings.
+            if event.keyCode == 116 || event.keyCode == 121 {
+                gaiNoteUserViewportScrollInput()
             }
 
             // GaiTerm: input ergonomics for AI CLIs (Claude Code, Codex, …).

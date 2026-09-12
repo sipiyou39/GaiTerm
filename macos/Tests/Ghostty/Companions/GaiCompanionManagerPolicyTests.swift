@@ -5,6 +5,54 @@ import Testing
 @testable import TeddyCLI
 
 struct GaiCompanionManagerPolicyTests {
+    @Test func pileNotificationProjectionCountsOnlyAgentsNeedingAttention() {
+        let projection = GaiCompanionNotificationProjection.resolve(phases: [
+            .idle,
+            .working,
+            .completedUnseen,
+            .awaitingInput,
+            .awaitingApproval,
+            .failed,
+            .exited,
+        ])
+
+        #expect(projection.count == 4)
+        #expect(projection.colorway == .red)
+    }
+
+    @Test func pileNotificationProjectionUsesStableVisualPriority() {
+        #expect(GaiCompanionNotificationProjection.resolve(
+            phases: [GaiCompanionPhase.completedUnseen])
+            == .init(count: 1, colorway: .completionColorway))
+        #expect(GaiCompanionNotificationProjection.resolve(phases: [
+            GaiCompanionPhase.completedUnseen,
+            .awaitingInput,
+        ]) == .init(count: 2, colorway: .orange))
+        #expect(GaiCompanionNotificationProjection.resolve(phases: [
+            GaiCompanionPhase.awaitingApproval,
+            .failed,
+        ]) == .init(count: 2, colorway: .red))
+        #expect(GaiCompanionNotificationProjection.resolve(phases: [
+            GaiCompanionPhase.idle,
+            .working,
+            .exited,
+        ]) == .none)
+    }
+
+    @Test func pileHubExposesNotificationsOnlyAfterTheStackIsFullyCollapsed() {
+        let state = GaiCompanionHubState()
+        let notification = GaiCompanionNotificationProjection(
+            count: 2,
+            colorway: .orange)
+        state.setNotificationProjection(notification)
+
+        state.showsNotificationProjection = true
+        #expect(state.visibleNotificationProjection == notification)
+
+        state.showsNotificationProjection = false
+        #expect(state.visibleNotificationProjection == .none)
+    }
+
     @Test func stackSeedIsCompactUniqueAndConnected() {
         let coordinates = GaiCompanionStackLayout.defaultCoordinates(count: 10)
         #expect(coordinates.count == 10)
@@ -410,16 +458,30 @@ struct GaiCompanionManagerPolicyTests {
         }
     }
 
-    @Test func mascotDoubleClickAlwaysOpensTheExpandedTerminal() {
+    @Test func everyMascotClickOpensTheExpandedTerminal() {
         let doubleClick = GaiCompanionMascotActivation.doubleClick
         #expect(doubleClick.targetPresentation(from: .collapsed) == .maximized)
         #expect(doubleClick.targetPresentation(from: .compact) == .maximized)
         #expect(doubleClick.targetPresentation(from: .maximized) == .maximized)
 
         let singleClick = GaiCompanionMascotActivation.singleClick
-        #expect(singleClick.targetPresentation(from: .collapsed) == .compact)
-        #expect(singleClick.targetPresentation(from: .compact) == .collapsed)
-        #expect(singleClick.targetPresentation(from: .maximized) == .collapsed)
+        #expect(singleClick.targetPresentation(from: .collapsed) == .maximized)
+        #expect(singleClick.targetPresentation(from: .compact) == .maximized)
+        #expect(singleClick.targetPresentation(from: .maximized) == .maximized)
+    }
+
+    @Test func clickedFullScreenTerminalDismissesOnlyOutsideItsRealFrame() {
+        let frame = NSRect(x: 10, y: 80, width: 1_000, height: 700)
+
+        #expect(!GaiCompanionFullScreenPointerRegion.shouldDismiss(
+            pointer: NSPoint(x: 500, y: 400),
+            terminalFrame: frame))
+        #expect(GaiCompanionFullScreenPointerRegion.shouldDismiss(
+            pointer: NSPoint(x: 500, y: 79),
+            terminalFrame: frame))
+        #expect(GaiCompanionFullScreenPointerRegion.shouldDismiss(
+            pointer: NSPoint(x: 1_011, y: 400),
+            terminalFrame: frame))
     }
 
     @Test func expandedTerminalPresetsTileTheUsableScreenExactly() {
@@ -506,6 +568,11 @@ struct GaiCompanionManagerPolicyTests {
 
         #expect(GaiCompanionHoverBridge.contains(
             NSPoint(x: 200, y: 140),
+            mascotFrame: mascot,
+            terminalFrame: terminal))
+        // A curved mouse path should not require pixel-perfect movement.
+        #expect(GaiCompanionHoverBridge.contains(
+            NSPoint(x: 200, y: 162),
             mascotFrame: mascot,
             terminalFrame: terminal))
         #expect(!GaiCompanionHoverBridge.contains(

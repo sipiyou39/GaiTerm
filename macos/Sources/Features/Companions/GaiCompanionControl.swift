@@ -46,6 +46,13 @@ enum GaiCompanionControl {
     static let companionIDUserInfoKey = "companionID"
 }
 
+/// One temporary kill switch for every voice entry point. Keeping the switch
+/// central prevents an unfinished PTT or replay path from remaining active
+/// after its visible control has been removed.
+enum TeddyVoiceAvailability {
+    static let isEnabled = false
+}
+
 enum GaiCompanionCreationCLI: String, CaseIterable, Sendable {
     case terminal
     case codex

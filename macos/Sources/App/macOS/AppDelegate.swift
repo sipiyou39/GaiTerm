@@ -237,7 +237,9 @@ class AppDelegate: NSObject,
         // CLI never rewrites a user's Codex, Claude or Grok configuration.
         // Foreground-process detection remains the baseline source of truth.
         gaiWorkspaceManager.start()
-        teddyVoicePlaybackController.start()
+        if TeddyVoiceAvailability.isEnabled {
+            teddyVoicePlaybackController.start()
+        }
         teddyApplicationWindowController.show(activate: true)
 
         // Start our update checker.

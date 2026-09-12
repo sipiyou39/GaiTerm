@@ -4,98 +4,159 @@ import Testing
 @testable import TeddyCLI
 
 struct GaiAgentVisibilityShortcutTests {
-    private let shift: CGEventFlags = [.maskShift]
-    private let option: CGEventFlags = [.maskAlternate]
-    private let chord: CGEventFlags = [.maskShift, .maskAlternate]
+    private let command: CGEventFlags = [.maskCommand]
 
-    @Test func cleanChordFiresOnceOnFirstModifierRelease() {
+    @Test func cleanRightCommandTapFiresOnceOnRelease() {
         var recognizer = makeRecognizer(initialKeyDownCounter: 4)
 
-        expectSample(false, recognizer: &recognizer, flags: shift, keyDownCounter: 4, timestamp: 0)
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 4, timestamp: 0.1)
-        expectSample(true, recognizer: &recognizer, flags: option, keyDownCounter: 4, timestamp: 0.2)
-        expectSample(false, recognizer: &recognizer, flags: option, keyDownCounter: 4, timestamp: 0.3)
-        expectSample(false, recognizer: &recognizer, flags: [], keyDownCounter: 4, timestamp: 0.4)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 4,
+            timestamp: 0)
+        #expect(recognizer.needsFastPolling)
+        expectSample(true, recognizer: &recognizer,
+            keyDownCounter: 4,
+            timestamp: 0.1)
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 4,
+            timestamp: 0.2)
     }
 
-    @Test func eitherPressOrderCanStartTheChord() {
-        var shiftFirst = makeRecognizer(initialKeyDownCounter: 1)
-        expectSample(false, recognizer: &shiftFirst, flags: shift, keyDownCounter: 1, timestamp: 0)
-        expectSample(false, recognizer: &shiftFirst, flags: chord, keyDownCounter: 1, timestamp: 0.1)
-        expectSample(true, recognizer: &shiftFirst, flags: [], keyDownCounter: 1, timestamp: 0.2)
+    @Test func leftCommandNeverArmsTheShortcut() {
+        var recognizer = makeRecognizer(initialKeyDownCounter: 2)
 
-        var optionFirst = makeRecognizer(initialKeyDownCounter: 2)
-        expectSample(false, recognizer: &optionFirst, flags: option, keyDownCounter: 2, timestamp: 0)
-        expectSample(false, recognizer: &optionFirst, flags: chord, keyDownCounter: 2, timestamp: 0.1)
-        expectSample(true, recognizer: &optionFirst, flags: [], keyDownCounter: 2, timestamp: 0.2)
+        expectSample(false, recognizer: &recognizer,
+            leftCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 2,
+            timestamp: 0)
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 2,
+            timestamp: 0.1)
     }
 
-    @Test func ordinaryKeyPressCancelsTheChord() {
+    @Test func ordinaryKeyPressCancelsRightCommandTap() {
         var recognizer = makeRecognizer(initialKeyDownCounter: 10)
 
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 10, timestamp: 0)
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 11, timestamp: 0.1)
-        expectSample(false, recognizer: &recognizer, flags: [], keyDownCounter: 11, timestamp: 0.2)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 10,
+            timestamp: 0)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 11,
+            timestamp: 0.1)
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 11,
+            timestamp: 0.2)
     }
 
-    @Test func keyPressBeforeFirstBothModifiersSampleCannotBecomeTheBaseline() {
+    @Test func keyPressBeforeFirstRightCommandSampleCannotBecomeTheBaseline() {
         var recognizer = makeRecognizer(initialKeyDownCounter: 20)
 
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 21, timestamp: 0.1)
-        expectSample(false, recognizer: &recognizer, flags: [], keyDownCounter: 21, timestamp: 0.2)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 21,
+            timestamp: 0.1)
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 21,
+            timestamp: 0.2)
     }
 
-    @Test func keyPressAfterFirstModifierCancelsBeforeChordCompletes() {
-        var recognizer = makeRecognizer(initialKeyDownCounter: 30)
-
-        expectSample(false, recognizer: &recognizer, flags: shift, keyDownCounter: 30, timestamp: 0)
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 31, timestamp: 0.1)
-        expectSample(false, recognizer: &recognizer, flags: [], keyDownCounter: 31, timestamp: 0.2)
-    }
-
-    @Test func thirdModifierAndLongHoldAreRejected() {
-        var withCommand = makeRecognizer(initialKeyDownCounter: 1)
-        expectSample(false, recognizer: &withCommand,
-            flags: [.maskShift, .maskAlternate, .maskCommand],
+    @Test func anotherModifierAndLongHoldAreRejected() {
+        var withShift = makeRecognizer(initialKeyDownCounter: 1)
+        expectSample(false, recognizer: &withShift,
+            rightCommandIsDown: true,
+            flags: [.maskCommand, .maskShift],
             keyDownCounter: 1,
             timestamp: 0)
-        expectSample(false, recognizer: &withCommand, flags: [], keyDownCounter: 1, timestamp: 0.2)
+        expectSample(false, recognizer: &withShift,
+            keyDownCounter: 1,
+            timestamp: 0.2)
 
         var held = makeRecognizer(initialKeyDownCounter: 1)
-        expectSample(false, recognizer: &held, flags: chord, keyDownCounter: 1, timestamp: 0)
-        expectSample(false, recognizer: &held, flags: chord, keyDownCounter: 1, timestamp: 1.1)
-        expectSample(false, recognizer: &held, flags: [], keyDownCounter: 1, timestamp: 1.2)
+        expectSample(false, recognizer: &held,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 1,
+            timestamp: 0)
+        expectSample(false, recognizer: &held,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 1,
+            timestamp: 1.1)
+        expectSample(false, recognizer: &held,
+            keyDownCounter: 1,
+            timestamp: 1.2)
     }
 
-    @Test func capsLockDoesNotInvalidateTheChord() {
+    @Test func capsLockDoesNotInvalidateRightCommandTap() {
         var recognizer = makeRecognizer(initialKeyDownCounter: 7)
-        let capsChord: CGEventFlags = [.maskShift, .maskAlternate, .maskAlphaShift]
 
-        expectSample(false, recognizer: &recognizer, flags: capsChord, keyDownCounter: 7, timestamp: 0)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: [.maskCommand, .maskAlphaShift],
+            keyDownCounter: 7,
+            timestamp: 0)
         expectSample(true, recognizer: &recognizer,
             flags: [.maskAlphaShift],
             keyDownCounter: 7,
             timestamp: 0.1)
     }
 
-    @Test func startupWithHeldModifierRequiresAFullReleaseBeforeRearming() {
-        var recognizer = makeRecognizer()
-        recognizer.prime(flags: option, keyDownCounter: 1)
+    @Test func pressingBothCommandKeysNeverTogglesVisibility() {
+        var recognizer = makeRecognizer(initialKeyDownCounter: 3)
 
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 1, timestamp: 0)
-        expectSample(false, recognizer: &recognizer, flags: [], keyDownCounter: 1, timestamp: 0.1)
-        expectSample(false, recognizer: &recognizer, flags: chord, keyDownCounter: 1, timestamp: 0.2)
-        expectSample(true, recognizer: &recognizer, flags: [], keyDownCounter: 1, timestamp: 0.3)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            leftCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 3,
+            timestamp: 0)
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 3,
+            timestamp: 0.1)
+    }
+
+    @Test func startupWithHeldRightCommandRequiresAFullReleaseBeforeRearming() {
+        var recognizer = GaiAgentVisibilityShortcutRecognizer(
+            minimumDuration: 0,
+            maximumDuration: 1)
+        recognizer.prime(
+            rightCommandIsDown: true,
+            leftCommandIsDown: false,
+            flags: command,
+            keyDownCounter: 1)
+
+        expectSample(false, recognizer: &recognizer,
+            keyDownCounter: 1,
+            timestamp: 0.1)
+        expectSample(false, recognizer: &recognizer,
+            rightCommandIsDown: true,
+            flags: command,
+            keyDownCounter: 1,
+            timestamp: 0.2)
+        expectSample(true, recognizer: &recognizer,
+            keyDownCounter: 1,
+            timestamp: 0.3)
     }
 
     private func expectSample(
         _ expected: Bool,
         recognizer: inout GaiAgentVisibilityShortcutRecognizer,
-        flags: CGEventFlags,
+        rightCommandIsDown: Bool = false,
+        leftCommandIsDown: Bool = false,
+        flags: CGEventFlags = [],
         keyDownCounter: UInt32,
         timestamp: TimeInterval
     ) {
         let actual = recognizer.sample(
+            rightCommandIsDown: rightCommandIsDown,
+            leftCommandIsDown: leftCommandIsDown,
             flags: flags,
             keyDownCounter: keyDownCounter,
             timestamp: timestamp)
@@ -109,6 +170,8 @@ struct GaiAgentVisibilityShortcutTests {
             minimumDuration: 0,
             maximumDuration: 1)
         recognizer.prime(
+            rightCommandIsDown: false,
+            leftCommandIsDown: false,
             flags: [],
             keyDownCounter: initialKeyDownCounter)
         return recognizer

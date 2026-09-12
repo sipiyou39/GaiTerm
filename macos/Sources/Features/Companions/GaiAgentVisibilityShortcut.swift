@@ -2,14 +2,13 @@
 import CoreGraphics
 import Foundation
 
-/// Recognizes a deliberate Shift + Option modifier chord without consuming
-/// keyboard input. A chord fires only when one of its modifiers is released,
-/// and any ordinary key press cancels it so Option-based character entry keeps
-/// behaving normally.
+/// Recognizes a deliberate tap of the physical Right Command key without
+/// consuming keyboard input. The tap fires on release; any ordinary key press,
+/// Left Command, or additional modifier cancels it so Command-based shortcuts
+/// keep behaving normally.
 struct GaiAgentVisibilityShortcutRecognizer {
     private enum Phase {
         case idle
-        case armed(keyDownCounter: UInt32)
         case tracking(startedAt: TimeInterval, keyDownCounter: UInt32)
         case blocked
     }
@@ -23,7 +22,7 @@ struct GaiAgentVisibilityShortcutRecognizer {
         switch phase {
         case .idle, .blocked:
             return false
-        case .armed, .tracking:
+        case .tracking:
             return true
         }
     }
@@ -36,32 +35,43 @@ struct GaiAgentVisibilityShortcutRecognizer {
         self.maximumDuration = maximumDuration
     }
 
-    mutating func prime(flags: CGEventFlags, keyDownCounter: UInt32) {
+    mutating func prime(
+        rightCommandIsDown: Bool,
+        leftCommandIsDown: Bool,
+        flags: CGEventFlags,
+        keyDownCounter: UInt32
+    ) {
         idleKeyDownCounter = keyDownCounter
-        phase = hasShiftOrOption(flags) ? .blocked : .idle
+        phase = rightCommandIsDown
+            || leftCommandIsDown
+            || hasConflictingModifier(flags)
+            ? .blocked
+            : .idle
     }
 
     mutating func sample(
+        rightCommandIsDown: Bool,
+        leftCommandIsDown: Bool,
         flags: CGEventFlags,
         keyDownCounter: UInt32,
         timestamp: TimeInterval
     ) -> Bool {
-        let shiftIsDown = flags.contains(.maskShift)
-        let optionIsDown = flags.contains(.maskAlternate)
-        let eitherIsDown = shiftIsDown || optionIsDown
-        let bothAreDown = shiftIsDown && optionIsDown
-        let forbiddenModifierIsDown =
-            flags.contains(.maskCommand)
-            || flags.contains(.maskControl)
-            || flags.contains(.maskSecondaryFn)
+        let conflictingModifierIsDown = leftCommandIsDown
+            || hasConflictingModifier(flags)
+        let allShortcutKeysAreUp = !rightCommandIsDown
+            && !leftCommandIsDown
+            && !hasConflictingModifier(flags)
 
         switch phase {
         case .idle:
-            guard eitherIsDown else {
+            guard rightCommandIsDown else {
                 idleKeyDownCounter = keyDownCounter
+                if conflictingModifierIsDown {
+                    phase = .blocked
+                }
                 return false
             }
-            guard !forbiddenModifierIsDown else {
+            guard !conflictingModifierIsDown else {
                 phase = .blocked
                 return false
             }
@@ -71,60 +81,34 @@ struct GaiAgentVisibilityShortcutRecognizer {
                 phase = .blocked
                 return false
             }
-            guard bothAreDown else {
-                phase = .armed(keyDownCounter: keyDownCounter)
-                return false
-            }
             phase = .tracking(
                 startedAt: timestamp,
                 keyDownCounter: keyDownCounter)
             return false
 
-        case let .armed(initialKeyDownCounter):
-            guard !forbiddenModifierIsDown,
-                  keyDownCounter == initialKeyDownCounter
-            else {
-                phase = eitherIsDown ? .blocked : .idle
-                if !eitherIsDown {
-                    idleKeyDownCounter = keyDownCounter
-                }
-                return false
-            }
-            guard eitherIsDown else {
-                phase = .idle
-                idleKeyDownCounter = keyDownCounter
-                return false
-            }
-            guard bothAreDown else { return false }
-
-            phase = .tracking(
-                startedAt: timestamp,
-                keyDownCounter: initialKeyDownCounter)
-            return false
-
         case let .tracking(startedAt, initialKeyDownCounter):
             let duration = timestamp - startedAt
-            guard !forbiddenModifierIsDown,
+            guard !conflictingModifierIsDown,
                   keyDownCounter == initialKeyDownCounter,
                   duration <= maximumDuration
             else {
-                phase = eitherIsDown ? .blocked : .idle
-                if !eitherIsDown {
+                phase = allShortcutKeysAreUp ? .idle : .blocked
+                if allShortcutKeysAreUp {
                     idleKeyDownCounter = keyDownCounter
                 }
                 return false
             }
-            guard !bothAreDown else { return false }
+            guard !rightCommandIsDown else { return false }
 
             let shouldFire = duration >= minimumDuration
-            phase = eitherIsDown ? .blocked : .idle
-            if !eitherIsDown {
+            phase = allShortcutKeysAreUp ? .idle : .blocked
+            if allShortcutKeysAreUp {
                 idleKeyDownCounter = keyDownCounter
             }
             return shouldFire
 
         case .blocked:
-            if !eitherIsDown {
+            if allShortcutKeysAreUp {
                 phase = .idle
                 idleKeyDownCounter = keyDownCounter
             }
@@ -132,8 +116,11 @@ struct GaiAgentVisibilityShortcutRecognizer {
         }
     }
 
-    private func hasShiftOrOption(_ flags: CGEventFlags) -> Bool {
-        flags.contains(.maskShift) || flags.contains(.maskAlternate)
+    private func hasConflictingModifier(_ flags: CGEventFlags) -> Bool {
+        flags.contains(.maskShift)
+            || flags.contains(.maskAlternate)
+            || flags.contains(.maskControl)
+            || flags.contains(.maskSecondaryFn)
     }
 }
 
@@ -143,6 +130,10 @@ struct GaiAgentVisibilityShortcutRecognizer {
 /// monitors require Accessibility approval. Reading Quartz's combined session
 /// state gives us the actual hardware modifier state without either compromise.
 final class GaiAgentVisibilityShortcutMonitor {
+    /// Virtual key codes are side-specific even though Quartz's `.maskCommand`
+    /// flag intentionally merges both Command keys.
+    private static let rightCommandKeyCode = CGKeyCode(0x36)
+    private static let leftCommandKeyCode = CGKeyCode(0x37)
     private static let idleInterval = DispatchTimeInterval.milliseconds(33)
     private static let activeInterval = DispatchTimeInterval.milliseconds(8)
 
@@ -163,6 +154,8 @@ final class GaiAgentVisibilityShortcutMonitor {
             guard let self, timer == nil else { return }
 
             recognizer.prime(
+                rightCommandIsDown: Self.rightCommandIsDown,
+                leftCommandIsDown: Self.leftCommandIsDown,
                 flags: Self.currentFlags,
                 keyDownCounter: Self.currentKeyDownCounter)
             usesFastPolling = recognizer.needsFastPolling
@@ -189,6 +182,8 @@ final class GaiAgentVisibilityShortcutMonitor {
 
     private func sample() {
         let shouldFire = recognizer.sample(
+            rightCommandIsDown: Self.rightCommandIsDown,
+            leftCommandIsDown: Self.leftCommandIsDown,
             flags: Self.currentFlags,
             keyDownCounter: Self.currentKeyDownCounter,
             timestamp: ProcessInfo.processInfo.systemUptime)
@@ -212,6 +207,18 @@ final class GaiAgentVisibilityShortcutMonitor {
 
     private static var currentFlags: CGEventFlags {
         CGEventSource.flagsState(.combinedSessionState)
+    }
+
+    private static var rightCommandIsDown: Bool {
+        CGEventSource.keyState(
+            .combinedSessionState,
+            key: rightCommandKeyCode)
+    }
+
+    private static var leftCommandIsDown: Bool {
+        CGEventSource.keyState(
+            .combinedSessionState,
+            key: leftCommandKeyCode)
     }
 
     private static var currentKeyDownCounter: UInt32 {

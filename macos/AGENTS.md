@@ -9,6 +9,15 @@
   - Build: `macos/build.nu [--scheme Ghostty] [--configuration Debug] [--action build]`
   - Output: `macos/build/<configuration>/GaiTerm.app` (e.g. `macos/build/Debug/GaiTerm.app`)
 - Run unit tests directly with `macos/build.nu --action test`
+- Use `/Applications/Gaiko Manager.app`, tab `GaiTerm`, for the local app workflow
+  when possible. It can open release, build/run Debug, and publish Sparkle
+  updates through `../scripts/gaiterm-release.sh`.
+- Release must keep `com.sipiyou.gaiterm` and the normal `AppIcon`.
+- Debug must keep `com.sipiyou.gaiterm.debug` and use `AppIcon-Debug`, the
+  grayscale version of the normal GaiTerm icon.
+- Never replace `/Applications/GaiTerm.app` with a Debug build.
+- Never close or kill the running release while testing Debug. If a debug
+  relaunch is needed, target only `build/Debug/GaiTerm.app/Contents/MacOS/ghostty`.
 
 ## AppleScript
 

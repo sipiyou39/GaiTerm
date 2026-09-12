@@ -15,10 +15,10 @@ enum GaiCompanionMascotActivation: Equatable, Sendable {
     case singleClick
     case doubleClick
 
-    func targetPresentation(from current: GaiCompanionPresentation) -> GaiCompanionPresentation {
+    func targetPresentation(from _: GaiCompanionPresentation) -> GaiCompanionPresentation {
         switch self {
         case .singleClick:
-            current == .collapsed ? .compact : .collapsed
+            .maximized
         case .doubleClick:
             .maximized
         }
@@ -647,6 +647,47 @@ enum GaiCompanionStackBadgePhase: Equatable {
     case visible
 }
 
+/// One atomic projection shared by the Dock and the white pile hub.
+/// Counting phases here prevents the two notification surfaces from drifting
+/// apart as companions acknowledge or resolve their latest turn.
+struct GaiCompanionNotificationProjection: Equatable, Sendable {
+    let count: Int
+    let colorway: GaiCompanionColorway
+
+    static let none = Self(count: 0, colorway: .hubColorway)
+
+    static func resolve<S: Sequence>(phases: S) -> Self
+    where S.Element == GaiCompanionPhase {
+        var count = 0
+        var priority = 0
+        var colorway = GaiCompanionColorway.hubColorway
+
+        for phase in phases {
+            let candidate: (priority: Int, colorway: GaiCompanionColorway)? =
+                switch phase {
+                case .failed:
+                    (3, .red)
+                case .awaitingInput, .awaitingApproval:
+                    (2, .orange)
+                case .completedUnseen:
+                    (1, .completionColorway)
+                case .idle, .working, .exited:
+                    nil
+                }
+            guard let candidate else { continue }
+            count += 1
+            if candidate.priority > priority {
+                priority = candidate.priority
+                colorway = candidate.colorway
+            }
+        }
+
+        return count == 0
+            ? .none
+            : Self(count: count, colorway: colorway)
+    }
+}
+
 /// Runtime-only owner of one companion and its unique Ghostty surface.
 /// Persisted configuration stays in `GaiCompanionStore`; the PTY never moves
 /// to a second runtime when the panel changes presentation.
@@ -1130,6 +1171,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     private var activeCompanionStackLayout: GaiCompanionStackResolvedLayout?
     private var companionHoverTerminalBays: [String: GaiCompanionHoverTerminalBayCache] = [:]
     private var companionStackTransition: GaiCompanionStackTransition?
+    private var companionStackTransitionOverlay: GaiCompanionStackTransitionOverlay?
+    private var companionStackCompletionWorkItem: DispatchWorkItem?
+    private var stackSnapshotWarmupGeneration: UInt64 = 0
     private var hiddenCompanionStackTransitionIDs: Set<UUID> = []
     private var companionStackMode: GaiCompanionStackMode
     private var companionStackSwapMotion: GaiCompanionSwapMotion?
@@ -1218,6 +1262,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     deinit {
+        companionStackCompletionWorkItem?.cancel()
+        companionStackTransitionOverlay?.close()
         for task in responseCaptureTasks.values {
             task.cancel()
         }
@@ -1945,7 +1991,43 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         guard runtime(id: id) != nil else { return }
         explicitlySelectCompanion(id: id)
         selectCompanion(id: id)
-        pinCompactTerminalForCompanionClick(id: id)
+        presentStableFullScreenTerminal(id: id)
+    }
+
+    /// A mascot click opens the workspace full-screen without overwriting the
+    /// user's remembered expanded-window geometry. The terminal stays owned by
+    /// the pointer: leaving its frame closes it unless the padlock pins it.
+    private func presentStableFullScreenTerminal(id: UUID) {
+        guard let runtime = runtime(id: id),
+              terminalTransientCounts[id, default: 0] == 0 else { return }
+        ensurePanel(for: runtime)
+        guard let controller = panelControllers[id] else { return }
+
+        let screen = controller.companionPanel.screen ?? targetScreen(for: runtime)
+        let workArea = screen.visibleFrame.insetBy(
+            dx: Self.expandedTerminalScreenMargin,
+            dy: Self.expandedTerminalScreenMargin)
+        let terminalFrame = GaiCompanionTerminalLayoutPreset.fullScreen.frame(
+            in: workArea)
+
+        controller.keepTerminalOpen()
+        if runtime.activity.phase == .exited {
+            restartExitedTerminal(
+                runtime,
+                presentation: .maximized,
+                screenOverride: screen,
+                terminalFrameOverride: terminalFrame)
+        } else {
+            setPresentation(
+                .maximized,
+                for: runtime,
+                animated: true,
+                focus: true,
+                screenOverride: screen,
+                terminalFrameOverride: terminalFrame)
+        }
+        controller.dismissFullScreenTerminalWhenPointerLeaves(
+            targetFrame: terminalFrame)
     }
 
     private func pinCompactTerminalForCompanionClick(id: UUID) {
@@ -1988,6 +2070,17 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
     }
 
+    func dismissFullScreenTerminalAfterPointerExit(id: UUID) {
+        guard let runtime = runtime(id: id),
+              runtime.presentation == .maximized,
+              panelControllers[id]?.isPointerDismissedFullScreenPresented == true
+        else { return }
+        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
+        endTransientHoverInputTarget(
+            id: id,
+            restorePreviousApplication: true)
+    }
+
     func companionHubWasClicked() {
         guard !runtimes.isEmpty,
               companionHubDragMotion == nil else { return }
@@ -1998,12 +2091,19 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
     }
 
+    func companionHubWasHovered() {
+        guard !companionStackIsExpanded,
+              companionStackTransition == nil else { return }
+        scheduleCompanionStackSnapshotWarmup(force: true)
+    }
+
     func requestOpenCompanionCreator() {
         onOpenCompanionCreator?()
     }
 
     func requestReplayLatestVoice(id: UUID) {
-        guard runtime(id: id) != nil else { return }
+        guard TeddyVoiceAvailability.isEnabled,
+              runtime(id: id) != nil else { return }
         selectCompanion(id: id)
         NotificationCenter.default.post(
             name: .gaiCompanionReplayVoiceRequested,
@@ -2014,7 +2114,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     /// Opens the real compact terminal and immediately routes both keyboard
     /// and global push-to-talk input to the hovered doudou. If the pointer
     /// leaves without an explicit interaction, the previously active app is
-    /// restored automatically.
+    /// restored automatically. Clicking promotes it to a stable terminal.
     @discardableResult
     func presentTerminalPeek(id: UUID) -> Bool {
         guard agentWindowsAreVisible,
@@ -2034,6 +2134,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         ensurePanel(for: runtime)
         guard let controller = panelControllers[id] else { return false }
 
+        runtime.isTerminalLocked = false
         beginTransientHoverInputTarget(id: id)
         setPresentation(
             .compact,
@@ -2058,6 +2159,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     func dismissTerminalPeek(id: UUID) {
         guard let runtime = runtime(id: id),
               runtime.presentation == .compact,
+              !runtime.isTerminalLocked,
+              terminalTransientCounts[id, default: 0] == 0,
               let controller = panelControllers[id],
               controller.isHoverPeekPresented else { return }
         setPresentation(.collapsed, for: runtime, animated: true, focus: false)
@@ -2160,6 +2263,18 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         guard !insertion.isEmpty,
               let runtime = runtime(id: id),
               terminalTransientCounts[id, default: 0] == 0 else { return }
+        let opensTransientTerminal = runtime.presentation == .collapsed
+        var transferredTransientLifecycle = false
+        if opensTransientTerminal {
+            beginTransientHoverInputTarget(id: id)
+        }
+        defer {
+            if opensTransientTerminal, !transferredTransientLifecycle {
+                endTransientHoverInputTarget(
+                    id: id,
+                    restorePreviousApplication: true)
+            }
+        }
         protectTerminalFromFocusLoss(id: id, duration: 1.25)
 
         if runtime.activity.phase == .exited {
@@ -2178,6 +2293,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         }
         surface.sendText(insertion)
         stabilizeTerminalFocusAfterFileDrop(id: id)
+        if opensTransientTerminal {
+            transferredTransientLifecycle = panelControllers[id]?
+                .beginTransientFileDropTerminalLifecycle() == true
+        }
     }
 
     private func installGlobalFileDropFallback() {
@@ -2405,6 +2524,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             companionStackTransition = nil
             hiddenCompanionStackTransitionIDs.removeAll()
             companionStackDisplayLink.stop()
+            companionStackCompletionWorkItem?.cancel()
+            companionStackCompletionWorkItem = nil
+            companionStackTransitionOverlay?.close()
+            companionStackTransitionOverlay = nil
             settleCompanionStackVisibility()
         } else if companionStackIsExpanded {
             reflowExpandedCompanionStack(animated: true)
@@ -2434,11 +2557,23 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     func toggleTerminalLock(id: UUID) {
         guard let runtime = runtime(id: id) else { return }
         runtime.isTerminalLocked.toggle()
+        if runtime.isTerminalLocked {
+            panelControllers[id]?.keepTerminalOpen()
+        }
+    }
+
+    /// Hiding preserves the running PTY and its agent. Removal remains a
+    /// separate, confirmed action in the agent menu.
+    func hideTerminal(id: UUID) {
+        guard let runtime = runtime(id: id) else { return }
+        setPresentation(.collapsed, for: runtime, animated: true, focus: false)
     }
 
     func setTerminalDialogPresented(id: UUID, isPresented: Bool) {
         guard runtime(id: id) != nil else { return }
         if isPresented {
+            // A dialog is an explicit interaction, not a hover preview.
+            panelControllers[id]?.keepTerminalOpen()
             beginTerminalTransient(id: id)
             return
         }
@@ -2459,7 +2594,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         alert.messageText = "Kill \(runtime.record.displayName) and its terminal?"
         alert.informativeText = "This permanently ends the running terminal "
             + "and removes the agent from Teddy CLI. To only hide the "
-            + "terminal, cancel and click the agent on your desktop."
+            + "terminal, cancel and use the terminal’s close button."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Kill Agent")
         alert.buttons.last?.hasDestructiveAction = true
@@ -2856,6 +2991,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     ) {
         let reversesActiveTransition = companionStackTransition != nil
         companionStackDisplayLink.stop()
+        companionStackCompletionWorkItem?.cancel()
+        companionStackCompletionWorkItem = nil
         hiddenCompanionStackTransitionIDs.removeAll()
         stopOrganicCompanionSwapMotion(preservingFrames: true)
         let elementIDs = companionStackElementIDs
@@ -2910,6 +3047,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
         hideCompanionStackBadges()
         detachCompanionPileWindows()
+        companionHubState.showsNotificationProjection = false
         companionStackIsExpanded = expanding
         activeCompanionStackLayout = expanding ? layout : nil
         if expanding {
@@ -2939,8 +3077,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             settleCompanionStackVisibility()
             return
         }
+        let previousOverlay = companionStackTransitionOverlay
+        let overlay = makeCompanionStackTransitionOverlay(for: items)
+        // Snapshot preparation is complete. Start at the click timestamp: Core
+        // Animation will commit the first changed frame on the next v-sync,
+        // without an extra refresh of artificial input latency.
         let transitionStart = CACurrentMediaTime()
-        companionStackTransition = GaiCompanionStackTransition(
+        let transition = GaiCompanionStackTransition(
             expanding: expanding,
             isReflow: isReflow,
             anchorID: companionHubID,
@@ -2948,6 +3091,26 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             duration: duration,
             items: items,
             finalLayout: layout)
+        companionStackTransition = transition
+
+        companionStackTransitionOverlay = overlay
+        if let overlay {
+            configureCompanionStackOverlayAnimations(
+                overlay,
+                transition: transition)
+            overlay.present()
+            for item in items where item.id != companionHubID {
+                panelControllers[item.id]?.suspendStackTransitionRendering()
+            }
+            scheduleCompanionStackSnapshotWarmup(force: true)
+            // The stationary white hub remains a live window and must cover
+            // the temporary bitmap scene just as it covered agent windows.
+            companionHubController?.companionPanel.orderFrontRegardless()
+            previousOverlay?.close()
+            scheduleCompanionStackOverlayCompletion(for: transition)
+            return
+        }
+        previousOverlay?.close()
 
         let depthOrderedItems = Array(
             items.filter { $0.id != companionHubID }.reversed())
@@ -2965,6 +3128,160 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         CATransaction.commit()
         companionStackDisplayLink.start(
             synchronizedTo: companionHubController?.companionPanel.contentView)
+    }
+
+    private func makeCompanionStackTransitionOverlay(
+        for items: [GaiCompanionStackTransitionItem]
+    ) -> GaiCompanionStackTransitionOverlay? {
+        let agentItems = items.filter { $0.id != companionHubID }
+        guard !agentItems.isEmpty else { return nil }
+
+        // Reverse insertion reproduces the existing front-to-back ordering;
+        // the hub itself stays a real window ordered above this entire scene.
+        let seeds = agentItems.reversed().compactMap { item -> GaiCompanionStackOverlaySeed? in
+            guard let snapshot = panelControllers[item.id]?.makeStackTransitionSnapshot()
+            else { return nil }
+            return GaiCompanionStackOverlaySeed(
+                id: item.id,
+                snapshot: snapshot,
+                frame: item.fromFrame,
+                alpha: item.fromAlpha,
+                scale: item.fromScale)
+        }
+        guard seeds.count == agentItems.count else { return nil }
+
+        var coverage = NSRect.null
+        for item in agentItems {
+            let maximumScale = max(item.fromScale, item.toScale, 1)
+            for frame in [item.fromFrame, item.toFrame] {
+                let scaledFrame = NSRect(
+                    x: frame.midX - frame.width * maximumScale / 2,
+                    y: frame.midY - frame.height * maximumScale / 2,
+                    width: frame.width * maximumScale,
+                    height: frame.height * maximumScale)
+                coverage = coverage.union(scaledFrame)
+            }
+            if item.bend != 0 {
+                coverage = coverage.insetBy(
+                    dx: -abs(item.bend),
+                    dy: -abs(item.bend))
+            }
+        }
+        guard !coverage.isNull, !coverage.isEmpty else { return nil }
+        coverage = coverage.insetBy(dx: -3, dy: -3).integral
+        return GaiCompanionStackTransitionOverlay(
+            coverageFrame: coverage,
+            seeds: seeds)
+    }
+
+    /// Pre-renders one mascot per main-queue turn while no click is waiting.
+    /// A later pile click can therefore assemble its compositor scene from
+    /// cached pixels and begin on that same input frame. The cache signature
+    /// still forces an exact refresh after a colour, phase, scale or size change.
+    private func scheduleCompanionStackSnapshotWarmup(force: Bool) {
+        stackSnapshotWarmupGeneration &+= 1
+        let generation = stackSnapshotWarmupGeneration
+        let ids = runtimes.map(\.id)
+        for (index, id) in ids.enumerated() {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + 0.012 + Double(index) * 0.004
+            ) { [weak self] in
+                guard let self,
+                      self.stackSnapshotWarmupGeneration == generation else { return }
+                self.panelControllers[id]?.refreshStackTransitionSnapshot(
+                    force: force)
+            }
+        }
+    }
+
+    private func configureCompanionStackOverlayAnimations(
+        _ overlay: GaiCompanionStackTransitionOverlay,
+        transition: GaiCompanionStackTransition
+    ) {
+        // Sampling at the maximum supported refresh preserves the exact custom
+        // film while letting Core Animation interpolate and present it entirely
+        // on the render server. No NSWindow mutation occurs between samples.
+        let sampleCount = max(2, Int(ceil(transition.duration * 120)) + 1)
+        let denominator = Double(sampleCount - 1)
+        let keyTimes = (0..<sampleCount).map {
+            NSNumber(value: Double($0) / denominator)
+        }
+
+        for item in transition.items where item.id != transition.anchorID {
+            var frames: [NSRect] = []
+            var alphas: [CGFloat] = []
+            var scales: [CGFloat] = []
+            frames.reserveCapacity(sampleCount)
+            alphas.reserveCapacity(sampleCount)
+            scales.reserveCapacity(sampleCount)
+
+            for index in 0..<sampleCount {
+                let elapsed = transition.duration * Double(index) / denominator
+                let linear = GaiCompanionStackMotion.localProgress(
+                    elapsed: elapsed,
+                    duration: transition.duration,
+                    stagger: item.delay,
+                    reversing: !transition.expanding && !transition.isReflow)
+                let position: CGFloat = if transition.isReflow {
+                    GaiCompanionMagneticSwap.settlePosition(at: linear)
+                } else if transition.expanding {
+                    GaiCompanionStackMotion.position(at: linear)
+                } else {
+                    GaiCompanionStackMotion.collapsePosition(at: linear)
+                }
+                let opacityProgress = if transition.expanding || transition.isReflow {
+                    GaiCompanionStackMotion.opacity(at: linear)
+                } else {
+                    GaiCompanionStackMotion.collapseOpacity(at: linear)
+                }
+                let bend: CGFloat = if transition.isReflow {
+                    0
+                } else if transition.expanding {
+                    item.bend
+                } else {
+                    item.bend * 0.55 * (1 - opacityProgress)
+                }
+                frames.append(companionStackFrame(
+                    from: item.fromFrame,
+                    to: item.toFrame,
+                    position: position,
+                    linearProgress: linear,
+                    bend: bend))
+                alphas.append(
+                    item.fromAlpha
+                        + (item.toAlpha - item.fromAlpha) * opacityProgress)
+                let scaleProgress = min(max(position, 0), 1.035)
+                scales.append(
+                    item.fromScale
+                        + (item.toScale - item.fromScale) * scaleProgress)
+            }
+
+            overlay.animate(
+                id: item.id,
+                frames: frames,
+                alphas: alphas,
+                scales: scales,
+                keyTimes: keyTimes,
+                duration: transition.duration,
+                globalStartTime: transition.startedAt)
+        }
+    }
+
+    private func scheduleCompanionStackOverlayCompletion(
+        for transition: GaiCompanionStackTransition
+    ) {
+        companionStackCompletionWorkItem?.cancel()
+        let expectedStart = transition.startedAt
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.companionStackTransition?.startedAt == expectedStart else { return }
+            self.completeCompanionStackTransition(transition)
+        }
+        companionStackCompletionWorkItem = workItem
+        let startDelay = max(0, transition.startedAt - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + startDelay + transition.duration,
+            execute: workItem)
     }
 
     private func advanceCompanionStackTransition(at timestamp: CFTimeInterval) {
@@ -3032,7 +3349,16 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         CATransaction.commit()
         guard finished else { return }
 
+        completeCompanionStackTransition(transition)
+    }
+
+    private func completeCompanionStackTransition(
+        _ transition: GaiCompanionStackTransition
+    ) {
+        guard companionStackTransition?.startedAt == transition.startedAt else { return }
         companionStackDisplayLink.stop()
+        companionStackCompletionWorkItem?.cancel()
+        companionStackCompletionWorkItem = nil
         companionStackTransition = nil
         hiddenCompanionStackTransitionIDs.removeAll()
         activeCompanionStackLayout = transition.expanding
@@ -3170,7 +3496,12 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func currentCompanionFrames() -> [UUID: NSRect] {
         var frames = Dictionary(uniqueKeysWithValues: runtimes.compactMap { runtime in
-            panelControllers[runtime.id].map { (runtime.id, $0.companionPanel.frame) }
+            if let frame = companionStackTransitionOverlay?.frame(for: runtime.id) {
+                return (runtime.id, frame)
+            }
+            return panelControllers[runtime.id].map {
+                (runtime.id, $0.companionPanel.frame)
+            }
         })
         if let hubController = companionHubController {
             frames[companionHubID] = hubController.companionPanel.frame
@@ -3186,8 +3517,20 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func settleCompanionStackVisibility() {
         updateCompanionStackDepths()
+        companionHubState.showsNotificationProjection = !companionStackIsExpanded
         guard agentWindowsAreVisible,
-              let hubController = companionHubController else { return }
+              let hubController = companionHubController else {
+            companionStackTransitionOverlay?.close()
+            companionStackTransitionOverlay = nil
+            companionHubController?.finishStackTransition()
+            for runtime in runtimes {
+                panelControllers[runtime.id]?.finishStackTransition(
+                    interactive: false,
+                    selected: false,
+                    restingScale: 1)
+            }
+            return
+        }
         if companionStackIsExpanded {
             detachCompanionPileWindows()
             if activeCompanionStackLayout == nil {
@@ -3223,6 +3566,10 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             // leaking animation pixels and mouse tracking around the hub.
             detachCompanionPileWindows()
         }
+        // Real windows now occupy the exact final pixels underneath the
+        // transition film. Removing the film is therefore a zero-delta swap.
+        companionStackTransitionOverlay?.close()
+        companionStackTransitionOverlay = nil
         companionHubController?.finishStackTransition()
         for runtime in runtimes {
             panelControllers[runtime.id]?.finishStackTransition(
@@ -3234,6 +3581,7 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             prepareCompanionStackBadgeReveal()
         } else {
             hideCompanionStackBadges()
+            scheduleCompanionStackSnapshotWarmup(force: false)
         }
     }
 
@@ -3300,13 +3648,21 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     private func stackTransitionAlpha(for id: UUID) -> CGFloat {
-        id == companionHubID
+        if id != companionHubID,
+           let alpha = companionStackTransitionOverlay?.alpha(for: id) {
+            return alpha
+        }
+        return id == companionHubID
             ? companionHubController?.transitionAlpha ?? 1
             : panelControllers[id]?.companionTransitionAlpha ?? 1
     }
 
     private func stackTransitionScale(for id: UUID) -> CGFloat {
-        id == companionHubID
+        if id != companionHubID,
+           let scale = companionStackTransitionOverlay?.scale(for: id) {
+            return scale
+        }
+        return id == companionHubID
             ? companionHubController?.transitionScale ?? 1
             : panelControllers[id]?.companionTransitionScale ?? 1
     }
@@ -3433,7 +3789,9 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         for runtime: GaiCompanionRuntime,
         animated: Bool,
         focus: Bool,
-        usesSharedHoverBay: Bool = false
+        usesSharedHoverBay: Bool = false,
+        screenOverride: NSScreen? = nil,
+        terminalFrameOverride: NSRect? = nil
     ) {
         ensurePanel(for: runtime)
         if presentation == .collapsed {
@@ -3490,23 +3848,31 @@ final class GaiCompanionManager: NSObject, ObservableObject {
         let companionFrame = controller.companionPanel.isVisible
             ? controller.companionPanel.frame
             : companionFrame(for: runtime, screen: companionScreen)
-        let screen = presentation == .maximized
+        let screen = screenOverride ?? (presentation == .maximized
             ? expandedTerminalScreen(fallback: companionScreen)
-            : companionScreen
+            : companionScreen)
         let compactGeometry = usesSharedHoverBay
             ? sharedHoverTerminalGeometry(
                 for: runtime,
                 screen: screen,
                 companionFrame: companionFrame)
             : nil
-        let geometry = panelGeometry(
+        var geometry = panelGeometry(
             for: runtime,
             presentation: presentation,
             screen: screen,
             companionFrame: companionFrame,
             compactGeometry: compactGeometry)
+        if let terminalFrameOverride {
+            geometry.terminalFrame = terminalFrameOverride
+        }
         runtime.terminalPlacement = geometry.placement
         let shouldFocus = requestsFocus && agentWindowsAreVisible
+        // Wake the one requested renderer before its window is ordered. This
+        // gives WindowServer a fresh asynchronous frame without ever blocking
+        // the click/hover path on Metal completion.
+        updateSurfacePerformanceState(
+            focused: shouldFocus ? runtime.surfaceView : nil)
         controller.show(
             companionFrame: companionFrame,
             terminalFrame: geometry.terminalFrame,
@@ -3518,8 +3884,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
             agentWindowsAreVisible: agentWindowsAreVisible,
             companionIsVisible: agentWindowsAreVisible && companionStackIsExpanded)
         let shouldFocusTerminal = shouldFocus
-        updateSurfacePerformanceState(
-            focused: shouldFocusTerminal ? runtime.surfaceView : nil)
         if shouldFocusTerminal, let surface = runtime.surfaceView {
             requestTerminalFocus(for: runtime, surface: surface)
         }
@@ -3531,6 +3895,11 @@ final class GaiCompanionManager: NSObject, ObservableObject {
               runtime.presentation != .collapsed,
               let controller = panelControllers[id],
               controller.terminalPanel.isKeyWindow else { return }
+        if controller.isHoverPeekPresented {
+            explicitlySelectCompanion(id: id)
+            selectCompanion(id: id)
+            runtime.acknowledgeCompletion()
+        }
         guard let surface = ensureSurface(for: runtime) else { return }
         updateSurfacePerformanceState(focused: surface)
         requestTerminalFocus(for: runtime, surface: surface)
@@ -4328,11 +4697,13 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func restoreFloatingWindowsOnActiveSpace() {
         guard agentWindowsAreVisible else { return }
+        let stackFilmIsVisible = companionStackTransitionOverlay != nil
         for controller in panelControllers.values {
             controller.restoreVisibilityOnActiveSpace(
                 agentWindowsVisible: true,
-                companionIsVisible: companionStackIsExpanded)
+                companionIsVisible: companionStackIsExpanded && !stackFilmIsVisible)
         }
+        companionStackTransitionOverlay?.present()
         companionHubController?.restoreVisibilityOnActiveSpace(true)
     }
 
@@ -4409,14 +4780,22 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func restartExitedTerminal(
         _ runtime: GaiCompanionRuntime,
-        presentation: GaiCompanionPresentation = .compact
+        presentation: GaiCompanionPresentation = .compact,
+        screenOverride: NSScreen? = nil,
+        terminalFrameOverride: NSRect? = nil
     ) {
         runtime.resetActivity()
         // Natural exit already rotates after releasing the old PTY. Rotating
         // again makes an immediate relaunch safe even if a delayed hook exists.
         runtime.rotateEventToken()
         guard ensureSurface(for: runtime) != nil else { return }
-        setPresentation(presentation, for: runtime, animated: true, focus: true)
+        setPresentation(
+            presentation,
+            for: runtime,
+            animated: true,
+            focus: true,
+            screenOverride: screenOverride,
+            terminalFrameOverride: terminalFrameOverride)
     }
 
     @objc private func didRequestToggleMaximize(_ notification: Notification) {
@@ -5219,16 +5598,17 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     private func updateDockBadge() {
-        let count = runtimes.reduce(into: 0) { total, runtime in
-            switch runtime.activity.phase {
-            case .completedUnseen, .awaitingInput, .awaitingApproval, .failed:
-                total += 1
-            default:
-                break
-            }
-        }
-        NSApp.dockTile.badgeLabel = count == 0 ? nil : "\(min(count, 99))"
+        let notification = GaiCompanionNotificationProjection.resolve(
+            phases: runtimes.lazy.map(\.activity.phase))
+        companionHubState.setNotificationProjection(notification)
+        NSApp.dockTile.badgeLabel = notification.count == 0
+            ? nil
+            : "\(min(notification.count, 99))"
         NSApp.dockTile.display()
+        if !companionStackIsExpanded,
+           companionStackTransition == nil {
+            scheduleCompanionStackSnapshotWarmup(force: false)
+        }
     }
 
     private func eventKind(title: String, body: String) -> GaiCompanionEventKind {

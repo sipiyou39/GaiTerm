@@ -147,6 +147,15 @@ private enum GaiCompanionHoverPeekPreference {
     }
 }
 
+/// Pointer-only ownership for a clicked full-screen terminal. Using the actual
+/// AppKit frame means the menu bar, Dock and every other display are outside
+/// the session even though the panel itself floats above ordinary apps.
+enum GaiCompanionFullScreenPointerRegion {
+    static func shouldDismiss(pointer: NSPoint, terminalFrame: NSRect) -> Bool {
+        !terminalFrame.contains(pointer)
+    }
+}
+
 /// A narrow, invisible passage keeps a hover terminal alive while the pointer
 /// travels from the mascot to the panel. It never participates in initial hover
 /// detection, so transparent pixels around the doudou remain genuinely inert.
@@ -155,7 +164,7 @@ enum GaiCompanionHoverBridge {
         _ point: NSPoint,
         mascotFrame: NSRect,
         terminalFrame: NSRect,
-        halfWidth: CGFloat = 11
+        halfWidth: CGFloat = 28
     ) -> Bool {
         guard !mascotFrame.isEmpty, !terminalFrame.isEmpty else { return false }
         let mascotCenter = NSPoint(x: mascotFrame.midX, y: mascotFrame.midY)
@@ -868,6 +877,281 @@ final class GaiCompanionDisplayLink {
     }
 }
 
+/// One already-rendered mascot panel. Stack transitions intentionally animate
+/// these immutable pixels instead of seven independent transparent NSWindows.
+/// That keeps WindowServer's damage region fixed when the pile sits above a
+/// busy Metal-backed editor such as Cursor.
+struct GaiCompanionStackSnapshot {
+    let image: CGImage
+    let pointSize: CGSize
+    let contentsScale: CGFloat
+
+    init?(view: NSView) {
+        guard view.bounds.width > 0, view.bounds.height > 0 else { return nil }
+        view.wantsLayer = true
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+        guard let layer = view.layer else { return nil }
+
+        let scale = max(view.window?.backingScaleFactor ?? 2, 1)
+        let pixelsWide = max(1, Int(ceil(view.bounds.width * scale)))
+        let pixelsHigh = max(1, Int(ceil(view.bounds.height * scale)))
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+            ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.byteOrder32Big.rawValue)
+        guard let context = CGContext(
+            data: nil,
+            width: pixelsWide,
+            height: pixelsHigh,
+            bitsPerComponent: 8,
+            bytesPerRow: pixelsWide * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue)
+        else { return nil }
+
+        context.scaleBy(x: scale, y: scale)
+        layer.render(in: context)
+        guard let image = context.makeImage() else { return nil }
+        self.image = image
+        pointSize = view.bounds.size
+        contentsScale = scale
+    }
+}
+
+struct GaiCompanionStackOverlaySeed {
+    let id: UUID
+    let snapshot: GaiCompanionStackSnapshot
+    let frame: NSRect
+    let alpha: CGFloat
+    let scale: CGFloat
+}
+
+/// A short-lived, noninteractive compositor scene for pile bloom/retraction.
+/// The panel itself never moves. Only bitmap-backed CALayers animate inside
+/// it, so Core Animation can present the full film on the render server even
+/// while either application's main thread is momentarily busy.
+final class GaiCompanionStackTransitionOverlay {
+    private static let animationKey = "gai.companion.stack.transition"
+
+    private let panel: NSPanel
+    private let coverageFrame: NSRect
+    private var layers: [UUID: CALayer] = [:]
+
+    init?(coverageFrame: NSRect, seeds: [GaiCompanionStackOverlaySeed]) {
+        guard !seeds.isEmpty,
+              coverageFrame.width > 0,
+              coverageFrame.height > 0 else { return nil }
+        self.coverageFrame = coverageFrame
+
+        let panel = GaiCompanionPanel(
+            contentRect: coverageFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+        panel.level = NSWindow.Level(
+            rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
+        panel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.isMovableByWindowBackground = false
+        panel.animationBehavior = .none
+        panel.ignoresMouseEvents = true
+        panel.isExcludedFromWindowsMenu = true
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "gai.companion.stack-transition")
+
+        let contentView = NSView(frame: NSRect(origin: .zero, size: coverageFrame.size))
+        contentView.autoresizingMask = [.width, .height]
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = NSColor.clear.cgColor
+        contentView.layer?.masksToBounds = true
+        panel.contentView = contentView
+        self.panel = panel
+
+        guard let rootLayer = contentView.layer else {
+            panel.close()
+            return nil
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for seed in seeds {
+            let layer = CALayer()
+            layer.contents = seed.snapshot.image
+            layer.contentsGravity = .resize
+            layer.contentsScale = seed.snapshot.contentsScale
+            layer.minificationFilter = .trilinear
+            layer.magnificationFilter = .linear
+            layer.allowsEdgeAntialiasing = true
+            layer.bounds = NSRect(origin: .zero, size: seed.frame.size)
+            layer.position = localCenter(of: seed.frame)
+            layer.opacity = Float(min(max(seed.alpha, 0), 1))
+            layer.setAffineTransform(CGAffineTransform(
+                scaleX: seed.scale,
+                y: seed.scale))
+            rootLayer.addSublayer(layer)
+            layers[seed.id] = layer
+        }
+        CATransaction.commit()
+    }
+
+    deinit {
+        close()
+    }
+
+    var capturedIDs: Set<UUID> { Set(layers.keys) }
+
+    func animate(
+        id: UUID,
+        frames: [NSRect],
+        alphas: [CGFloat],
+        scales: [CGFloat],
+        keyTimes: [NSNumber],
+        duration: CFTimeInterval,
+        globalStartTime: CFTimeInterval
+    ) {
+        guard let layer = layers[id],
+              frames.count >= 2,
+              frames.count == alphas.count,
+              frames.count == scales.count,
+              frames.count == keyTimes.count,
+              let finalFrame = frames.last,
+              let finalAlpha = alphas.last,
+              let finalScale = scales.last else { return }
+
+        let positions = frames.map { NSValue(point: localCenter(of: $0)) }
+        let bounds = frames.map {
+            NSValue(rect: NSRect(origin: .zero, size: $0.size))
+        }
+        let opacityValues = alphas.map { NSNumber(value: Double($0)) }
+        let scaleValues = scales.map { NSNumber(value: Double($0)) }
+
+        let positionAnimation = keyframeAnimation(
+            keyPath: "position",
+            values: positions,
+            keyTimes: keyTimes)
+        let boundsAnimation = keyframeAnimation(
+            keyPath: "bounds",
+            values: bounds,
+            keyTimes: keyTimes)
+        let opacityAnimation = keyframeAnimation(
+            keyPath: "opacity",
+            values: opacityValues,
+            keyTimes: keyTimes)
+        let scaleAnimation = keyframeAnimation(
+            keyPath: "transform.scale",
+            values: scaleValues,
+            keyTimes: keyTimes)
+        for animation in [
+            positionAnimation,
+            boundsAnimation,
+            opacityAnimation,
+            scaleAnimation,
+        ] {
+            animation.duration = duration
+        }
+
+        let group = CAAnimationGroup()
+        group.animations = [
+            positionAnimation,
+            boundsAnimation,
+            opacityAnimation,
+            scaleAnimation,
+        ]
+        group.duration = duration
+        group.beginTime = layer.convertTime(globalStartTime, from: nil)
+        group.fillMode = .both
+        group.isRemovedOnCompletion = true
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.bounds = NSRect(origin: .zero, size: finalFrame.size)
+        layer.position = localCenter(of: finalFrame)
+        layer.opacity = Float(min(max(finalAlpha, 0), 1))
+        layer.setAffineTransform(CGAffineTransform(
+            scaleX: finalScale,
+            y: finalScale))
+        layer.add(group, forKey: Self.animationKey)
+        CATransaction.commit()
+    }
+
+    func present() {
+        panel.collectionBehavior = GaiCompanionSpacePolicy.floatingOverlay
+        panel.orderFrontRegardless()
+    }
+
+    func frame(for id: UUID) -> NSRect? {
+        guard let layer = visibleLayer(for: id) else { return nil }
+        let center = globalPoint(fromLocal: layer.position)
+        return NSRect(
+            x: center.x - layer.bounds.width / 2,
+            y: center.y - layer.bounds.height / 2,
+            width: layer.bounds.width,
+            height: layer.bounds.height)
+    }
+
+    func alpha(for id: UUID) -> CGFloat? {
+        visibleLayer(for: id).map { CGFloat($0.opacity) }
+    }
+
+    func scale(for id: UUID) -> CGFloat? {
+        guard let transform = visibleLayer(for: id)?.transform else { return nil }
+        return max(hypot(transform.m11, transform.m12), 0.001)
+    }
+
+    func suspend(id: UUID) {
+        guard let layer = layers[id] else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.isHidden = true
+        CATransaction.commit()
+    }
+
+    func close() {
+        guard panel.isVisible || panel.contentView != nil else { return }
+        panel.orderOut(nil)
+        panel.contentView?.layer?.removeAllAnimations()
+        panel.contentView?.layer?.sublayers?.forEach { $0.removeAllAnimations() }
+        panel.contentView?.layer?.sublayers = nil
+        panel.contentView = nil
+        panel.close()
+        layers.removeAll()
+    }
+
+    private func visibleLayer(for id: UUID) -> CALayer? {
+        guard let layer = layers[id] else { return nil }
+        return layer.presentation() ?? layer
+    }
+
+    private func localCenter(of frame: NSRect) -> CGPoint {
+        CGPoint(
+            x: frame.midX - coverageFrame.minX,
+            y: frame.midY - coverageFrame.minY)
+    }
+
+    private func globalPoint(fromLocal point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: point.x + coverageFrame.minX,
+            y: point.y + coverageFrame.minY)
+    }
+
+    private func keyframeAnimation(
+        keyPath: String,
+        values: [Any],
+        keyTimes: [NSNumber]
+    ) -> CAKeyframeAnimation {
+        let animation = CAKeyframeAnimation(keyPath: keyPath)
+        animation.values = values
+        animation.keyTimes = keyTimes
+        animation.calculationMode = .linear
+        return animation
+    }
+}
+
 /// Deterministic FLIP transition used only when the preview changes side.
 /// Offsets stay relative to the moving companion so AppKit remains the sole
 /// owner of ordinary drag motion. There is deliberately no velocity state.
@@ -921,6 +1205,22 @@ final class GaiCompanionHubState: ObservableObject {
     @Published var isExpanded = false
     @Published var isHovered = false
     @Published var scalePercent = GaiCompanionScalePercent.standard
+    /// False throughout opening, expanded and closing motion. Notifications
+    /// belong to the white hub only once it is the sole collapsed object.
+    @Published var showsNotificationProjection = true
+    @Published private(set) var notificationProjection =
+        GaiCompanionNotificationProjection.none
+
+    var visibleNotificationProjection: GaiCompanionNotificationProjection {
+        showsNotificationProjection ? notificationProjection : .none
+    }
+
+    func setNotificationProjection(
+        _ projection: GaiCompanionNotificationProjection
+    ) {
+        guard notificationProjection != projection else { return }
+        notificationProjection = projection
+    }
 }
 
 final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
@@ -977,13 +1277,17 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
         host.configureHubAction { [weak manager] in
             manager?.requestOpenCompanionCreator()
         }
-        host.onPointerEntered = { [weak host, weak state] in
+        // The house is the hub's permanent entry point. It must not depend on
+        // the mascot silhouette hover session, otherwise crossing the small
+        // transparent gap above the head hides the control before it can be
+        // clicked.
+        host.setQuickActionsVisible(true, animated: false)
+        host.onPointerEntered = { [weak state, weak manager] in
             state?.isHovered = true
-            host?.setQuickActionsVisible(true)
+            manager?.companionHubWasHovered()
         }
-        host.onPointerExited = { [weak host, weak state] in
+        host.onPointerExited = { [weak state] in
             state?.isHovered = false
-            host?.setQuickActionsVisible(false)
         }
         host.onDragBegan = { [weak manager] in
             manager?.companionHubDragDidBegin()
@@ -1102,7 +1406,7 @@ final class GaiCompanionHubPanelController: NSObject, NSWindowDelegate {
 
     private func resetHoverPresentation() {
         state.isHovered = false
-        hostView?.setQuickActionsVisible(false, animated: false)
+        hostView?.setQuickActionsVisible(true, animated: false)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -1125,7 +1429,16 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     let companionPanel: NSPanel
     let terminalPanel: NSPanel
 
+    private struct StackSnapshotSignature: Equatable {
+        let colorway: String
+        let animation: String
+        let scalePercent: Int
+        let panelSize: CGSize
+        let backingScale: CGFloat
+    }
+
     private let runtimeID: UUID
+    private weak var runtime: GaiCompanionRuntime?
     private weak var manager: GaiCompanionManager?
     private let dropFeedback: GaiCompanionDropFeedback
     private var dropIsTargeted = false
@@ -1144,12 +1457,22 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     private var mascotHostView: GaiCompanionDragClickContainerView<GaiCompanionMascotView>?
     private var hoverIntentWorkItem: DispatchWorkItem?
     private var hoverPresenceTimer: DispatchSourceTimer?
+    private var fullScreenPresenceTimer: DispatchSourceTimer?
+    private var fullScreenOpeningTargetFrame: NSRect?
+    private var fullScreenOpeningDeadline: CFTimeInterval?
     private var pointerIsOverMascot = false
     private var hoverPeekOwnsPresentation = false
+    private var hoverPeekRequiresPreference = true
+    private var terminalHoverPrewarmIsActive = false
+    private var fullScreenPointerOwnsPresentation = false
     private var hoverBridgeLastPointer: NSPoint?
     private var hoverBridgeLastMotionAt: CFTimeInterval?
     private var terminalIsPinnedUntilOutsideClick = false
     private var dismissalShieldPanels: [NSPanel] = []
+    private var cachedStackSnapshot: (
+        signature: StackSnapshotSignature,
+        snapshot: GaiCompanionStackSnapshot
+    )?
     private lazy var placementDisplayLink = GaiCompanionDisplayLink { [weak self] timestamp in
         self?.advanceLivePlacementAnimation(at: timestamp)
     }
@@ -1159,13 +1482,14 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     /// and perform one exact final layout once the pointer has settled.
     private static let moveSettleDelay: TimeInterval = 0.1
     private static let placementTransitionDuration: CFTimeInterval = 0.18
-    private static let hoverIntentDelay: TimeInterval = 0.18
+    private static let hoverIntentDelay: TimeInterval = 0.3
     private static let hoverPresenceInterval: DispatchTimeInterval = .milliseconds(8)
     /// The bridge is a movement corridor, never a third resting hover target.
-    /// A paused pointer outside both real surfaces therefore closes almost
-    /// immediately, while continuous travel to the terminal remains possible.
-    private static let hoverBridgeIdleTimeout: CFTimeInterval = 0.09
+    /// Allow a short pause or a curved path in either direction between the
+    /// two surfaces before dismissing the preview.
+    private static let hoverBridgeIdleTimeout: CFTimeInterval = 0.35
     private static let hoverBridgeMinimumMotion: CGFloat = 0.35
+    private static let fullScreenOpeningGrace: CFTimeInterval = 0.35
     private static let restingCompanionLevel = NSWindow.Level(
         rawValue: GaiFloatingPanels.overlayLevel.rawValue + 1)
     private static let foregroundTerminalLevel = NSWindow.Level(
@@ -1180,6 +1504,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     init(runtime: GaiCompanionRuntime, manager: GaiCompanionManager) {
         runtimeID = runtime.id
+        self.runtime = runtime
         self.manager = manager
         let dropFeedback = GaiCompanionDropFeedback()
         self.dropFeedback = dropFeedback
@@ -1258,10 +1583,12 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         mascotHost.onPointerExited = { [weak self] in
             self?.mascotPointerExited()
         }
-        mascotHost.configureVoiceAction(
-            onReplayLatestResponse: { [weak manager] in
-                manager?.requestReplayLatestVoice(id: runtime.id)
-            })
+        if TeddyVoiceAvailability.isEnabled {
+            mascotHost.configureVoiceAction(
+                onReplayLatestResponse: { [weak manager] in
+                    manager?.requestReplayLatestVoice(id: runtime.id)
+                })
+        }
         mascotHost.onDragBegan = { [weak manager] in
             manager?.companionDragDidBegin(id: runtime.id)
         }
@@ -1305,7 +1632,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 manager?.requestReplayLatestVoice(id: runtime.id)
             },
             onRename: { [weak manager] name in manager?.updateName(id: runtime.id, name: name) },
-            onClose: { [weak manager] in manager?.requestCloseCompanion(id: runtime.id) },
+            onClose: { [weak manager] in manager?.hideTerminal(id: runtime.id) },
             onChooseDirectory: { [weak manager] path in
                 manager?.chooseDirectory(id: runtime.id, path: path)
             },
@@ -1336,6 +1663,26 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     var companionTransitionScale: CGFloat {
         companionPanel.contentView?.layer?.affineTransform().a ?? 1
+    }
+
+    func makeStackTransitionSnapshot() -> GaiCompanionStackSnapshot? {
+        refreshStackTransitionSnapshot(force: false)
+    }
+
+    @discardableResult
+    func refreshStackTransitionSnapshot(
+        force: Bool
+    ) -> GaiCompanionStackSnapshot? {
+        guard let contentView = companionPanel.contentView,
+              let signature = stackSnapshotSignature(for: contentView) else { return nil }
+        if !force,
+           let cachedStackSnapshot,
+           cachedStackSnapshot.signature == signature {
+            return cachedStackSnapshot.snapshot
+        }
+        guard let snapshot = GaiCompanionStackSnapshot(view: contentView) else { return nil }
+        cachedStackSnapshot = (signature, snapshot)
+        return snapshot
     }
 
     /// Applies one compositor frame of the stack bloom. The window keeps its
@@ -1447,10 +1794,120 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         companionPanel.orderOut(nil)
     }
 
+    private func stackSnapshotSignature(
+        for contentView: NSView
+    ) -> StackSnapshotSignature? {
+        guard let runtime else { return nil }
+        return StackSnapshotSignature(
+            colorway: runtime.renderedColorway.rawValue,
+            animation: runtime.animation.rawValue,
+            scalePercent: runtime.record.scalePercent.value,
+            panelSize: contentView.bounds.size,
+            backingScale: max(companionPanel.backingScaleFactor, 1))
+    }
+
+    func keepTerminalOpen() {
+        cancelHoverPeekLifecycle()
+        cancelPointerDismissedFullScreenLifecycle()
+        endPinnedTerminalSession()
+    }
+
     var isHoverPeekPresented: Bool {
         hoverPeekOwnsPresentation
             && presentation == .compact
             && terminalPanel.isVisible
+    }
+
+    /// A drop which opened a collapsed terminal gets the exact same bounded
+    /// doudou-to-terminal pointer session as a hover preview. Existing pinned
+    /// or maximized terminals are deliberately left untouched.
+    @discardableResult
+    func beginTransientFileDropTerminalLifecycle() -> Bool {
+        guard presentation == .compact,
+              terminalPanel.isVisible else { return false }
+        cancelHoverIntent()
+        hoverPeekRequiresPreference = false
+        hoverPeekOwnsPresentation = true
+        startHoverPresenceTimer()
+        return true
+    }
+
+    var isPointerDismissedFullScreenPresented: Bool {
+        fullScreenPointerOwnsPresentation
+            && presentation == .maximized
+            && terminalPanel.isVisible
+    }
+
+    /// A click owns the expanded terminal only while the pointer remains over
+    /// its real frame. The 8 ms cadence matches a 120 Hz display and catches a
+    /// move into the Dock before an ordinary hover can feel latched.
+    func dismissFullScreenTerminalWhenPointerLeaves(targetFrame: NSRect) {
+        cancelPointerDismissedFullScreenLifecycle()
+        guard presentation == .maximized,
+              terminalPanel.isVisible else { return }
+        fullScreenPointerOwnsPresentation = true
+        fullScreenOpeningTargetFrame = targetFrame
+        fullScreenOpeningDeadline = CACurrentMediaTime() + Self.fullScreenOpeningGrace
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now(),
+            repeating: Self.hoverPresenceInterval,
+            leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            self?.updateFullScreenPointerPresence()
+        }
+        fullScreenPresenceTimer = timer
+        timer.resume()
+    }
+
+    private func updateFullScreenPointerPresence() {
+        guard fullScreenPointerOwnsPresentation,
+              presentation == .maximized,
+              terminalPanel.isVisible else {
+            cancelPointerDismissedFullScreenLifecycle()
+            return
+        }
+        if runtime?.isTerminalLocked == true {
+            keepTerminalOpen()
+            return
+        }
+        let timestamp = CACurrentMediaTime()
+        let terminalFrame: NSRect
+        if let targetFrame = fullScreenOpeningTargetFrame,
+           let deadline = fullScreenOpeningDeadline,
+           timestamp < deadline {
+            // Compact-to-full-screen is a frame animation. During those few
+            // compositor frames, both the moving window and its destination
+            // are legitimate so clicking an already-hovered mascot cannot
+            // dismiss the terminal before the expansion reaches the pointer.
+            terminalFrame = terminalPanel.frame.union(targetFrame)
+        } else {
+            fullScreenOpeningTargetFrame = nil
+            fullScreenOpeningDeadline = nil
+            terminalFrame = terminalPanel.frame
+        }
+        guard GaiCompanionFullScreenPointerRegion.shouldDismiss(
+            pointer: NSEvent.mouseLocation,
+            terminalFrame: terminalFrame)
+        else { return }
+
+        // Preserve ownership until the manager validates this exact session;
+        // `show(.collapsed)` then clears the lifecycle synchronously.
+        stopFullScreenPresenceTimer()
+        manager?.dismissFullScreenTerminalAfterPointerExit(id: runtimeID)
+        fullScreenPointerOwnsPresentation = false
+    }
+
+    private func cancelPointerDismissedFullScreenLifecycle() {
+        fullScreenPointerOwnsPresentation = false
+        fullScreenOpeningTargetFrame = nil
+        fullScreenOpeningDeadline = nil
+        stopFullScreenPresenceTimer()
+    }
+
+    private func stopFullScreenPresenceTimer() {
+        fullScreenPresenceTimer?.cancel()
+        fullScreenPresenceTimer = nil
     }
 
     /// Only an explicit mascot click promotes the hover preview into a pinned
@@ -1570,8 +2027,17 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         companionIsVisible: Bool
     ) {
         if presentation != .compact {
+            if presentation != .collapsed {
+                // The manager has already promoted this surface to the visible
+                // renderer policy. Do not let hover-prewarm cleanup occlude it
+                // again while entering full screen.
+                terminalHoverPrewarmIsActive = false
+            }
             cancelHoverPeekLifecycle()
             endPinnedTerminalSession()
+        }
+        if presentation != .maximized {
+            cancelPointerDismissedFullScreenLifecycle()
         }
         visibilityGeneration += 1
         let generation = visibilityGeneration
@@ -1585,7 +2051,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         resetLivePlacementAnimation()
         livePlacement = placement
         placementScreenNumber = screenNumber(for: screen)
-        let wasVisible = terminalPanel.isVisible
 
         // Compact attachment happens only after the hidden terminal has its
         // target frame and alpha, otherwise adding it to a visible parent can
@@ -1621,19 +2086,19 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         }
 
         guard let terminalFrame else {
+            runtime?.surfaceView?.gaiAnchorViewportForTerminalDismissal()
             hideTerminal(animated: animated, generation: generation)
             return
         }
 
-        if !wasVisible && animated {
-            terminalPanel.alphaValue = 0
-        } else {
-            terminalPanel.alphaValue = 1
-        }
+        // The hidden terminal already owns a bottom-anchored viewport. Resize
+        // and reveal it in this input turn; renderer updates remain fully
+        // asynchronous and never block the main thread.
+        terminalPanel.alphaValue = 1
         setTerminalFrame(
             terminalFrame,
-            display: true,
-            animate: animated && wasVisible)
+            display: false,
+            animate: false)
         if presentation == .compact {
             updateTerminalWindowRelationship(for: presentation)
         }
@@ -1642,14 +2107,6 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             focusTerminalOnActiveSpace()
         } else {
             terminalPanel.orderFrontRegardless()
-        }
-
-        if !wasVisible && animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.16
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                terminalPanel.animator().alphaValue = 1
-            }
         }
     }
 
@@ -1707,6 +2164,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         resetLivePlacementAnimation()
         guard visible else {
             cancelHoverPeekLifecycle()
+            cancelPointerDismissedFullScreenLifecycle()
             endPinnedTerminalSession()
             terminalPanel.orderOut(nil)
             companionPanel.orderOut(nil)
@@ -1759,6 +2217,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     func hideTerminalForCompanionDrag() {
         guard presentation != .collapsed else { return }
         cancelHoverPeekLifecycle()
+        cancelPointerDismissedFullScreenLifecycle()
         endPinnedTerminalSession()
         visibilityGeneration += 1
         let generation = visibilityGeneration
@@ -1773,6 +2232,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     func close() {
         cancelHoverPeekLifecycle()
+        cancelPointerDismissedFullScreenLifecycle()
         endPinnedTerminalSession()
         resetLivePlacementAnimation()
         terminalMoveSettleGeneration += 1
@@ -1886,6 +2346,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         dropIsTargeted = targeted
         if targeted {
             cancelHoverIntent()
+            cancelTerminalHoverPrewarm()
         }
         dropFeedback.setTargeted(targeted)
         mascotHostView?.setQuickActionsVisible(
@@ -1899,6 +2360,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
               !interceptingExternalFileDrag,
               presentation == .collapsed else { return }
 
+        beginTerminalHoverPrewarm()
         cancelHoverIntent()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
@@ -1907,11 +2369,15 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                   !self.dropIsTargeted,
                   !self.interceptingExternalFileDrag,
                   self.presentation == .collapsed else { return }
+            self.hoverPeekRequiresPreference = true
             self.hoverPeekOwnsPresentation = true
             guard self.manager?.presentTerminalPeek(id: self.runtimeID) == true else {
                 self.hoverPeekOwnsPresentation = false
+                self.cancelTerminalHoverPrewarm()
                 return
             }
+            // The normal visible-surface policy now owns the renderer.
+            self.terminalHoverPrewarmIsActive = false
             self.startHoverPresenceTimer()
         }
         hoverIntentWorkItem = workItem
@@ -1925,6 +2391,8 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         cancelHoverIntent()
         if hoverPeekOwnsPresentation {
             updateHoverPresence()
+        } else {
+            cancelTerminalHoverPrewarm()
         }
     }
 
@@ -1946,12 +2414,29 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private func updateHoverPresence() {
         guard hoverPeekOwnsPresentation,
-              presentation == .compact,
               terminalPanel.isVisible else {
             stopHoverPresenceTimer()
             return
         }
-        guard GaiCompanionHoverPeekPreference.isEnabled else {
+        if presentation == .maximized {
+            // A hover-owned terminal that expands keeps pointer ownership:
+            // leaving its full-screen frame still closes it, like the compact
+            // preview. The mascot frame stays legal during the expansion so a
+            // click-hovered doudou cannot kill its own terminal mid-animation.
+            hoverPeekOwnsPresentation = false
+            hoverPeekRequiresPreference = true
+            stopHoverPresenceTimer()
+            let mascotFrame = mascotHostView?.mascotSpriteScreenFrame() ?? .zero
+            dismissFullScreenTerminalWhenPointerLeaves(
+                targetFrame: terminalPanel.frame.union(mascotFrame))
+            return
+        }
+        guard presentation == .compact else {
+            stopHoverPresenceTimer()
+            return
+        }
+        guard !hoverPeekRequiresPreference
+                || GaiCompanionHoverPeekPreference.isEnabled else {
             dismissHoverPeek()
             return
         }
@@ -1985,12 +2470,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
                 point,
                 mascotFrame: mascotFrame,
                 terminalFrame: terminalPanel.frame),
-              let previous = hoverBridgeLastPointer,
-              GaiCompanionHoverBridge.isProgressing(
-                from: previous,
-                to: point,
-                terminalFrame: terminalPanel.frame)
-        else { return false }
+              let previous = hoverBridgeLastPointer
+        else {
+            guard let lastMotion = hoverBridgeLastMotionAt else { return false }
+            return timestamp - lastMotion <= Self.hoverBridgeIdleTimeout
+        }
 
         let movement = hypot(point.x - previous.x, point.y - previous.y)
         if movement >= Self.hoverBridgeMinimumMotion {
@@ -2003,6 +2487,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private func dismissHoverPeek() {
         guard hoverPeekOwnsPresentation else { return }
+        if runtime?.isTerminalLocked == true {
+            keepTerminalOpen()
+            return
+        }
         // Keep ownership true until the manager has validated and collapsed
         // this exact hover preview. Clearing it first makes the manager reject
         // the dismissal as stale, leaving one compact terminal permanently
@@ -2010,12 +2498,30 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         stopHoverPresenceTimer()
         manager?.dismissTerminalPeek(id: runtimeID)
         hoverPeekOwnsPresentation = false
+        hoverPeekRequiresPreference = true
     }
 
     private func cancelHoverPeekLifecycle() {
         hoverPeekOwnsPresentation = false
+        hoverPeekRequiresPreference = true
         cancelHoverIntent()
         stopHoverPresenceTimer()
+        cancelTerminalHoverPrewarm()
+    }
+
+    private func beginTerminalHoverPrewarm() {
+        guard !terminalHoverPrewarmIsActive,
+              presentation == .collapsed,
+              let surfaceView = runtime?.surfaceView else { return }
+        terminalHoverPrewarmIsActive = true
+        surfaceView.gaiPrewarmTerminalPresentation()
+    }
+
+    private func cancelTerminalHoverPrewarm() {
+        guard terminalHoverPrewarmIsActive else { return }
+        terminalHoverPrewarmIsActive = false
+        guard presentation == .collapsed else { return }
+        runtime?.surfaceView?.gaiCancelTerminalPresentationPrewarm()
     }
 
     private func cancelHoverIntent() {
@@ -2287,7 +2793,20 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 private struct GaiCompanionHubView: View {
     @ObservedObject var state: GaiCompanionHubState
 
-    private let colorway = GaiCompanionColorway.hubColorway
+    private var notificationProjection: GaiCompanionNotificationProjection {
+        state.visibleNotificationProjection
+    }
+    private var colorway: GaiCompanionColorway {
+        notificationProjection.colorway
+    }
+    private var animation: GaiCompanionAnimation {
+        notificationProjection.count == 0 ? .idle : .jumping
+    }
+    private var notificationCountLabel: String {
+        notificationProjection.count > 99
+            ? "99+"
+            : "\(notificationProjection.count)"
+    }
     private var scaleFactor: CGFloat {
         CGFloat(GaiCompanionVisualMetrics.scaleFactor(for: state.scalePercent))
     }
@@ -2303,7 +2822,7 @@ private struct GaiCompanionHubView: View {
             VStack(spacing: -4 * scaleFactor) {
                 GaiCompanionSpriteView(
                     colorway: colorway,
-                    animation: .idle,
+                    animation: animation,
                     size: spriteWidth)
                     .shadow(
                         color: Color.white.opacity(0.18),
@@ -2312,30 +2831,26 @@ private struct GaiCompanionHubView: View {
             }
             .padding(.bottom, 2 * scaleFactor)
 
-            if state.companionCount > 0, state.isHovered {
+            if notificationProjection.count > 0 {
                 VStack {
                     HStack {
                         Spacer()
-                        Text("\(state.companionCount)")
+                        Text(notificationCountLabel)
                             .font(.system(
                                 size: 10 * scaleFactor,
                                 weight: .bold,
                                 design: .rounded))
-                            .foregroundStyle(.white.opacity(0.96))
-                            .padding(.horizontal, 6 * scaleFactor)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5.5 * scaleFactor)
                             .padding(.vertical, 3 * scaleFactor)
                             .background {
                                 Capsule(style: .continuous)
-                                    .fill(.ultraThinMaterial)
-                                    .overlay {
-                                        Capsule(style: .continuous)
-                                            .fill(Color.white.opacity(0.12))
-                                    }
+                                    .fill(Color(red: 0.96, green: 0.16, blue: 0.20))
                                     .overlay {
                                         Capsule(style: .continuous)
                                             .stroke(
-                                                .white.opacity(0.32),
-                                                lineWidth: 0.8 * scaleFactor)
+                                                .white.opacity(0.45),
+                                                lineWidth: 0.7 * scaleFactor)
                                     }
                             }
                             .shadow(
@@ -2352,9 +2867,17 @@ private struct GaiCompanionHubView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .animation(.easeOut(duration: 0.14), value: state.isHovered)
+        .animation(
+            .easeOut(duration: 0.14),
+            value: notificationProjection.count)
         .accessibilityLabel("Pile de \(state.companionCount) doudous")
-        .accessibilityValue(state.isExpanded ? "Ouverte" : "Fermée")
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var accessibilityValue: String {
+        let presentation = state.isExpanded ? "Ouverte" : "Fermée"
+        guard notificationProjection.count > 0 else { return presentation }
+        return "\(presentation), \(notificationProjection.count) notifications"
     }
 
 }
@@ -2707,21 +3230,23 @@ private struct GaiCompanionLiveTerminalView: View {
                     }
                     .help("Move terminal window")
 
-                GaiCompanionHeaderIconButton(
-                    symbol: "waveform",
-                    help: "Lire vocalement la dernière réponse de la CLI",
-                    size: 18,
-                    accessibilityLabel: "Lire la dernière réponse",
-                    action: onReplayLatestResponse)
+                if TeddyVoiceAvailability.isEnabled {
+                    GaiCompanionHeaderIconButton(
+                        symbol: "waveform",
+                        help: "Lire vocalement la dernière réponse de la CLI",
+                        size: 18,
+                        accessibilityLabel: "Lire la dernière réponse",
+                        action: onReplayLatestResponse)
+                }
                 GaiCompanionHeaderIconButton(
                     symbol: runtime.isTerminalLocked ? "lock.fill" : "lock.open",
                     help: runtime.isTerminalLocked
-                        ? "Close terminal when focus moves away"
-                        : "Keep terminal open when clicking outside",
+                        ? "Autoriser le masquage à la perte de focus"
+                        : "Garder le terminal ouvert",
                     emphasized: runtime.isTerminalLocked,
                     foreground: runtime.isTerminalLocked ? accent : .white,
                     size: 18,
-                    accessibilityLabel: "Keep terminal open",
+                    accessibilityLabel: "Garder le terminal ouvert",
                     accessibilityValue: runtime.isTerminalLocked ? "On" : "Off",
                     action: onToggleLock)
                 GaiCompanionLayoutPresetMenu(onSelect: onApplyLayoutPreset)
@@ -2732,7 +3257,7 @@ private struct GaiCompanionLiveTerminalView: View {
                     action: onToggleMaximized)
                 GaiCompanionHeaderIconButton(
                     symbol: "xmark",
-                    help: "Kill terminal and remove agent",
+                    help: "Masquer le terminal sans arrêter l’agent",
                     size: 18,
                     action: onClose)
         }
