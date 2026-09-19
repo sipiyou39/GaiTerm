@@ -2447,7 +2447,8 @@ final class GaiCompanionManager: NSObject, ObservableObject {
                 workArea.height))
         let rawCandidates = rawPreviewCandidates(
             companionFrame: companionFrame,
-            terminalSize: size)
+            terminalSize: size,
+            scalePercent: runtime.record.scalePercent)
         let obstacles = panelControllers.compactMap { id, controller -> [NSRect]? in
             guard id != runtime.id else { return nil }
             var frames: [NSRect] = []
@@ -2485,34 +2486,40 @@ final class GaiCompanionManager: NSObject, ObservableObject {
 
     private func rawPreviewCandidates(
         companionFrame: NSRect,
-        terminalSize: NSSize
+        terminalSize: NSSize,
+        scalePercent: GaiCompanionScalePercent
     ) -> [GaiCompanionPreviewGeometry] {
+        func gap(_ edge: GaiCompanionTerminalPlacement) -> CGFloat {
+            CGFloat(GaiCompanionVisualMetrics.terminalGap(
+                edge: edge,
+                scalePercent: scalePercent))
+        }
         return [
             GaiCompanionPreviewGeometry(
                 placement: .top,
                 terminalFrame: NSRect(
                     x: companionFrame.midX - terminalSize.width / 2,
-                    y: companionFrame.maxY + Self.terminalGap,
+                    y: companionFrame.maxY + gap(.top),
                     width: terminalSize.width,
                     height: terminalSize.height)),
             GaiCompanionPreviewGeometry(
                 placement: .bottom,
                 terminalFrame: NSRect(
                     x: companionFrame.midX - terminalSize.width / 2,
-                    y: companionFrame.minY - Self.terminalGap - terminalSize.height,
+                    y: companionFrame.minY - gap(.bottom) - terminalSize.height,
                     width: terminalSize.width,
                     height: terminalSize.height)),
             GaiCompanionPreviewGeometry(
                 placement: .right,
                 terminalFrame: NSRect(
-                    x: companionFrame.maxX + Self.terminalGap,
+                    x: companionFrame.maxX + gap(.right),
                     y: companionFrame.midY - terminalSize.height / 2,
                     width: terminalSize.width,
                     height: terminalSize.height)),
             GaiCompanionPreviewGeometry(
                 placement: .left,
                 terminalFrame: NSRect(
-                    x: companionFrame.minX - Self.terminalGap - terminalSize.width,
+                    x: companionFrame.minX - gap(.left) - terminalSize.width,
                     y: companionFrame.midY - terminalSize.height / 2,
                     width: terminalSize.width,
                     height: terminalSize.height)),
@@ -2572,7 +2579,6 @@ final class GaiCompanionManager: NSObject, ObservableObject {
     }
 
     private static let screenMargin: CGFloat = 12
-    private static let terminalGap: CGFloat = 8
     private static let expandedTerminalScreenMargin: CGFloat = 10
 
     private func targetScreen(for runtime: GaiCompanionRuntime) -> NSScreen {

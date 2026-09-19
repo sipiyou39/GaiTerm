@@ -54,6 +54,26 @@ private final class GaiCompanionFirstMouseHostingView<Content: View>: NSHostingV
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// Published placement of the speech-bubble tail drawn on the compact
+/// terminal's mascot-facing edge. `anchor == nil` hides the tail entirely
+/// (collapsed/maximized presentations, or before the first laid-out frame).
+private final class GaiCompanionTailMetrics: ObservableObject {
+    @Published private(set) var edge: GaiCompanionTerminalPlacement = .top
+    @Published private(set) var anchor: CGFloat?
+    /// Strip thickness — how far the tail reaches past the terminal's edge.
+    @Published private(set) var length: CGFloat = 0
+
+    func update(edge: GaiCompanionTerminalPlacement, anchor: CGFloat, length: CGFloat) {
+        if self.edge != edge { self.edge = edge }
+        if self.anchor != anchor { self.anchor = anchor }
+        if self.length != length { self.length = length }
+    }
+
+    func hide() {
+        if anchor != nil { anchor = nil }
+    }
+}
+
 private final class GaiCompanionDropFeedback: ObservableObject {
     @Published private(set) var isTargeted = false
     @Published private(set) var acceptedFileCount: Int?
@@ -355,6 +375,10 @@ private final class GaiCompanionDisplayLink {
 private struct GaiCompanionPlacementTransition {
     let terminalFrom: CGPoint
     let terminalTo: CGPoint
+    /// Pure terminal rect at destination. The FLIP interpolates origins only,
+    /// so completion snaps the exact frame — including a tail strip that moved
+    /// to another edge — instead of leaving the pre-transition size in place.
+    let terminalTarget: NSRect
     let startedAt: CFTimeInterval
 }
 
@@ -403,7 +427,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     private let runtimeID: UUID
     private weak var manager: GaiCompanionManager?
+    private weak var runtime: GaiCompanionRuntime?
     private let dropFeedback: GaiCompanionDropFeedback
+    private let tailMetrics = GaiCompanionTailMetrics()
+    private var appliedTailEdge: GaiCompanionTerminalPlacement?
+    private var appliedTailReach: CGFloat = 0
     private var dropIsTargeted = false
     private var applyingCompanionFrame = false
     private var applyingTerminalFrame = false
@@ -445,6 +473,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
     init(runtime: GaiCompanionRuntime, manager: GaiCompanionManager) {
         runtimeID = runtime.id
+        self.runtime = runtime
         self.manager = manager
         let dropFeedback = GaiCompanionDropFeedback()
         self.dropFeedback = dropFeedback
@@ -552,6 +581,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
         let terminalRoot = GaiCompanionTerminalView(
             runtime: runtime,
+            tailMetrics: tailMetrics,
             onToggleMaximized: { [weak manager] in manager?.toggleMaximized(id: runtime.id) },
             onApplyLayoutPreset: { [weak manager] preset in
                 manager?.applyExpandedTerminalLayout(id: runtime.id, preset: preset)
@@ -570,7 +600,7 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         let terminalHost = GaiCompanionFirstMouseHostingView(rootView: terminalRoot)
         terminalHost.autoresizingMask = [.width, .height]
         terminalHost.wantsLayer = true
-        terminalHost.layer?.cornerRadius = 8
+        terminalHost.layer?.cornerRadius = GaiCompanionVisualMetrics.terminalCornerRadius
         terminalHost.layer?.cornerCurve = .continuous
         terminalHost.layer?.masksToBounds = true
         terminalPanel.contentView = terminalHost
@@ -593,6 +623,10 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         visibilityGeneration += 1
         let generation = visibilityGeneration
         self.presentation = presentation
+        if presentation != .compact {
+            appliedTailEdge = nil
+            tailMetrics.hide()
+        }
         if presentation != .maximized {
             terminalMoveSettleGeneration += 1
             terminalMoveSettleWorkItem?.cancel()
@@ -846,6 +880,11 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         if window === terminalPanel {
+            // A dragged compact terminal keeps its attachment: re-aim the tail
+            // at the mascot while it slides along the facing edge.
+            if presentation == .compact, !applyingTerminalFrame {
+                updateTerminalTail()
+            }
             guard presentation == .maximized, !applyingTerminalFrame else { return }
             scheduleTerminalMoveSettle()
             return
@@ -960,7 +999,9 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
 
         placementTransition = GaiCompanionPlacementTransition(
             terminalFrom: relativeOrigin(of: terminalPanel, anchor: anchor),
-            terminalTo: relativeOrigin(of: terminalFrame, anchor: anchor),
+            terminalTo: relativeOrigin(
+                of: terminalWindowFrame(for: terminalFrame), anchor: anchor),
+            terminalTarget: terminalFrame,
             startedAt: CACurrentMediaTime())
         placementDisplayLink.start()
     }
@@ -1006,9 +1047,16 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
             setWindowOrigin(
                 terminalPanel,
                 to: CGPoint(x: anchor.x + terminalOffset.x, y: anchor.y + terminalOffset.y))
+            updateTerminalTail()
         }
 
         if linearProgress >= 1 {
+            // The origin interpolation ends exact, but a side change can move
+            // the tail strip to another edge — snapping the raw target frame
+            // also settles the size change through `setTerminalFrame`.
+            if presentation == .compact, terminalPanel.isVisible {
+                setWindowFrame(terminalPanel, to: transition.terminalTarget)
+            }
             placementTransition = nil
             placementDisplayLink.stop()
         }
@@ -1050,9 +1098,96 @@ final class GaiCompanionPanelController: NSObject, NSWindowDelegate {
         display: Bool,
         animate: Bool
     ) {
+        let reach = terminalTailReach(for: frame)
         applyingTerminalFrame = true
-        terminalPanel.setFrame(frame, display: display, animate: animate)
+        terminalPanel.setFrame(
+            terminalWindowFrame(for: frame, reach: reach),
+            display: display,
+            animate: animate)
         applyingTerminalFrame = false
+        appliedTailEdge = presentation == .compact ? livePlacement : nil
+        appliedTailReach = presentation == .compact ? reach : 0
+        updateTerminalTail()
+    }
+
+    /// Compact windows grow a transparent strip on their mascot-facing edge
+    /// where the speech-bubble tail is drawn. `terminalFrame` values produced
+    /// by the manager stay the pure terminal rect everywhere else.
+    private func terminalWindowFrame(for frame: NSRect) -> NSRect {
+        terminalWindowFrame(for: frame, reach: terminalTailReach(for: frame))
+    }
+
+    private func terminalWindowFrame(for frame: NSRect, reach: CGFloat) -> NSRect {
+        guard presentation == .compact else { return frame }
+        var expanded = frame
+        switch livePlacement {
+        case .top:
+            expanded.origin.y -= reach
+            expanded.size.height += reach
+        case .bottom:
+            expanded.size.height += reach
+        case .right:
+            expanded.origin.x -= reach
+            expanded.size.width += reach
+        case .left:
+            expanded.size.width += reach
+        }
+        return expanded
+    }
+
+    /// How far the tail reaches: across the real gap and the mascot panel's
+    /// transparent pad, stopping just short of the sprite or badge so a sliver
+    /// of air separates the tip from the doudou. The elastic cap keeps a
+    /// dragged-away terminal tethered with a proportional tail instead of an
+    /// absurd spike.
+    private func terminalTailReach(for frame: NSRect) -> CGFloat {
+        let mascot = companionPanel.frame
+        let gap: CGFloat
+        switch livePlacement {
+        case .top: gap = frame.minY - mascot.maxY
+        case .bottom: gap = mascot.minY - frame.maxY
+        case .right: gap = frame.minX - mascot.maxX
+        case .left: gap = mascot.minX - frame.maxX
+        }
+        let scale = runtime?.record.scalePercent ?? .standard
+        let inset = CGFloat(GaiCompanionVisualMetrics.mascotOpaqueInset(
+            edge: livePlacement,
+            scalePercent: scale))
+        let target = gap + inset - CGFloat(GaiCompanionVisualMetrics.terminalTailTipGap)
+        let cap = max(
+            CGFloat(GaiCompanionVisualMetrics.terminalTailMaxReach),
+            gap * 0.6)
+        return min(
+            max(target, CGFloat(GaiCompanionVisualMetrics.terminalTailMinReach)),
+            cap)
+    }
+
+    /// Aims the tail at the mascot's center, clamped onto the
+    /// straight segment of the facing edge so the base never lands on a
+    /// rounded corner. Side edges keep the base under the terminal body —
+    /// below the header strip — so a single fill color stays seamless.
+    private func updateTerminalTail() {
+        guard presentation == .compact, let edge = appliedTailEdge else {
+            tailMetrics.hide()
+            return
+        }
+        let window = terminalPanel.frame
+        let mascot = companionPanel.frame
+        let corner = CGFloat(GaiCompanionVisualMetrics.terminalCornerRadius)
+        let halfBase = CGFloat(GaiCompanionVisualMetrics.terminalTailBase) / 2
+        let anchor: CGFloat
+        switch edge {
+        case .top, .bottom:
+            let lower = corner + halfBase
+            let upper = max(lower, window.width - corner - halfBase)
+            anchor = min(max(mascot.midX - window.minX, lower), upper)
+        case .left, .right:
+            // The strip runs top-down in view coordinates.
+            let lower = GaiStageMetrics.paneHeaderHeight + corner + halfBase
+            let upper = max(lower, window.height - corner - halfBase)
+            anchor = min(max(window.maxY - mascot.midY, lower), upper)
+        }
+        tailMetrics.update(edge: edge, anchor: anchor, length: appliedTailReach)
     }
 
     private func screenNumber(for screen: NSScreen) -> NSNumber? {
@@ -1419,6 +1554,7 @@ private struct GaiCompanionMascotView: View {
 /// directly attached to the terminal surface, with no surrounding card.
 private struct GaiCompanionTerminalView: View {
     @ObservedObject var runtime: GaiCompanionRuntime
+    @ObservedObject var tailMetrics: GaiCompanionTailMetrics
 
     let onToggleMaximized: () -> Void
     let onApplyLayoutPreset: (GaiCompanionTerminalLayoutPreset) -> Void
@@ -1428,7 +1564,89 @@ private struct GaiCompanionTerminalView: View {
     let onChooseDirectory: (String) -> Void
     let onDirectoryDialogVisibilityChanged: (Bool) -> Void
 
+    @AppStorage(GaiPreferenceKey.tintGlassWithWorkspaceAccent) private var tintPanels = false
+
+    private var accent: Color { Color(gaiRGB: runtime.record.colorway.palette.baseRGB) }
+    /// The tail continues whichever chrome color borders its edge: header tint
+    /// on the top edge, terminal body elsewhere.
+    private var tailColor: Color {
+        tailMetrics.edge == .bottom
+            ? Color.gaiPanelColor(accent: accent, tinted: tintPanels)
+            : Color.gaiTerminalPaneColor(accent: accent, tinted: tintPanels, active: false)
+    }
+
     var body: some View {
+        if let anchor = tailMetrics.anchor {
+            bubbledBody(anchor: anchor)
+        } else {
+            terminalContent
+                .overlay {
+                    RoundedRectangle(
+                        cornerRadius: CGFloat(GaiCompanionVisualMetrics.terminalCornerRadius),
+                        style: .continuous)
+                    .strokeBorder(
+                        accent.opacity(0.5),
+                        lineWidth: CGFloat(GaiCompanionVisualMetrics.terminalAccentStrokeWidth))
+                    .allowsHitTesting(false)
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func bubbledBody(anchor: CGFloat) -> some View {
+        Group {
+            switch tailMetrics.edge {
+            case .top:
+                VStack(spacing: 0) {
+                    terminalContent
+                    tailStrip(anchor: anchor)
+                        .frame(height: tailMetrics.length)
+                }
+            case .bottom:
+                VStack(spacing: 0) {
+                    tailStrip(anchor: anchor)
+                        .frame(height: tailMetrics.length)
+                    terminalContent
+                }
+            case .right:
+                HStack(spacing: 0) {
+                    tailStrip(anchor: anchor)
+                        .frame(width: tailMetrics.length)
+                    terminalContent
+                }
+            case .left:
+                HStack(spacing: 0) {
+                    terminalContent
+                    tailStrip(anchor: anchor)
+                        .frame(width: tailMetrics.length)
+                }
+            }
+        }
+        .overlay {
+            GaiCompanionBubbleOutlineShape(
+                edge: tailMetrics.edge,
+                anchor: anchor,
+                tailLength: tailMetrics.length)
+            .stroke(
+                accent.opacity(0.5),
+                lineWidth: CGFloat(GaiCompanionVisualMetrics.terminalAccentStrokeWidth))
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// The tail doubles as a grab handle: the drag area sits under the drawn
+    /// triangle so pulling it still moves the whole window.
+    private func tailStrip(anchor: CGFloat) -> some View {
+        GaiCompanionWindowDragArea()
+            .overlay {
+                GaiCompanionBubbleTailShape(edge: tailMetrics.edge, anchor: anchor)
+                    .fill(tailColor)
+                    .allowsHitTesting(false)
+            }
+            .accessibilityHidden(true)
+    }
+
+    private var terminalContent: some View {
         Group {
             if let surface = runtime.surfaceView {
                 GaiCompanionLiveTerminalView(
@@ -1453,6 +1671,149 @@ private struct GaiCompanionTerminalView: View {
                     .background(Color(red: 0.11, green: 0.11, blue: 0.118))
             }
         }
+    }
+}
+
+/// Speech-bubble pointer drawn in the compact terminal's transparent edge
+/// strip. `anchor` is the tip position along that edge, measured top-down /
+/// left-right in the strip's own coordinates; the tip is softly rounded.
+private struct GaiCompanionBubbleTailShape: Shape {
+    var edge: GaiCompanionTerminalPlacement
+    var anchor: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let half = CGFloat(GaiCompanionVisualMetrics.terminalTailBase) / 2
+        let tipRadius = CGFloat(GaiCompanionVisualMetrics.terminalTailTipRadius)
+        var path = Path()
+        switch edge {
+        case .top:
+            // Strip below the content — tip points down at the mascot.
+            path.move(to: CGPoint(x: anchor - half, y: rect.minY))
+            path.addLine(to: CGPoint(x: anchor - tipRadius, y: rect.maxY - tipRadius))
+            path.addQuadCurve(
+                to: CGPoint(x: anchor + tipRadius, y: rect.maxY - tipRadius),
+                control: CGPoint(x: anchor, y: rect.maxY + tipRadius * 0.6))
+            path.addLine(to: CGPoint(x: anchor + half, y: rect.minY))
+        case .bottom:
+            path.move(to: CGPoint(x: anchor - half, y: rect.maxY))
+            path.addLine(to: CGPoint(x: anchor - tipRadius, y: rect.minY + tipRadius))
+            path.addQuadCurve(
+                to: CGPoint(x: anchor + tipRadius, y: rect.minY + tipRadius),
+                control: CGPoint(x: anchor, y: rect.minY - tipRadius * 0.6))
+            path.addLine(to: CGPoint(x: anchor + half, y: rect.maxY))
+        case .right:
+            // Strip on the window's left edge — tip points left.
+            path.move(to: CGPoint(x: rect.maxX, y: anchor - half))
+            path.addLine(to: CGPoint(x: rect.minX + tipRadius, y: anchor - tipRadius))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.minX + tipRadius, y: anchor + tipRadius),
+                control: CGPoint(x: rect.minX - tipRadius * 0.6, y: anchor))
+            path.addLine(to: CGPoint(x: rect.maxX, y: anchor + half))
+        case .left:
+            path.move(to: CGPoint(x: rect.minX, y: anchor - half))
+            path.addLine(to: CGPoint(x: rect.maxX - tipRadius, y: anchor - tipRadius))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.maxX - tipRadius, y: anchor + tipRadius),
+                control: CGPoint(x: rect.maxX + tipRadius * 0.6, y: anchor))
+            path.addLine(to: CGPoint(x: rect.minX, y: anchor + half))
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The compact terminal's full bubble silhouette: one continuous outline that
+/// detours out to the tail tip on the mascot-facing edge, so the accent stroke
+/// reads as a speech bubble rather than a rect with a triangle stuck on it.
+private struct GaiCompanionBubbleOutlineShape: Shape {
+    var edge: GaiCompanionTerminalPlacement
+    var anchor: CGFloat
+    var tailLength: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        // Half-stroke inset keeps the line fully inside the window.
+        let halfStroke = CGFloat(GaiCompanionVisualMetrics.terminalAccentStrokeWidth) / 2
+        let bounds = rect.insetBy(dx: halfStroke, dy: halfStroke)
+        switch edge {
+        case .top:
+            return Self.bubbleOutlineDown(
+                in: bounds,
+                anchor: anchor,
+                tailLength: tailLength)
+        case .bottom:
+            return Self.bubbleOutlineDown(
+                    in: bounds,
+                    anchor: anchor,
+                    tailLength: tailLength)
+                .applying(CGAffineTransform(
+                    a: 1, b: 0, c: 0, d: -1,
+                    tx: 0, ty: bounds.minY + bounds.maxY))
+        case .right:
+            // Tail on the left edge: rotate the canonical outline so its
+            // bottom edge lands on the window's left side.
+            return Self.bubbleOutlineDown(
+                    in: CGRect(
+                        x: 0, y: 0,
+                        width: bounds.height, height: bounds.width),
+                    anchor: anchor - bounds.minY,
+                    tailLength: tailLength)
+                .applying(CGAffineTransform(
+                    a: 0, b: 1, c: -1, d: 0,
+                    tx: bounds.maxX, ty: bounds.minY))
+        case .left:
+            return Self.bubbleOutlineDown(
+                    in: CGRect(
+                        x: 0, y: 0,
+                        width: bounds.height, height: bounds.width),
+                    anchor: anchor - bounds.minY,
+                    tailLength: tailLength)
+                .applying(CGAffineTransform(
+                    a: 0, b: 1, c: 1, d: 0,
+                    tx: bounds.minX, ty: bounds.minY))
+        }
+    }
+
+    /// Continuous outline with the tail centered on `anchor` along the bottom
+    /// edge, tip pointing down. The pinch is clamped onto the straight segment
+    /// between the corner arcs.
+    private static func bubbleOutlineDown(
+        in rect: CGRect,
+        anchor: CGFloat,
+        tailLength: CGFloat
+    ) -> Path {
+        let corner = CGFloat(GaiCompanionVisualMetrics.terminalCornerRadius)
+        let half = CGFloat(GaiCompanionVisualMetrics.terminalTailBase) / 2
+        let tipRadius = CGFloat(GaiCompanionVisualMetrics.terminalTailTipRadius)
+        let baseY = rect.maxY - tailLength
+        let tip = min(
+            max(anchor, rect.minX + corner + half),
+            rect.maxX - corner - half)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + corner, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - corner, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + corner),
+            control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: baseY - corner))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - corner, y: baseY),
+            control: CGPoint(x: rect.maxX, y: baseY))
+        path.addLine(to: CGPoint(x: tip + half, y: baseY))
+        path.addLine(to: CGPoint(x: tip + tipRadius, y: rect.maxY - tipRadius))
+        path.addQuadCurve(
+            to: CGPoint(x: tip - tipRadius, y: rect.maxY - tipRadius),
+            control: CGPoint(x: tip, y: rect.maxY + tipRadius * 0.6))
+        path.addLine(to: CGPoint(x: tip - half, y: baseY))
+        path.addLine(to: CGPoint(x: rect.minX + corner, y: baseY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: baseY - corner),
+            control: CGPoint(x: rect.minX, y: baseY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + corner))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + corner, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY))
+        path.closeSubpath()
+        return path
     }
 }
 

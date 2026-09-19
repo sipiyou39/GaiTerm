@@ -259,6 +259,52 @@ enum GaiCompanionVisualMetrics {
     static func scaledSpriteWidth(for scalePercent: GaiCompanionScalePercent) -> Double {
         (baseSpriteWidth * scaleFactor(for: scalePercent)).rounded()
     }
+
+    /// Speech-bubble tail drawn on the compact terminal's mascot-facing edge.
+    /// The window grows a transparent strip on that edge; the triangle keeps
+    /// its base on the straight segment between the corner radii so it always
+    /// reads as part of the window chrome.
+    static let terminalCornerRadius = 8.0
+    static let terminalTailBase = 60.0
+    static let terminalTailTipRadius = 5.0
+    static let terminalTailTipGap = 30.0
+    static let terminalTailLength = 34.0
+    static let terminalTailMinReach = 18.0
+    static let terminalTailMaxReach = 80.0
+    static let terminalAccentStrokeWidth = 1.5
+
+    /// Distance from the mascot panel's facing edge to its first opaque pixels
+    /// (sprite or name badge). The tail tip stops just short of it, leaving a
+    /// sliver of air so the bubble points at the doudou without touching it.
+    static func mascotOpaqueInset(
+        edge: GaiCompanionTerminalPlacement,
+        scalePercent: GaiCompanionScalePercent
+    ) -> Double {
+        let scale = scaleFactor(for: scalePercent)
+        switch edge {
+        case .top:
+            // Sprite + bottom-aligned badge leave this transparent pad on top.
+            return 44 * scale
+        case .bottom:
+            // The name badge capsule ends close to the panel's bottom edge.
+            return 19 * scale
+        case .left, .right:
+            // The sprite view keeps wide transparent margins around the bear.
+            return 39 * scale
+        }
+    }
+
+    /// Gap between the mascot panel edge and the compact terminal. The
+    /// panel's transparent padding differs per edge, so the gap adapts to
+    /// keep the visible terminal-to-sprite distance — and therefore the
+    /// bubble tail's shape — identical on all four sides.
+    static func terminalGap(
+        edge: GaiCompanionTerminalPlacement,
+        scalePercent: GaiCompanionScalePercent
+    ) -> Double {
+        terminalTailLength + terminalTailTipGap
+            - mascotOpaqueInset(edge: edge, scalePercent: scalePercent)
+    }
 }
 
 /// Persisted companion configuration. Runtime-only state such as the live PTY,
