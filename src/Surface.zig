@@ -1840,6 +1840,24 @@ pub fn setGaiTermBackgroundColor(
     };
 }
 
+/// Set the rendered terminal background opacity without reloading the whole
+/// surface configuration. GaiTerm/DexSpot use this so panel glass shows
+/// through the terminal area. Clears any GaiTerm background override so the
+/// rendered alpha is no longer forced opaque.
+pub fn setGaiTermBackgroundOpacity(
+    self: *Surface,
+    opacity: f64,
+) void {
+    _ = self.renderer_thread.mailbox.push(
+        .{ .gaiterm_background_opacity = opacity },
+        .{ .forever = {} },
+    );
+
+    self.queueRender() catch |err| {
+        log.warn("failed to notify renderer of GaiTerm background opacity err={}", .{err});
+    };
+}
+
 const InitialSizeError = error{
     ContentScaleUnavailable,
     AppActionFailed,

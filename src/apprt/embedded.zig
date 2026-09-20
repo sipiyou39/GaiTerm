@@ -1638,6 +1638,17 @@ pub const CAPI = struct {
         });
     }
 
+    /// Update only the rendered terminal background opacity for this
+    /// surface. Lets platform chrome (glass) behind the Metal layer show
+    /// through the terminal area. Clears any opaque GaiTerm background
+    /// override so the alpha is no longer forced to 255.
+    export fn ghostty_surface_set_background_opacity(
+        surface: *Surface,
+        opacity: f64,
+    ) void {
+        surface.core_surface.setGaiTermBackgroundOpacity(opacity);
+    }
+
     /// Returns true if the surface needs to confirm quitting.
     export fn ghostty_surface_needs_confirm_quit(surface: *Surface) bool {
         return surface.core_surface.needsConfirmQuit();

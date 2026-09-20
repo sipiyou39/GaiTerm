@@ -60,6 +60,11 @@ pub const Message = union(enum) {
     /// focus/non-focus tone changes and updates the renderer-owned state.
     gaiterm_background: terminal.color.RGB,
 
+    /// GaiTerm pane background opacity override. This bypasses full config
+    /// reloads and updates the renderer-owned state, clearing any opaque
+    /// gaiterm_background so the alpha is no longer forced to 255.
+    gaiterm_background_opacity: f64,
+
     /// Matches for the current viewport from the search thread. These happen
     /// async so they may be off for a frame or two from the actually rendered
     /// viewport. The renderer must handle this gracefully.

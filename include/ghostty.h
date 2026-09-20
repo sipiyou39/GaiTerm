@@ -1111,6 +1111,8 @@ GHOSTTY_API void ghostty_surface_set_background_rgb(ghostty_surface_t,
                                                     uint8_t,
                                                     uint8_t,
                                                     uint8_t);
+GHOSTTY_API void ghostty_surface_set_background_opacity(ghostty_surface_t,
+                                                        double);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);

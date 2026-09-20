@@ -1974,6 +1974,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.uniforms.bg_color = .{ rgb.r, rgb.g, rgb.b, 255 };
         }
 
+        /// GaiTerm updates pane translucency without a full config reload.
+        /// Clearing `gaiterm_background` hands the alpha channel back to
+        /// `background_opacity` so platform chrome behind the Metal layer
+        /// (e.g. the DexSpot panel glass) shows through.
+        pub fn setGaiTermBackgroundOpacity(self: *Self, opacity: f64) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+
+            self.config.background_opacity = @max(0, @min(1, opacity));
+            self.gaiterm_background = null;
+            self.terminal_state.dirty = .full;
+
+            const bg = self.terminal_state.colors.background;
+            self.uniforms.bg_color = .{
+                bg.r,
+                bg.g,
+                bg.b,
+                @intFromFloat(@round(self.config.background_opacity * 255.0)),
+            };
+        }
+
         /// Resize the screen.
         pub fn setScreenSize(
             self: *Self,

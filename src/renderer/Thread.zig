@@ -482,6 +482,9 @@ fn drainMailbox(self: *Thread) !void {
 
             .gaiterm_background => |rgb| self.renderer.setGaiTermBackgroundColor(rgb),
 
+            .gaiterm_background_opacity => |opacity| self.renderer
+                .setGaiTermBackgroundOpacity(opacity),
+
             .search_viewport_matches => |v| {
                 // Note we don't free the new value because we expect our
                 // allocators to match.
